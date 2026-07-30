@@ -209,6 +209,41 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Website monitor operational data and secrets
+.runtime/
+.workspaces/
+artifacts/
+audit-exports/
+browser-profiles/
+connector-config/
+diffs/
+drive-exports/
+fetched/
+logs/
+outbox-exports/
+replays/
+runs/
+sheets-exports/
+snapshots/
+tmp/
+*.har
+*.http
+*.key.json
+*.pem
+*.response
+*.snapshot
+*.webhook
+cookies*.json
+credentials*.json
+service-account*.json
+token*.json
+webhook*.txt
+replay-manifest*.json
+
+# Synthetic fixtures are reviewed and intentionally tracked.
+!tests/fixtures/
+!tests/fixtures/**
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

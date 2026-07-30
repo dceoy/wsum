@@ -1,0 +1,203 @@
+"""Idempotent Google Drive snapshot operations through an injected connector."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+from diff import DiffResult
+from errors import MonitorError
+from models import HASH_RE, validate_target_id
+from normalize import NormalizedContent
+
+
+class DriveConnector(Protocol):
+    """Least-privilege connector surface used by SnapshotStore."""
+
+    def find_file(self, path: str) -> str | None: ...
+
+    def upload_file(self, path: str, content: bytes, mime_type: str) -> str: ...
+
+    def download_file(self, file_ref: str) -> bytes: ...
+
+    def list_files(self, prefix: str) -> Sequence[Mapping[str, Any]]: ...
+
+    def delete_file(self, file_ref: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotPaths:
+    normalized: str
+    metadata: str
+    diff: str
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupCandidate:
+    file_ref: str
+    path: str
+
+
+def snapshot_paths(target_id: str, normalized_hash: str) -> SnapshotPaths:
+    validate_target_id(target_id)
+    if not HASH_RE.fullmatch(normalized_hash):
+        raise MonitorError("invalid_snapshot", "normalized_hash is invalid")
+    prefix = f"snapshots/{target_id}/{normalized_hash}"
+    return SnapshotPaths(
+        normalized=f"{prefix}/normalized.txt",
+        metadata=f"{prefix}/metadata.json",
+        diff=f"{prefix}/diff.json",
+    )
+
+
+class SnapshotStore:
+    def __init__(
+        self, connector: DriveConnector, *, max_snapshot_bytes: int = 10_000_000
+    ) -> None:
+        if not 1_024 <= max_snapshot_bytes <= 50_000_000:
+            raise MonitorError(
+                "invalid_configuration", "snapshot size limit is invalid"
+            )
+        self._connector = connector
+        self._max_snapshot_bytes = max_snapshot_bytes
+
+    def _ensure_file(self, path: str, content: bytes, mime_type: str) -> str:
+        try:
+            existing = self._connector.find_file(path)
+            if existing:
+                if len(existing) > 1_000:
+                    raise MonitorError(
+                        "drive_reference_invalid",
+                        "Drive connector returned an oversized file reference",
+                    )
+                return existing
+            reference = self._connector.upload_file(path, content, mime_type)
+        except MonitorError:
+            raise
+        except Exception as exc:
+            raise MonitorError(
+                "drive_write_failed",
+                "Drive snapshot write failed",
+                retryable=True,
+            ) from exc
+        if not reference or len(reference) > 1_000:
+            raise MonitorError(
+                "drive_write_failed",
+                "Drive connector returned no usable file reference",
+            )
+        return reference
+
+    def save(
+        self,
+        target_id: str,
+        content: NormalizedContent,
+        diff: DiffResult | None = None,
+    ) -> str:
+        paths = snapshot_paths(target_id, content.normalized_hash)
+        normalized_bytes = content.text.encode("utf-8")
+        if len(normalized_bytes) > self._max_snapshot_bytes:
+            raise MonitorError(
+                "snapshot_too_large", "normalized snapshot exceeds the size limit"
+            )
+        normalized_ref = self._ensure_file(
+            paths.normalized, normalized_bytes, "text/plain; charset=utf-8"
+        )
+        metadata = content.as_dict(include_text=False)
+        self._ensure_file(
+            paths.metadata,
+            json.dumps(
+                metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8"),
+            "application/json",
+        )
+        if diff is not None:
+            self._ensure_file(
+                paths.diff,
+                json.dumps(
+                    diff.as_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+                "application/json",
+            )
+        return normalized_ref
+
+    def load_normalized(self, snapshot_ref: str) -> str:
+        if not snapshot_ref or len(snapshot_ref) > 1_000:
+            raise MonitorError("snapshot_missing", "snapshot reference is missing")
+        try:
+            content = self._connector.download_file(snapshot_ref)
+            if not isinstance(content, bytes):
+                raise MonitorError(
+                    "snapshot_invalid", "stored snapshot is not a byte sequence"
+                )
+            if len(content) > self._max_snapshot_bytes:
+                raise MonitorError(
+                    "snapshot_too_large", "stored snapshot exceeds the size limit"
+                )
+            return content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise MonitorError(
+                "snapshot_invalid", "stored normalized snapshot is not UTF-8"
+            ) from exc
+        except MonitorError:
+            raise
+        except Exception as exc:
+            raise MonitorError(
+                "snapshot_missing", "stored normalized snapshot could not be loaded"
+            ) from exc
+
+    def plan_cleanup(
+        self,
+        target_id: str,
+        *,
+        current_ref: str,
+        retain_snapshots: int = 12,
+    ) -> list[CleanupCandidate]:
+        validate_target_id(target_id)
+        if retain_snapshots < 1:
+            raise MonitorError(
+                "invalid_configuration", "retain_snapshots must be at least one"
+            )
+        try:
+            files = list(self._connector.list_files(f"snapshots/{target_id}/"))
+        except Exception as exc:
+            raise MonitorError(
+                "connector_unavailable",
+                "Drive snapshot listing failed",
+                retryable=True,
+            ) from exc
+        groups: dict[str, list[Mapping[str, Any]]] = {}
+        for file in files:
+            path = str(file.get("path", ""))
+            parts = path.split("/")
+            if len(parts) != 4 or parts[:2] != ["snapshots", target_id]:
+                continue
+            groups.setdefault(parts[2], []).append(file)
+        ordered = sorted(
+            groups.items(),
+            key=lambda item: max(str(file.get("created_at", "")) for file in item[1]),
+            reverse=True,
+        )
+        retained_hashes = {digest for digest, _ in ordered[:retain_snapshots]}
+        candidates: list[CleanupCandidate] = []
+        for digest, group in ordered:
+            if digest in retained_hashes:
+                continue
+            for file in group:
+                file_ref = str(file.get("file_ref", ""))
+                path = str(file.get("path", ""))
+                if file_ref and file_ref != current_ref:
+                    candidates.append(CleanupCandidate(file_ref, path))
+        return candidates
+
+    def execute_cleanup(
+        self, candidates: Sequence[CleanupCandidate], *, current_ref: str
+    ) -> None:
+        for candidate in candidates:
+            if candidate.file_ref == current_ref:
+                continue
+            self._connector.delete_file(candidate.file_ref)

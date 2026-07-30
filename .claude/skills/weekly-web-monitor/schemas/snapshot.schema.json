@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/weekly-web-monitor/snapshot.schema.json",
+  "title": "Normalized snapshot metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "normalized_hash",
+    "normalization_version",
+    "hash_algorithm",
+    "metadata"
+  ],
+  "properties": {
+    "kind": {"enum": ["html", "pdf", "feed", "text"]},
+    "normalized_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "normalization_version": {"const": "2026-01"},
+    "hash_algorithm": {"const": "sha256"},
+    "metadata": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "maxLength": 1000}
+    }
+  }
+}

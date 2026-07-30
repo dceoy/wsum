@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/weekly-web-monitor/state.schema.json",
+  "title": "State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "target_id",
+    "last_checked_at",
+    "etag",
+    "last_modified",
+    "normalized_hash",
+    "snapshot_ref",
+    "consecutive_failures"
+  ],
+  "properties": {
+    "target_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "last_checked_at": {
+      "oneOf": [
+        {"const": ""},
+        {"type": "string", "format": "date-time"}
+      ]
+    },
+    "etag": {"type": "string", "maxLength": 1000},
+    "last_modified": {"type": "string", "maxLength": 1000},
+    "normalized_hash": {
+      "oneOf": [
+        {"const": ""},
+        {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      ]
+    },
+    "snapshot_ref": {"type": "string", "maxLength": 1000},
+    "consecutive_failures": {"type": "integer", "minimum": 0}
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/weekly-web-monitor/target.schema.json",
+  "title": "Target",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "target_id",
+    "enabled",
+    "name",
+    "url",
+    "fetch_mode",
+    "include_selector",
+    "exclude_selectors",
+    "watch_focus",
+    "notification_group"
+  ],
+  "properties": {
+    "target_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "enabled": {"type": "boolean"},
+    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+    "url": {"type": "string", "format": "uri", "pattern": "^https?://"},
+    "fetch_mode": {"enum": ["static", "browser"]},
+    "include_selector": {"type": "string", "maxLength": 500},
+    "exclude_selectors": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {"type": "string", "minLength": 1, "maxLength": 500}
+    },
+    "watch_focus": {"type": "string", "maxLength": 1000},
+    "notification_group": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    }
+  }
+}
