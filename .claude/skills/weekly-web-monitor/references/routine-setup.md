@@ -54,6 +54,11 @@ Python-side validation and Chromium's own connection; see
 trusted. `fetch_rendered` fails closed with `browser_egress_not_verified` unless
 `BrowserFetchConfig.verified_egress_pinning=True` is explicitly set, which should
 only happen after a verified network-level egress pinning mechanism is in place.
+It also fails closed with `browser_memory_bound_not_verified` unless
+`BrowserFetchConfig.verified_memory_bound=True` is explicitly set, which should
+only happen after the browser process has been placed under a verified external
+hard memory limit (container/cgroup cap) — the rendered-size guard cannot bound
+Chromium's own DOM memory before it is measured; see [security.md](security.md).
 
 ## Delivery
 

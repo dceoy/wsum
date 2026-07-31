@@ -10,6 +10,16 @@ check and Chromium's connection; see references/security.md. Because that gap
 has no verified mitigation yet, `fetch_rendered` fails closed unless the
 operator explicitly sets `BrowserFetchConfig.verified_egress_pinning=True`
 after configuring a verified pinning mechanism.
+
+The rendered-size guard reads `document.documentElement.outerHTML` inside the
+page to measure it before materializing it in the Routine process, but
+Chromium/Blink still has to build that string in the renderer first; a page
+that balloons its own DOM can exhaust the browser process before the guard
+ever runs. This module cannot bound in-renderer memory from the Playwright
+API, so `fetch_rendered` also fails closed unless the operator explicitly sets
+`BrowserFetchConfig.verified_memory_bound=True` after placing the browser
+process under an external hard memory limit (for example a container/cgroup
+memory cap that kills the process before host memory is exhausted).
 """
 
 from __future__ import annotations
@@ -33,6 +43,7 @@ class BrowserFetchConfig:
     allowed_hosts: tuple[str, ...] = ()
     block_resource_types: tuple[str, ...] = ("font", "media")
     verified_egress_pinning: bool = False
+    verified_memory_bound: bool = False
 
     def __post_init__(self) -> None:
         if not 1 <= self.timeout_seconds <= 120:
@@ -75,6 +86,14 @@ def fetch_rendered(
             "browser mode is blocked until verified network-level egress "
             "pinning (e.g. an external proxy or --host-resolver-rules) is "
             "configured; see references/security.md",
+        )
+    if not active.verified_memory_bound:
+        raise MonitorError(
+            "browser_memory_bound_not_verified",
+            "browser mode is blocked until the browser process runs under a "
+            "verified external hard memory limit (e.g. a container/cgroup "
+            "memory cap); the rendered-size guard cannot bound Chromium's "
+            "own DOM memory before it is measured, see references/security.md",
         )
     guard = BrowserNetworkGuard(
         url, allowed_hosts=active.allowed_hosts, resolver=resolver

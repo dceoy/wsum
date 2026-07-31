@@ -56,6 +56,22 @@ default: it raises `browser_egress_not_verified` unless the operator explicitly
 sets `BrowserFetchConfig.verified_egress_pinning=True`, which should only be done
 after a real network-level pinning mechanism has been configured and verified.
 
+Known gap: the rendered-size guard measures
+`document.documentElement.outerHTML` via `page.evaluate()` before
+`fetch_rendered` reads `page.content()` into the Routine (Python) process, so an
+oversized DOM never crosses into Python. It does not bound Chromium/Blink's own
+memory while that string is materialized in the renderer: a page whose script
+balloons the DOM before the guard runs can still exhaust the browser process.
+Closing this gap requires either an in-engine node/character budget enforced
+during execution (not exposed by Playwright's public API) or running the
+browser process under an external hard memory limit (a container/cgroup memory
+cap that kills the process before host memory is exhausted). Because neither is
+implemented by this code, `fetch_rendered` fails closed by default: it raises
+`browser_memory_bound_not_verified` unless the operator explicitly sets
+`BrowserFetchConfig.verified_memory_bound=True`, which should only be done
+after the browser process has been placed under a verified external memory
+cap.
+
 Known gap: `SheetsStore` has no atomic create-if-absent/conditional-write primitive
 (the Sheets Values API cannot express one), so the claim-before-side-effects
 sequence in `_process_target` (run lookup), `_persist_success` (Run/State write

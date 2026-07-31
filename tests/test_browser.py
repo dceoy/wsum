@@ -185,7 +185,9 @@ class BrowserFetcherTests(unittest.TestCase):
     ):
         context = FakeContext(page)
         browser = FakeBrowser(context)
-        active_config = config or BrowserFetchConfig(verified_egress_pinning=True)
+        active_config = config or BrowserFetchConfig(
+            verified_egress_pinning=True, verified_memory_bound=True
+        )
         with patch.dict(sys.modules, playwright_modules(browser)):
             result = fetch_rendered(
                 "https://example.com",
@@ -251,7 +253,9 @@ class BrowserFetcherTests(unittest.TestCase):
             self.run_fake(
                 request_page,
                 config=BrowserFetchConfig(
-                    max_requests=1, verified_egress_pinning=True
+                    max_requests=1,
+                    verified_egress_pinning=True,
+                    verified_memory_bound=True,
                 ),
             )
         large_page = FakePage(
@@ -262,7 +266,9 @@ class BrowserFetcherTests(unittest.TestCase):
             self.run_fake(
                 large_page,
                 config=BrowserFetchConfig(
-                    max_rendered_bytes=1_024, verified_egress_pinning=True
+                    max_rendered_bytes=1_024,
+                    verified_egress_pinning=True,
+                    verified_memory_bound=True,
                 ),
             )
 
@@ -271,6 +277,14 @@ class BrowserFetcherTests(unittest.TestCase):
             fetch_rendered(
                 "https://example.com",
                 config=BrowserFetchConfig(),
+                resolver=support.public_resolver,
+            )
+
+    def test_browser_mode_fails_closed_without_verified_memory_bound(self) -> None:
+        with self.assertRaisesRegex(MonitorError, "browser_memory_bound_not_verified"):
+            fetch_rendered(
+                "https://example.com",
+                config=BrowserFetchConfig(verified_egress_pinning=True),
                 resolver=support.public_resolver,
             )
 
