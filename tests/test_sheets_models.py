@@ -147,7 +147,14 @@ class ModelsAndSheetsTests(unittest.TestCase):
         notification = NotificationRecord("b" * 64, "one", "pending")
         self.assertEqual("append", upsert_notification_payload(notification)["mode"])
         self.assertEqual(
+            "Notifications!A:F", upsert_notification_payload(notification)["range"]
+        )
+        self.assertEqual(
             "replace", upsert_notification_payload(notification, 4)["mode"]
+        )
+        self.assertEqual(
+            "Notifications!A4:F4",
+            upsert_notification_payload(notification, 4)["range"],
         )
 
     def test_record_parser_allows_extra_columns_but_not_extra_values(self) -> None:
@@ -209,6 +216,71 @@ class ModelsAndSheetsTests(unittest.TestCase):
         self.assertTrue(connector.calls)
         self.assertTrue(all(option == "RAW" for _, option in connector.calls))
 
+    def test_get_run_round_trips_result_and_attempts(self) -> None:
+        class Connector:
+            def __init__(self) -> None:
+                self.values = {"Runs!A:H": [list(RUN_COLUMNS)]}
+
+            def read_values(self, spreadsheet_id: str, range_name: str):
+                del spreadsheet_id
+                return self.values[range_name]
+
+            def replace_values(self, spreadsheet_id, range_name, values, *, value_input_option):
+                raise AssertionError("runs are append-only")
+
+            def append_values(self, spreadsheet_id, range_name, values, *, value_input_option):
+                del spreadsheet_id, value_input_option
+                self.values[range_name] = self.values[range_name] + list(values)
+
+        connector = Connector()
+        store = SheetsStore(connector, "runtime-only-id")
+        run = RunRecord(
+            "run-1:one",
+            "one",
+            "material",
+            42,
+            "重要な変更です",
+            "",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+            (Attempt(1, "succeeded"),),
+        )
+        store.append_run(run)
+        self.assertIsNone(store.get_run("run-1:two"))
+        self.assertEqual(run, store.get_run("run-1:one"))
+
+    def test_notification_round_trips_kind_and_last_error(self) -> None:
+        class Connector:
+            def __init__(self) -> None:
+                self.values = {"Notifications!A:F": [list(NOTIFICATION_COLUMNS)]}
+
+            def read_values(self, spreadsheet_id: str, range_name: str):
+                del spreadsheet_id
+                return self.values[range_name]
+
+            def replace_values(self, spreadsheet_id, range_name, values, *, value_input_option):
+                del spreadsheet_id, value_input_option
+                self.values["Notifications!A:F"] = [
+                    list(NOTIFICATION_COLUMNS)
+                ] + list(values)
+
+            def append_values(self, spreadsheet_id, range_name, values, *, value_input_option):
+                del spreadsheet_id, value_input_option
+                self.values["Notifications!A:F"] = self.values[
+                    "Notifications!A:F"
+                ] + list(values)
+
+        connector = Connector()
+        store = SheetsStore(connector, "runtime-only-id")
+        notification = NotificationRecord(
+            "c" * 64,
+            "one",
+            "failed",
+            kind="failure",
+            last_error="notification_send_failed",
+        )
+        store.upsert_notification(notification)
+        self.assertEqual(notification, store.get_notification("c" * 64))
 
 if __name__ == "__main__":
     unittest.main()

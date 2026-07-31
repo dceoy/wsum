@@ -7,6 +7,8 @@ import json
 import socket
 import ssl
 import sys
+import threading
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,6 +82,7 @@ class FetchResult:
     final_url: str
     status: int
     content_type: str
+    charset: str
     content_length: int
     etag: str
     last_modified: str
@@ -207,6 +210,47 @@ def _safe_validator(value: str, field_name: str) -> str:
     return bounded
 
 
+def _extract_charset(raw_content_type: str) -> str:
+    for part in raw_content_type.split(";")[1:]:
+        name, _, value = part.strip().partition("=")
+        if name.strip().lower() == "charset":
+            return _safe_validator(value.strip().strip("\"'"), "charset")[:100]
+    return ""
+
+
+def _bounded_resolver(resolver: Resolver, remaining: Callable[[], float]) -> Resolver:
+    """Bound a resolver call to the fetch's total deadline.
+
+    ``socket.getaddrinfo`` has no timeout parameter and cannot be
+    interrupted, so a hanging or slow DNS server would otherwise stall past
+    ``max_total_seconds``. The lookup runs on a daemon thread so a caller
+    that gives up waiting never blocks process exit on it.
+    """
+
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        budget = remaining()
+        if budget <= 0:
+            raise TimeoutError("DNS resolution exceeded the fetch deadline")
+        outcome: dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                outcome["result"] = resolver(*args, **kwargs)
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller thread
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(budget)
+        if worker.is_alive():
+            raise TimeoutError("DNS resolution exceeded the fetch deadline")
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["result"]
+
+    return wrapped
+
+
 def fetch_url(
     url: str,
     *,
@@ -237,11 +281,12 @@ def fetch_url(
             "TLS context must require TLS 1.2+, certificates, "
             "and hostname verification",
         )
-    target = resolve_public_url(url, resolver=resolver)
+    deadline = monotonic() + active_config.max_total_seconds
+    bounded_resolver = _bounded_resolver(resolver, lambda: deadline - monotonic())
+    target = resolve_public_url(url, resolver=bounded_resolver)
     etag = _safe_validator(etag, "ETag")
     last_modified = _safe_validator(last_modified, "Last-Modified")
     redirects = 0
-    deadline = monotonic() + active_config.max_total_seconds
     while True:
         headers = {
             "Accept": "text/html,application/xhtml+xml,application/pdf,"
@@ -311,7 +356,9 @@ def fetch_url(
                         "redirect_limit_exceeded", "maximum redirects exceeded"
                     )
                 target = validate_redirect(
-                    target.url, response.getheader("Location", ""), resolver=resolver
+                    target.url,
+                    response.getheader("Location", ""),
+                    resolver=bounded_resolver,
                 )
                 redirects += 1
                 continue
@@ -326,6 +373,7 @@ def fetch_url(
                     final_url=target.url,
                     status=status,
                     content_type="",
+                    charset="",
                     content_length=0,
                     etag=_safe_validator(response.getheader("ETag", etag), "ETag"),
                     last_modified=_safe_validator(
@@ -344,6 +392,7 @@ def fetch_url(
                 )
             raw_content_type = response.getheader("Content-Type", "")
             content_type = raw_content_type.split(";", 1)[0].strip().lower()
+            charset = _extract_charset(raw_content_type)
             if content_type and content_type not in SUPPORTED_CONTENT_TYPES:
                 raise MonitorError(
                     "unsupported_content_type",
@@ -400,6 +449,7 @@ def fetch_url(
                 final_url=target.url,
                 status=status,
                 content_type=content_type,
+                charset=charset,
                 content_length=size,
                 etag=_safe_validator(response.getheader("ETag", ""), "ETag"),
                 last_modified=_safe_validator(

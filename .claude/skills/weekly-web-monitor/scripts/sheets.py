@@ -12,7 +12,7 @@ from dataclasses import asdict
 from typing import Any, Protocol
 
 from errors import MonitorError
-from models import NotificationRecord, RunRecord, State, Target
+from models import Attempt, NotificationRecord, RunRecord, State, Target
 
 TARGET_COLUMNS = (
     "target_id",
@@ -45,7 +45,14 @@ RUN_COLUMNS = (
     "started_at",
     "finished_at",
 )
-NOTIFICATION_COLUMNS = ("event_id", "target_id", "status", "notified_at")
+NOTIFICATION_COLUMNS = (
+    "event_id",
+    "target_id",
+    "status",
+    "notified_at",
+    "kind",
+    "last_error",
+)
 
 
 class SheetsConnector(Protocol):
@@ -215,6 +222,38 @@ def run_row(run: RunRecord) -> list[Any]:
     return [value[column] for column in RUN_COLUMNS]
 
 
+def run_record_from_row(record: Mapping[str, Any]) -> RunRecord:
+    raw_summary = str(record.get("summary", ""))
+    summary = raw_summary
+    attempts: tuple[Attempt, ...] = ()
+    if raw_summary:
+        try:
+            parsed = json.loads(raw_summary)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get("attempts"), list):
+            summary = str(parsed.get("text", ""))
+            attempts = tuple(
+                Attempt(
+                    int(item["number"]),
+                    str(item["result"]),
+                    str(item.get("error_code", "")),
+                )
+                for item in parsed["attempts"]
+            )
+    return RunRecord(
+        run_id=str(record["run_id"]).strip(),
+        target_id=str(record["target_id"]).strip(),
+        result=str(record["result"]).strip(),
+        change_score=int(record["change_score"] or 0),
+        summary=summary,
+        error_code=str(record["error_code"]).strip(),
+        started_at=str(record["started_at"]).strip(),
+        finished_at=str(record["finished_at"]).strip(),
+        attempts=attempts,
+    )
+
+
 def notification_row(notification: NotificationRecord) -> list[Any]:
     value = asdict(notification)
     return [value[column] for column in NOTIFICATION_COLUMNS]
@@ -242,13 +281,13 @@ def upsert_notification_payload(
 ) -> dict[str, Any]:
     row = notification_row(notification)
     if row_number is None:
-        return {"range": "Notifications!A:D", "values": [row], "mode": "append"}
+        return {"range": "Notifications!A:F", "values": [row], "mode": "append"}
     if row_number < 2:
         raise MonitorError(
             "sheet_invalid_row", "Notifications row_number must be at least 2"
         )
     return {
-        "range": f"Notifications!A{row_number}:D{row_number}",
+        "range": f"Notifications!A{row_number}:F{row_number}",
         "values": [row],
         "mode": "replace",
     }
@@ -301,6 +340,14 @@ class SheetsStore:
                 payload["values"],
                 value_input_option="RAW",
             )
+
+    def get_run(self, run_id: str) -> RunRecord | None:
+        values = self._connector.read_values(self._spreadsheet_id, "Runs!A:H")
+        records = records_from_values(values, RUN_COLUMNS, "Runs", allow_empty=False)
+        for record in records:
+            if str(record["run_id"]).strip() == run_id:
+                return run_record_from_row(record)
+        return None
 
     def append_run(self, run: RunRecord) -> None:
         values = self._connector.read_values(self._spreadsheet_id, "Runs!A:H")

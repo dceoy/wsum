@@ -41,16 +41,21 @@ summary text can never be interpreted as a formula.
 
 Use `<routine_run_id>:<target_id>` as the idempotency key. The bounded `summary`
 cell may encode attempt outcomes as compact JSON. A connector must not append a
-second row for an existing run ID.
+second row for an existing run ID, and the routine must check for an existing
+terminal row for that key before fetching, writing state, or notifying, not only
+before the final append.
 
 ### Notifications
 
-`event_id`, `target_id`, `status`, `notified_at`
+`event_id`, `target_id`, `status`, `notified_at`, `kind`, `last_error`
 
-`status` is `pending`, `sent`, `failed`, or `suppressed`. Derive a change event ID
-as `SHA256(target_id + normalized_hash)`. Check the row before delivery and update
-it after delivery. Never automatically retry `pending`, because delivery may have
-succeeded before the final state write.
+`status` is `pending`, `sent`, `failed`, or `suppressed`. `kind` is `change` or
+`failure`. Derive a change event ID as `SHA256(target_id + normalized_hash)`.
+Check the row before delivery and update it after delivery. Never automatically
+retry `pending`, because delivery may have succeeded before the final state
+write. Read and write all six columns (`Notifications!A:F`) so a confirmed
+failure's `last_error` is not lost and reloaded rows do not default `kind` back
+to `change`.
 
 ### Optional Outbox
 

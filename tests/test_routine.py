@@ -186,8 +186,13 @@ class RoutineTests(unittest.TestCase):
 
     def test_same_run_id_is_idempotent_in_fixture_store(self) -> None:
         self.run_cycle(response(1000), "stable")
-        self.run_cycle(response(1000), "stable")
         self.assertEqual(1, len(self.store.runs))
+        baseline_state = self.store.states["one"]
+        second, second_fetcher = self.run_cycle(response(1200), "stable")
+        self.assertEqual(1, len(self.store.runs))
+        self.assertEqual(1, second.metrics.baseline)
+        self.assertEqual(0, second_fetcher.calls["one"])
+        self.assertEqual(baseline_state, self.store.states["one"])
 
     def test_audit_sink_failure_does_not_change_primary_result(self) -> None:
         class FailingAudit:

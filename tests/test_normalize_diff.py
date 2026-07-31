@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import time
 import unittest
 
@@ -43,6 +44,26 @@ class NormalizationTests(unittest.TestCase):
         )
         plain = normalize_content("ＡＢＣ".encode(), content_type="text/plain")
         self.assertEqual("ABC", plain.text)
+
+    def test_http_charset_is_used_before_bom_or_body_sniffing(self) -> None:
+        body = "価格改定のお知らせ".encode("shift_jis")
+        without_charset = normalize_content(body, content_type="text/plain")
+        with_charset = normalize_content(
+            body, content_type="text/plain", charset="shift_jis"
+        )
+        self.assertNotEqual("価格改定のお知らせ", without_charset.text)
+        self.assertEqual("価格改定のお知らせ", with_charset.text)
+
+    def test_unusable_declared_charset_falls_back_to_bom_instead_of_failing(
+        self,
+    ) -> None:
+        # A server-declared charset we do not allow-list (or mislabel) must
+        # not turn a previously-decodable BOM'd body into a hard failure.
+        body = codecs.BOM_UTF8 + "Notice".encode()
+        result = normalize_content(
+            body, content_type="text/plain", charset="utf-16"
+        )
+        self.assertEqual("Notice", result.text)
 
     def test_meaningful_price_specification_and_terms_change_hash(self) -> None:
         values = [

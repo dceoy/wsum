@@ -45,6 +45,8 @@ class OperationalStore(NotificationStore, Protocol):
 
     def replace_state(self, state: State) -> None: ...
 
+    def get_run(self, run_id: str) -> RunRecord | None: ...
+
     def append_run(self, run: RunRecord) -> None: ...
 
 
@@ -242,6 +244,10 @@ class WeeklyMonitorRoutine:
             consecutive_failures=0,
         )
 
+    @staticmethod
+    def _run_record_id(run_id: str, target: Target) -> str:
+        return f"{run_id}:{target.target_id}"
+
     def _run_record(
         self,
         run_id: str,
@@ -254,7 +260,7 @@ class WeeklyMonitorRoutine:
         attempts: Sequence[Attempt],
     ) -> RunRecord:
         return RunRecord(
-            run_id=f"{run_id}:{target.target_id}",
+            run_id=self._run_record_id(run_id, target),
             target_id=target.target_id,
             result=result,
             change_score=score,
@@ -479,6 +485,13 @@ class WeeklyMonitorRoutine:
         previous_state = State(target.target_id)
         attempts: tuple[Attempt, ...] = ()
         try:
+            with self._store_lock:
+                claimed = self.store.get_run(self._run_record_id(run_id, target))
+            if claimed is not None:
+                # A prior attempt for this exact run ID already reached a
+                # terminal outcome for this target; replay it instead of
+                # refetching, re-writing state, or re-notifying.
+                return claimed
             previous_state = self._state(target)
             with tempfile.TemporaryDirectory(
                 prefix=f"weekly-web-monitor-{target.target_id}-"
@@ -520,6 +533,7 @@ class WeeklyMonitorRoutine:
                 normalized = normalize_content(
                     raw_path.read_bytes(),
                     content_type=fetched.content_type,
+                    charset=fetched.charset,
                     include_selector=target.include_selector,
                     exclude_selectors=target.exclude_selectors,
                 )

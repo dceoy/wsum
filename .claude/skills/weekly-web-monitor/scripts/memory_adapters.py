@@ -35,6 +35,9 @@ class MemoryOperationalStore:
     def replace_state(self, state: State) -> None:
         self.states[state.target_id] = state
 
+    def get_run(self, run_id: str) -> RunRecord | None:
+        return self.runs.get(run_id)
+
     def append_run(self, run: RunRecord) -> None:
         self.runs.setdefault(run.run_id, run)
 
@@ -104,6 +107,7 @@ class MemoryDriveConnector:
 class FixtureResponse:
     body: bytes
     content_type: str = "text/html"
+    charset: str = ""
     status: int = 200
     etag: str = ""
     last_modified: str = ""
@@ -125,27 +129,29 @@ class FixtureFetcher:
             raise response
         if response.status == 304:
             return FetchResult(
-                "unchanged",
-                target.url,
-                304,
-                "",
-                0,
-                response.etag or state.etag,
-                response.last_modified or state.last_modified,
-                datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                0,
+                result="unchanged",
+                final_url=target.url,
+                status=304,
+                content_type="",
+                charset="",
+                content_length=0,
+                etag=response.etag or state.etag,
+                last_modified=response.last_modified or state.last_modified,
+                fetched_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                redirect_count=0,
             )
         return FetchResult(
-            "fetched",
-            target.url,
-            response.status,
-            response.content_type,
-            len(response.body),
-            response.etag,
-            response.last_modified,
-            datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            0,
-            response.body,
+            result="fetched",
+            final_url=target.url,
+            status=response.status,
+            content_type=response.content_type,
+            charset=response.charset,
+            content_length=len(response.body),
+            etag=response.etag,
+            last_modified=response.last_modified,
+            fetched_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            redirect_count=0,
+            body=response.body,
         )
 
 

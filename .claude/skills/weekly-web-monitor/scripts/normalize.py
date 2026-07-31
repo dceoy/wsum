@@ -75,7 +75,31 @@ def declared_content_kind(content_type: str) -> str:
     return "unsupported"
 
 
-def _decode_text(body: bytes) -> str:
+_ALLOWED_CHARSET_CODECS = frozenset(
+    {
+        "cp932",
+        "cp1252",
+        "euc_jp",
+        "iso8859-1",
+        "shift_jis",
+        "utf-8",
+        "utf-8-sig",
+    }
+)
+
+
+def _decode_text(body: bytes, charset: str = "") -> str:
+    declared = charset.strip()
+    if declared:
+        try:
+            codec = codecs.lookup(declared)
+        except LookupError:
+            codec = None
+        # An unusable declared charset is treated as absent rather than
+        # fatal, so a page that decoded fine via BOM/body sniffing before
+        # the charset was threaded through does not start hard-failing.
+        if codec is not None and codec.name in _ALLOWED_CHARSET_CODECS:
+            return body.decode(codec.name, errors="replace")
     if body.startswith(codecs.BOM_UTF8):
         return body.decode("utf-8-sig", errors="replace")
     if body.startswith((codecs.BOM_UTF16_BE, codecs.BOM_UTF16_LE)):
@@ -88,22 +112,13 @@ def _decode_text(body: bytes) -> str:
         raise MonitorError(
             "unsupported_charset", "document charset is unsupported"
         ) from exc
-    allowed_codecs = {
-        "cp932",
-        "cp1252",
-        "euc_jp",
-        "iso8859-1",
-        "shift_jis",
-        "utf-8",
-        "utf-8-sig",
-    }
-    if codec.name not in allowed_codecs:
+    if codec.name not in _ALLOWED_CHARSET_CODECS:
         raise MonitorError("unsupported_charset", "document charset is unsupported")
     return body.decode(codec.name, errors="replace")
 
 
-def _normalize_plain_text(body: bytes) -> str:
-    text = unicodedata.normalize("NFKC", _decode_text(body))
+def _normalize_plain_text(body: bytes, charset: str = "") -> str:
+    text = unicodedata.normalize("NFKC", _decode_text(body, charset))
     lines = [
         re.sub(r"\s+", " ", line).strip()
         for line in text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
@@ -128,6 +143,7 @@ def normalize_content(
     body: bytes,
     *,
     content_type: str = "",
+    charset: str = "",
     include_selector: str = "",
     exclude_selectors: Iterable[str] = (),
     strict_selectors: bool = True,
@@ -169,13 +185,13 @@ def normalize_content(
         raise MonitorError("feed_unsupported", "XML document is not RSS or Atom")
     elif sniffed == "html":
         text = normalize_html(
-            _decode_text(body),
+            _decode_text(body, charset),
             include_selector=include_selector,
             exclude_selectors=exclude_selectors,
             strict_selectors=strict_selectors,
         )
     else:
-        text = _normalize_plain_text(body)
+        text = _normalize_plain_text(body, charset)
     digest = hash_normalized(sniffed, text)
     return NormalizedContent(
         kind=sniffed,

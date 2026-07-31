@@ -217,6 +217,7 @@ def fetch_rendered(
                 final_url=page.url,
                 status=response.status,
                 content_type="text/html",
+                charset="utf-8",
                 content_length=len(rendered),
                 etag=response.headers.get("etag", "")[:1_000],
                 last_modified=response.headers.get("last-modified", "")[:1_000],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ssl
+import time
 import unittest
 from unittest.mock import patch
 
@@ -327,6 +328,67 @@ class FetchTests(unittest.TestCase):
                     fetch_url("https://example.com", resolver=support.public_resolver)
                 self.assertEqual(code, raised.exception.code)
                 self.assertTrue(raised.exception.retryable)
+
+    def test_charset_is_extracted_from_content_type_for_normalization(self) -> None:
+        connection = FakeConnection(
+            FakeResponse(
+                200,
+                "価格改定".encode("shift_jis"),
+                {"Content-Type": "text/plain; charset=Shift_JIS"},
+            )
+        )
+        with patch.object(fetch, "_open_connection", return_value=connection):
+            result = fetch_url("https://example.com", resolver=support.public_resolver)
+        self.assertEqual("text/plain", result.content_type)
+        self.assertEqual("Shift_JIS", result.charset)
+
+    def test_slow_initial_dns_resolution_is_bounded_by_the_total_deadline(self) -> None:
+        def slow_resolver(*_: object, **__: object) -> list[tuple]:
+            time.sleep(30)
+            return [(2, 1, 6, "", ("93.184.216.34", 443))]
+
+        started = time.perf_counter()
+        with self.assertRaises(MonitorError) as raised:
+            fetch_url(
+                "https://example.com",
+                resolver=slow_resolver,
+                config=FetchConfig(timeout_seconds=0.5, max_total_seconds=1.0),
+            )
+        elapsed = time.perf_counter() - started
+        self.assertEqual("dns_resolution_failed", raised.exception.code)
+        self.assertTrue(raised.exception.retryable)
+        self.assertLess(elapsed, 10.0)
+
+    def test_slow_redirect_dns_resolution_is_bounded_by_the_total_deadline(
+        self,
+    ) -> None:
+        response = FakeResponse(
+            302, b"", {"Location": "https://redirect-target.example/"}
+        )
+        connection = FakeConnection(response)
+        call_count = {"n": 0}
+
+        def resolver(*_: object, **__: object) -> list[tuple]:
+            call_count["n"] += 1
+            # The first two calls are the initial resolution (with its DNS
+            # rebinding stability check); only the redirect's resolution
+            # hangs, matching the reported gap.
+            if call_count["n"] > 2:
+                time.sleep(30)
+            return [(2, 1, 6, "", ("93.184.216.34", 443))]
+
+        started = time.perf_counter()
+        with patch.object(fetch, "_open_connection", return_value=connection):
+            with self.assertRaises(MonitorError) as raised:
+                fetch_url(
+                    "https://example.com",
+                    resolver=resolver,
+                    config=FetchConfig(timeout_seconds=0.5, max_total_seconds=1.0),
+                )
+        elapsed = time.perf_counter() - started
+        self.assertEqual("dns_resolution_failed", raised.exception.code)
+        self.assertTrue(raised.exception.retryable)
+        self.assertLess(elapsed, 10.0)
 
 
 if __name__ == "__main__":
