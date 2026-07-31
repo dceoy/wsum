@@ -345,6 +345,29 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertIn("Quoted status", double_quote.text)
 
+    def test_pdf_custom_font_encodings_are_rejected_not_mishashed(self) -> None:
+        # A font's /ToUnicode CMap or /Differences array can remap a
+        # character code to a different rendered glyph without the raw
+        # string bytes in the content stream changing at all. This extractor
+        # decodes string bytes directly and never resolves either mapping,
+        # so it must reject such PDFs instead of hashing the unresolved
+        # (and potentially wrong) text.
+        to_unicode = (
+            b"%PDF-1.4\n1 0 obj\n<< /ToUnicode 2 0 R >>\nendobj\n"
+            b"3 0 obj\n<< /Length 20 >>\nstream\n"
+            b"BT (Total: 0000) Tj ET\nendstream\nendobj\n%%EOF"
+        )
+        with self.assertRaisesRegex(MonitorError, "encoding"):
+            normalize_content(to_unicode, content_type="application/pdf")
+
+        differences = (
+            b"%PDF-1.4\n1 0 obj\n<< /Encoding << /Differences [1 /A] >> >>\nendobj\n"
+            b"2 0 obj\n<< /Length 20 >>\nstream\n"
+            b"BT (Total: 0000) Tj ET\nendstream\nendobj\n%%EOF"
+        )
+        with self.assertRaisesRegex(MonitorError, "encoding"):
+            normalize_content(differences, content_type="application/pdf")
+
 
 class DiffTests(unittest.TestCase):
     def test_unchanged_and_first_fetch_short_circuit(self) -> None:

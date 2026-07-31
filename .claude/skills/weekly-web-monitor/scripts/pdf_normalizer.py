@@ -140,6 +140,18 @@ def extract_pdf_text(
         raise MonitorError("pdf_malformed", "document has no PDF signature")
     if b"/Encrypt" in pdf:
         raise MonitorError("pdf_encrypted", "encrypted PDFs are not supported")
+    if b"/ToUnicode" in pdf or b"/Differences" in pdf:
+        # Text-showing operators carry character codes, not text -- codes are
+        # only text once resolved through the active font's /Encoding and any
+        # /ToUnicode CMap. This extractor decodes raw string bytes directly
+        # (UTF-16BE/Latin-1) without resolving either, so a font that remaps
+        # codes via /Differences or /ToUnicode can change what a viewer
+        # renders while every code byte -- and this extractor's hash -- stays
+        # identical. Reject rather than silently hash the wrong text.
+        raise MonitorError(
+            "pdf_unsupported_encoding",
+            "PDF uses font encodings that require CMap resolution",
+        )
     if len(re.findall(rb"\bobj\b", pdf)) > max_objects:
         raise MonitorError("pdf_object_limit", "PDF object count exceeds the limit")
 
