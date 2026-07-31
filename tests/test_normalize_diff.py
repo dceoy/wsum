@@ -70,6 +70,36 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertNotIn("Site Nav", page_header.text)
 
+    def test_classed_article_header_title_change_is_not_silently_missed(
+        self,
+    ) -> None:
+        # A "header" class/id token is generic boilerplate noise (e.g.
+        # "site-header"), but a <header class="article-header"> nested in
+        # an <article> is the same content sub-heading as a bare <header>
+        # nested there -- the class token must not re-drop it.
+        before = normalize_content(
+            b"<html><body><article><header class=\"article-header\">"
+            b"<h1>Old status</h1></header><p>Body text.</p></article>"
+            b"</body></html>",
+            content_type="text/html",
+        )
+        after = normalize_content(
+            b"<html><body><article><header class=\"article-header\">"
+            b"<h1>New status</h1></header><p>Body text.</p></article>"
+            b"</body></html>",
+            content_type="text/html",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        self.assertIn("New status", after.text)
+        # A page-level "site-header" class remains boilerplate and is
+        # still stripped.
+        page_header = normalize_content(
+            b"<html><body><header class=\"site-header\">Site Nav</header>"
+            b"<main><p>Body text.</p></main></body></html>",
+            content_type="text/html",
+        )
+        self.assertNotIn("Site Nav", page_header.text)
+
     def test_http_charset_is_used_before_bom_or_body_sniffing(self) -> None:
         body = "価格改定のお知らせ".encode("shift_jis")
         without_charset = normalize_content(body, content_type="text/plain")
@@ -367,6 +397,40 @@ class NormalizationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(MonitorError, "encoding"):
             normalize_content(differences, content_type="application/pdf")
+
+        # A named /Encoding with no /Differences or /ToUnicode (e.g. a font
+        # using /WinAnsiEncoding or /MacRomanEncoding directly) still remaps
+        # character codes to glyphs; this extractor's fixed Latin-1 decode
+        # can produce the same text/hash regardless of which named encoding
+        # is actually active, so it must be rejected too.
+        named_encoding = (
+            b"%PDF-1.4\n1 0 obj\n<< /Encoding /WinAnsiEncoding >>\nendobj\n"
+            b"2 0 obj\n<< /Length 20 >>\nstream\n"
+            b"BT (Total: 0000) Tj ET\nendstream\nendobj\n%%EOF"
+        )
+        with self.assertRaisesRegex(MonitorError, "encoding"):
+            normalize_content(named_encoding, content_type="application/pdf")
+
+        # A composite (/Type0) font always routes character codes through a
+        # CMap, regardless of /Encoding/ToUnicode presence.
+        composite_font = (
+            b"%PDF-1.4\n1 0 obj\n<< /Subtype /Type0 >>\nendobj\n"
+            b"2 0 obj\n<< /Length 20 >>\nstream\n"
+            b"BT (Total: 0000) Tj ET\nendstream\nendobj\n%%EOF"
+        )
+        with self.assertRaisesRegex(MonitorError, "encoding"):
+            normalize_content(composite_font, content_type="application/pdf")
+
+        # A compressed object stream can hide a font/Encoding dictionary
+        # from this raw marker scan entirely, so its mere presence must
+        # also be rejected rather than assumed safe.
+        object_stream = (
+            b"%PDF-1.4\n1 0 obj\n<< /Type /ObjStm /N 1 >>\nendobj\n"
+            b"2 0 obj\n<< /Length 20 >>\nstream\n"
+            b"BT (Total: 0000) Tj ET\nendstream\nendobj\n%%EOF"
+        )
+        with self.assertRaisesRegex(MonitorError, "encoding"):
+            normalize_content(object_stream, content_type="application/pdf")
 
 
 class DiffTests(unittest.TestCase):

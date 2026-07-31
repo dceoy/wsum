@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import select
 import socket
 import ssl
 import sys
@@ -141,6 +142,41 @@ class _DeadlineSSLSocket(_DeadlineTrackingMixin, ssl.SSLSocket):
     pass
 
 
+def _do_handshake_with_deadline(sock: ssl.SSLSocket, deadline: float) -> None:
+    """Drive the TLS handshake without letting it run past ``deadline``.
+
+    ``SSLSocket.do_handshake()`` talks to the raw fd directly through
+    OpenSSL, bypassing the ``recv``/``recv_into`` overrides that clamp
+    every other read on this socket to the remaining fetch deadline. A
+    peer that trickles handshake records so each individual read completes
+    quickly could otherwise let a single blocking ``do_handshake()`` call
+    run for the connection's whole per-op timeout regardless of how much
+    of the total deadline is actually left. Driving the handshake through
+    a manual non-blocking loop, reclamping the wait on every iteration,
+    closes that gap the same way the recv overrides do for body reads.
+    """
+    original_timeout = sock.gettimeout()
+    sock.setblocking(False)
+    try:
+        while True:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError("TLS handshake exceeded the fetch deadline")
+            try:
+                sock.do_handshake()
+                return
+            except ssl.SSLWantReadError:
+                readable, _, _ = select.select([sock], [], [], remaining)
+                if not readable:
+                    raise TimeoutError("TLS handshake exceeded the fetch deadline")
+            except ssl.SSLWantWriteError:
+                _, writable, _ = select.select([], [sock], [], remaining)
+                if not writable:
+                    raise TimeoutError("TLS handshake exceeded the fetch deadline")
+    finally:
+        sock.settimeout(original_timeout)
+
+
 def _connect_pinned_socket(
     address: str,
     port: int,
@@ -216,10 +252,17 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
             # object, so the raw socket's own deadline-checked recv is never
             # actually exercised over TLS; the wrapped object is what
             # ``http.client`` reads application data through afterward, so
-            # that is where the deadline check must live instead.
+            # that is where the deadline check must live instead. The
+            # handshake itself is deferred (``do_handshake_on_connect=False``)
+            # and driven separately under the same deadline, since it bypasses
+            # this socket's recv overrides entirely (see
+            # ``_do_handshake_with_deadline``).
             self._context.sslsocket_class = _DeadlineSSLSocket
-            wrapped = self._context.wrap_socket(raw_socket, server_hostname=self.host)
+            wrapped = self._context.wrap_socket(
+                raw_socket, server_hostname=self.host, do_handshake_on_connect=False
+            )
             wrapped._deadline = self._deadline  # type: ignore[attr-defined]
+            _do_handshake_with_deadline(wrapped, self._deadline)
             self.sock = wrapped
             validate_peer_address(self.sock.getpeername()[0], self._allowed_addresses)
         except BaseException:

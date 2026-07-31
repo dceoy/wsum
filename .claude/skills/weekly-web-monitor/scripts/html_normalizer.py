@@ -75,10 +75,15 @@ BLOCK_TAGS = frozenset(
     }
 )
 NOISE_TOKEN_RE = re.compile(
-    r"(?:^|[-_])(?:ad|ads|advert|banner|breadcrumb|cookie|footer|header|"
+    r"(?:^|[-_])(?:ad|ads|advert|banner|breadcrumb|cookie|footer|"
     r"menu|modal|nav|newsletter|popup|promo|share|sidebar|social|tracking)(?:$|[-_])",
     re.IGNORECASE,
 )
+# Checked separately from ``NOISE_TOKEN_RE`` so it can honor the same
+# nested-content exception as the ``header`` tag rule below: a class/id
+# like ``article-header`` on a heading nested in ``article``/``section``/
+# ``main`` is a content sub-heading, not page chrome.
+HEADER_NOISE_TOKEN_RE = re.compile(r"(?:^|[-_])header(?:$|[-_])", re.IGNORECASE)
 TIMESTAMP_ONLY_RE = re.compile(
     r"^(?:(?:last\s+)?(?:updated|modified|published)\s*[:：]?\s*)?"
     r"(?:\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?"
@@ -293,7 +298,9 @@ def _is_noise(node: Node) -> bool:
     }:
         return True
     tokens = f"{node.attrs.get('id', '')} {node.attrs.get('class', '')}"
-    return bool(NOISE_TOKEN_RE.search(tokens))
+    if NOISE_TOKEN_RE.search(tokens):
+        return True
+    return bool(HEADER_NOISE_TOKEN_RE.search(tokens)) and not _has_content_ancestor(node)
 
 
 def _text_content(node: Node, excluded: set[Node]) -> str:

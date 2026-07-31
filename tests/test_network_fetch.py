@@ -256,6 +256,48 @@ class _RealStalledChunkedServer:
         self._listener.close()
 
 
+class _RealStalledTLSHandshakeServer:
+    """A real local TCP server that accepts a connection, sends the start of
+    a TLS handshake record, then goes completely silent for the given
+    duration.
+
+    ``ssl.SSLSocket.do_handshake()`` reads the raw fd directly through
+    OpenSSL, independent of the ``recv``/``recv_into`` overrides that clamp
+    every other read on this module's sockets to the remaining fetch
+    deadline. Only a real socket proves whether the handshake itself is
+    bounded by that deadline rather than by the connection's original
+    per-op timeout.
+    """
+
+    def __init__(self, hold_seconds: float) -> None:
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self.port = self._listener.getsockname()[1]
+        self._hold_seconds = hold_seconds
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        try:
+            conn, _ = self._listener.accept()
+        except OSError:
+            return
+        with conn:
+            try:
+                conn.recv(65_536)  # ClientHello
+                # A TLS handshake record header (content type 0x16,
+                # version 3.3) declaring more body than is ever delivered,
+                # leaving the client waiting mid-record.
+                conn.sendall(bytes([0x16, 0x03, 0x03, 0x00, 0x40]))
+                time.sleep(self._hold_seconds)
+            except OSError:
+                return
+
+    def close(self) -> None:
+        self._listener.close()
+
+
 class FakeConnection:
     def __init__(self, response: FakeResponse) -> None:
         self.response = response
@@ -696,6 +738,38 @@ class FetchTests(unittest.TestCase):
         # The server holds the connection open for 5s; bailing out near
         # the 0.5s deadline (not after ~5s) proves the recv itself is
         # bounded by the remaining budget, not the original per-op timeout.
+        self.assertLess(elapsed, 2.0)
+
+    def test_pinned_https_connection_deadline_bounds_a_stalled_handshake(
+        self,
+    ) -> None:
+        # The server sends the start of a handshake record then falls
+        # silent for far longer than the fetch's total deadline. Old code
+        # ran the handshake synchronously inside ``wrap_socket()`` using
+        # only the connection's original per-op timeout, so this recv
+        # would block for the server's whole 5s hold. Bailing out near the
+        # 0.5s deadline instead proves the handshake itself is bounded by
+        # the remaining budget, not the original per-op timeout.
+        server = _RealStalledTLSHandshakeServer(hold_seconds=5.0)
+        self.addCleanup(server.close)
+        context = ssl.create_default_context()
+        connection = fetch._PinnedHTTPSConnection(
+            "example.com",
+            "127.0.0.1",
+            server.port,
+            timeout=5.0,
+            allowed_addresses=("127.0.0.1",),
+            context=context,
+            deadline=time.monotonic() + 0.5,
+        )
+        self.addCleanup(connection.close)
+        started = time.perf_counter()
+        with (
+            self.assertRaises(TimeoutError),
+            patch.object(fetch, "validate_peer_address"),
+        ):
+            connection.connect()
+        elapsed = time.perf_counter() - started
         self.assertLess(elapsed, 2.0)
 
     def test_server_and_rate_limit_are_retryable(self) -> None:

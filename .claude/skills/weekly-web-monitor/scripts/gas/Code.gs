@@ -1,6 +1,9 @@
 /**
- * Optional Outbox dispatcher. Set SLACK_WEBHOOK_URL only in Apps Script
- * Properties. Never store the URL in Sheets or source control.
+ * Optional Outbox dispatcher. Set SLACK_WEBHOOK_URL and
+ * ALLOWED_NOTIFICATION_GROUP only in Apps Script Properties. Never store the
+ * URL in Sheets or source control. This dispatcher fixes a single Slack
+ * destination for a single notification_group; rows tagged for any other
+ * group are poisoned rather than silently delivered to the wrong channel.
  */
 const OUTBOX_SHEET = 'Outbox';
 const MAX_ATTEMPTS = 5;
@@ -12,9 +15,13 @@ function dispatchOutbox() {
   try {
     const sheet = SpreadsheetApp.getActive().getSheetByName(OUTBOX_SHEET);
     if (!sheet) throw new Error('Outbox sheet is missing');
-    const webhook = PropertiesService.getScriptProperties()
-      .getProperty('SLACK_WEBHOOK_URL');
+    const properties = PropertiesService.getScriptProperties();
+    const webhook = properties.getProperty('SLACK_WEBHOOK_URL');
     if (!webhook) throw new Error('SLACK_WEBHOOK_URL property is missing');
+    const allowedGroup = properties.getProperty('ALLOWED_NOTIFICATION_GROUP');
+    if (!allowedGroup) {
+      throw new Error('ALLOWED_NOTIFICATION_GROUP property is missing');
+    }
 
     const values = sheet.getDataRange().getValues();
     if (values.length < 2) return;
@@ -48,14 +55,14 @@ function dispatchOutbox() {
       const nextAttempt = row[column.next_attempt_at];
       if (nextAttempt && new Date(nextAttempt).getTime() > Date.now()) continue;
       handled++;
-      dispatchRow_(sheet, rowIndex + 1, row, column, webhook);
+      dispatchRow_(sheet, rowIndex + 1, row, column, webhook, allowedGroup);
     }
   } finally {
     lock.releaseLock();
   }
 }
 
-function dispatchRow_(sheet, rowNumber, row, column, webhook) {
+function dispatchRow_(sheet, rowNumber, row, column, webhook, allowedGroup) {
   let payload;
   try {
     payload = JSON.parse(String(row[column.payload]));
@@ -66,6 +73,15 @@ function dispatchRow_(sheet, rowNumber, row, column, webhook) {
   } catch (error) {
     updateOutbox_(sheet, rowNumber, column, 'poison',
                   Number(row[column.attempt_count]) || 0, '', 'outbox_payload_invalid');
+    return;
+  }
+  if (payload.notification_group !== allowedGroup) {
+    // This dispatcher fixes one Slack destination for one group; a row
+    // tagged for any other group would otherwise be silently delivered to
+    // the wrong channel instead of being rejected.
+    updateOutbox_(sheet, rowNumber, column, 'poison',
+                  Number(row[column.attempt_count]) || 0, '',
+                  'notification_group_mismatch');
     return;
   }
 

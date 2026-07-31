@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import unittest
 
 import support
@@ -332,6 +334,86 @@ class ReplayAndAuditTests(unittest.TestCase):
         self.assertIn("PropertiesService.getScriptProperties()", gas)
         self.assertIn("'sending'", gas)
         self.assertNotRegex(gas, r"https://hooks\.slack\.com/")
+
+    def test_gas_dispatcher_poisons_the_wrong_notification_group(self) -> None:
+        # The Outbox dispatcher fixes a single Slack destination for a
+        # single notification_group. A row tagged for a different group
+        # must be poisoned, not silently delivered to that one webhook,
+        # since that would leak one team's notification to another team's
+        # channel. Only running the real Code.gs through a JS engine (not a
+        # Python re-implementation of its logic) proves this.
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not available to execute Code.gs")
+        gas = (support.SCRIPTS / "gas" / "Code.gs").read_text(encoding="utf-8")
+        header = [
+            "event_id", "target_id", "payload", "status", "attempt_count",
+            "created_at", "updated_at", "next_attempt_at", "last_error",
+        ]
+        allowed_row = [
+            "event-allowed", "target-1",
+            json.dumps({"message": "hello-a", "notification_group": "team-a"}),
+            "pending", 0, "", "", "", "",
+        ]
+        mismatched_row = [
+            "event-mismatched", "target-2",
+            json.dumps({"message": "hello-b", "notification_group": "team-b"}),
+            "pending", 0, "", "", "", "",
+        ]
+        harness = f"""
+'use strict';
+const rows = [{json.dumps(header)}, {json.dumps(allowed_row)}, {json.dumps(mismatched_row)}];
+const fetchCalls = [];
+global.LockService = {{
+  getScriptLock: () => ({{ tryLock: () => true, releaseLock: () => {{}} }}),
+}};
+global.PropertiesService = {{
+  getScriptProperties: () => ({{
+    getProperty: (name) => ({{
+      SLACK_WEBHOOK_URL: 'https://example.test/webhook',
+      ALLOWED_NOTIFICATION_GROUP: 'team-a',
+    }}[name] || null),
+  }}),
+}};
+global.SpreadsheetApp = {{
+  getActive: () => ({{
+    getSheetByName: () => ({{
+      getDataRange: () => ({{ getValues: () => rows.map((row) => row.slice()) }}),
+      getRange: (rowNumber, columnNumber) => ({{
+        setValue: (value) => {{ rows[rowNumber - 1][columnNumber - 1] = value; }},
+      }}),
+    }}),
+  }}),
+  flush: () => {{}},
+}};
+global.UrlFetchApp = {{
+  fetch: (url, options) => {{
+    fetchCalls.push({{url, body: JSON.parse(options.payload)}});
+    return {{ getResponseCode: () => 200 }};
+  }},
+}};
+{gas}
+dispatchOutbox();
+const byEventId = Object.fromEntries(
+  rows.slice(1).map((row) => [row[0], {{status: row[3], last_error: row[8]}}])
+);
+console.log(JSON.stringify({{fetchCalls, byEventId}}));
+"""
+        result = subprocess.run(
+            [node, "-e", harness], capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        outcome = json.loads(result.stdout)
+        self.assertEqual(1, len(outcome["fetchCalls"]))
+        self.assertEqual("hello-a", outcome["fetchCalls"][0]["body"]["text"])
+        self.assertEqual("sent", outcome["byEventId"]["event-allowed"]["status"])
+        self.assertEqual(
+            "poison", outcome["byEventId"]["event-mismatched"]["status"]
+        )
+        self.assertEqual(
+            "notification_group_mismatch",
+            outcome["byEventId"]["event-mismatched"]["last_error"],
+        )
 
 
 if __name__ == "__main__":

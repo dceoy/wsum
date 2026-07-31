@@ -140,14 +140,26 @@ def extract_pdf_text(
         raise MonitorError("pdf_malformed", "document has no PDF signature")
     if b"/Encrypt" in pdf:
         raise MonitorError("pdf_encrypted", "encrypted PDFs are not supported")
-    if b"/ToUnicode" in pdf or b"/Differences" in pdf:
-        # Text-showing operators carry character codes, not text -- codes are
-        # only text once resolved through the active font's /Encoding and any
-        # /ToUnicode CMap. This extractor decodes raw string bytes directly
-        # (UTF-16BE/Latin-1) without resolving either, so a font that remaps
-        # codes via /Differences or /ToUnicode can change what a viewer
-        # renders while every code byte -- and this extractor's hash -- stays
-        # identical. Reject rather than silently hash the wrong text.
+    if (
+        b"/ToUnicode" in pdf
+        or b"/Differences" in pdf
+        or b"/Encoding" in pdf
+        or b"/Type0" in pdf
+        or b"/ObjStm" in pdf
+    ):
+        # Text-showing operators carry character codes, not text -- codes
+        # are only text once resolved through the active font's /Encoding
+        # (any named encoding such as /WinAnsiEncoding or /MacRomanEncoding,
+        # not only a /Differences remap) and any /ToUnicode CMap. Composite
+        # (/Type0) fonts always route codes through a CMap too. Compressed
+        # object streams (/ObjStm) can hide any of these declarations from
+        # this raw marker scan entirely, since font dictionaries stored
+        # there never appear as literal bytes in the file. This extractor
+        # decodes raw string bytes directly (UTF-16BE/Latin-1) without
+        # resolving any of that, so an active encoding that isn't provably
+        # byte-identity-safe can change what a viewer renders while every
+        # code byte -- and this extractor's hash -- stays identical. Reject
+        # rather than silently hash the wrong text.
         raise MonitorError(
             "pdf_unsupported_encoding",
             "PDF uses font encodings that require CMap resolution",

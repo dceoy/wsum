@@ -55,9 +55,13 @@ only happen after a verified network-level egress pinning mechanism is in place.
 Use exactly one path:
 
 - Direct Slack Connector: preferred minimal architecture.
-- GAS Outbox: use `scripts/gas/Code.gs`, store `SLACK_WEBHOOK_URL` in Apps Script
-  Properties, create a time-driven dispatcher trigger, and fix the destination in
-  the webhook or dispatcher configuration. Configure
+- GAS Outbox: use `scripts/gas/Code.gs`, store `SLACK_WEBHOOK_URL` and
+  `ALLOWED_NOTIFICATION_GROUP` in Apps Script Properties, create a time-driven
+  dispatcher trigger, and fix the destination in the webhook or dispatcher
+  configuration. The dispatcher poisons any row whose `notification_group`
+  does not match `ALLOWED_NOTIFICATION_GROUP` instead of delivering it to
+  that one webhook, so every `Targets.notification_group` routed through this
+  path must equal that one configured value. Configure
   `RoutineConfig.delivery_mode=outbox`, inject `OutboxSheetsStore`, and omit the
   direct Slack connector.
 
