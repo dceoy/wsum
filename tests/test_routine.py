@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import support  # noqa: F401
+from diff import DiffConfig
 from drive import SnapshotStore
 from errors import MonitorError
 from memory_adapters import (
@@ -41,6 +42,14 @@ def response(price: int) -> FixtureResponse:
             "<html><body><main><h1>Product</h1>"
             f"<p>Price: ¥{price}</p></main></body></html>"
         ).encode(),
+        "text/html",
+    )
+
+
+def many_lines_response(line_count: int) -> FixtureResponse:
+    body = "".join(f"<p>Line {index}</p>" for index in range(line_count))
+    return FixtureResponse(
+        f"<html><body><main><h1>Product</h1>{body}</main></body></html>".encode(),
         "text/html",
     )
 
@@ -238,6 +247,53 @@ class RoutineTests(unittest.TestCase):
             ["", "connector_unavailable", "connector_unavailable"],
             [attempt.error_code for attempt in result.runs[0].attempts],
         )
+
+    def test_oversized_diff_fails_closed_instead_of_advancing_baseline(self) -> None:
+        class UnreachableSummary:
+            def summarize(self, request):
+                raise AssertionError(
+                    "synthetic budget-exceeded evidence must never reach a "
+                    "summary model"
+                )
+
+        routine_config = RoutineConfig(
+            max_concurrency=2,
+            retry=RetryConfig(),
+            failure_alert_threshold=3,
+            diff=DiffConfig(max_diff_lines=1_000),
+        )
+        baseline_routine = WeeklyMonitorRoutine(
+            store=self.store,
+            snapshots=self.snapshots,
+            summary_client=UnreachableSummary(),
+            slack=self.slack,
+            fetcher=FixtureFetcher({"one": response(1000)}),
+            audit_sink=self.store,
+            config=routine_config,
+            sleeper=lambda _: None,
+        )
+        baseline_routine.run(run_id="budget-1")
+        baseline_hash = self.store.states["one"].normalized_hash
+        self.assertTrue(baseline_hash)
+
+        oversized_routine = WeeklyMonitorRoutine(
+            store=self.store,
+            snapshots=self.snapshots,
+            summary_client=UnreachableSummary(),
+            slack=self.slack,
+            fetcher=FixtureFetcher({"one": many_lines_response(1_500)}),
+            audit_sink=self.store,
+            config=routine_config,
+            sleeper=lambda _: None,
+        )
+        result = oversized_routine.run(run_id="budget-2")
+        self.assertEqual(1, result.metrics.failed)
+        self.assertEqual(
+            "diff_budget_exceeded", self.store.runs["budget-2:one"].error_code
+        )
+        self.assertEqual(baseline_hash, self.store.states["one"].normalized_hash)
+        self.assertEqual(1, self.store.states["one"].consecutive_failures)
+        self.assertEqual(0, len(self.slack.messages))
 
 
 if __name__ == "__main__":

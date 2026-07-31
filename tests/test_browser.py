@@ -182,10 +182,11 @@ class BrowserFetcherTests(unittest.TestCase):
     ):
         context = FakeContext(page)
         browser = FakeBrowser(context)
+        active_config = config or BrowserFetchConfig(verified_egress_pinning=True)
         with patch.dict(sys.modules, playwright_modules(browser)):
             result = fetch_rendered(
                 "https://example.com",
-                config=config,
+                config=active_config,
                 resolver=support.public_resolver,
             )
         return result, context, browser
@@ -244,7 +245,12 @@ class BrowserFetcherTests(unittest.TestCase):
             ],
         )
         with self.assertRaisesRegex(MonitorError, "request limit"):
-            self.run_fake(request_page, config=BrowserFetchConfig(max_requests=1))
+            self.run_fake(
+                request_page,
+                config=BrowserFetchConfig(
+                    max_requests=1, verified_egress_pinning=True
+                ),
+            )
         large_page = FakePage(
             html="<html>" + ("x" * 2_000) + "</html>",
             requests=[FakeRequest("https://example.com")],
@@ -252,7 +258,17 @@ class BrowserFetcherTests(unittest.TestCase):
         with self.assertRaisesRegex(MonitorError, "rendered DOM"):
             self.run_fake(
                 large_page,
-                config=BrowserFetchConfig(max_rendered_bytes=1_024),
+                config=BrowserFetchConfig(
+                    max_rendered_bytes=1_024, verified_egress_pinning=True
+                ),
+            )
+
+    def test_browser_mode_fails_closed_without_verified_egress_pinning(self) -> None:
+        with self.assertRaisesRegex(MonitorError, "browser_egress_not_verified"):
+            fetch_rendered(
+                "https://example.com",
+                config=BrowserFetchConfig(),
+                resolver=support.public_resolver,
             )
 
 

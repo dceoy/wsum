@@ -50,6 +50,11 @@ proxy/`--host-resolver-rules`-style mechanism that preserves Host/SNI) rather th
 relying on Python-side re-resolution; this is not yet implemented, so browser mode
 should not be presented as fully SSRF-safe until it is.
 
+Because this gap has no verified mitigation, `fetch_rendered` fails closed by
+default: it raises `browser_egress_not_verified` unless the operator explicitly
+sets `BrowserFetchConfig.verified_egress_pinning=True`, which should only be done
+after a real network-level pinning mechanism has been configured and verified.
+
 The bundled PDF extractor intentionally supports a conservative text subset. Complex
 PDFs fail closed. Add a new parser only after isolated fuzzing and checklist review.
 

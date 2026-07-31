@@ -268,7 +268,20 @@ class DiffTests(unittest.TestCase):
         self.assertTrue(result.should_summarize)
         self.assertTrue(result.truncated)
         self.assertIn("diff_budget_exceeded", result.scoring_reasons)
+        self.assertTrue(result.budget_exceeded)
+        self.assertTrue(result.as_dict()["budget_exceeded"])
         self.assertEqual(1, len(result.sections))
+
+    def test_budget_exceeded_is_false_for_ordinary_bounded_truncation(self) -> None:
+        before = "\n".join(f"old line {index}" for index in range(500))
+        after = "\n".join(f"new line {index}" for index in range(500))
+        result = compare_content(
+            before,
+            after,
+            config=DiffConfig(max_diff_chars=1_000, max_sections=2),
+        )
+        self.assertTrue(result.truncated)
+        self.assertFalse(result.budget_exceeded)
 
     def test_sections_contain_only_changed_lines_plus_separate_context(self) -> None:
         result = compare_content(

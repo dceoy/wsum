@@ -126,12 +126,17 @@ class DiffResult:
     def should_notify(self) -> bool:
         return False
 
+    @property
+    def budget_exceeded(self) -> bool:
+        return "diff_budget_exceeded" in self.scoring_reasons
+
     def as_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["sections"] = [section.as_dict() for section in self.sections]
         value["scoring_reasons"] = list(self.scoring_reasons)
         value["should_summarize"] = self.should_summarize
         value["should_notify"] = self.should_notify
+        value["budget_exceeded"] = self.budget_exceeded
         return value
 
 

@@ -572,6 +572,13 @@ class WeeklyMonitorRoutine:
                     current_hash=normalized.normalized_hash,
                     config=self.config.diff,
                 )
+                if diff.budget_exceeded:
+                    raise MonitorError(
+                        "diff_budget_exceeded",
+                        "diff exceeded the configured line budget; the change "
+                        "cannot be assessed from synthetic evidence and needs "
+                        "manual review",
+                    )
                 if not diff.should_summarize:
                     with self._snapshot_lock:
                         reference = self.snapshots.save(

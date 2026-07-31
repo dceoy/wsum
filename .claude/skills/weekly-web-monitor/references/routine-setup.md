@@ -46,7 +46,9 @@ attack surface. Never use persistent browser profiles or auto-escalation. Browse
 mode has a known, currently unmitigated DNS-rebinding gap between the guard's
 Python-side validation and Chromium's own connection; see
 [security.md](security.md) before approving it for any target that is not fully
-trusted.
+trusted. `fetch_rendered` fails closed with `browser_egress_not_verified` unless
+`BrowserFetchConfig.verified_egress_pinning=True` is explicitly set, which should
+only happen after a verified network-level egress pinning mechanism is in place.
 
 ## Delivery
 
