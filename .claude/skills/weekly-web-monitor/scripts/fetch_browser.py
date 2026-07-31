@@ -2,6 +2,11 @@
 
 Playwright is an optional runtime dependency. Browser mode is never selected
 automatically, and every request is checked by the same public-network policy.
+Route and response interception is registered at the browser-context level so
+popups inherit the same checks from their first navigation. Chromium still
+performs its own DNS resolution when a route is allowed to continue, so a
+DNS-rebinding attacker can still reach a private address between the guard's
+check and Chromium's connection; see references/security.md.
 """
 
 from __future__ import annotations
@@ -99,8 +104,6 @@ def fetch_rendered(
             java_script_enabled=True,
             service_workers="block",
         )
-        page = context.new_page()
-        page.on("popup", lambda popup: popup.close())
 
         def handle_route(route: Any) -> None:
             nonlocal request_count, blocked_error
@@ -162,8 +165,10 @@ def fetch_rendered(
                     )
                 )
 
-        page.route("**/*", handle_route)
-        page.on("response", handle_response)
+        context.route("**/*", handle_route)
+        context.on("response", handle_response)
+        page = context.new_page()
+        page.on("popup", lambda popup: popup.close())
         try:
             response = page.goto(
                 guard.initial.url,

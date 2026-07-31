@@ -37,6 +37,19 @@ host allowlists, peer checks where exposed by the runtime, ephemeral isolation, 
 resource limits reduce but do not eliminate browser/DNS engine risk. Keep browser
 mode exceptional and prefer network-level egress enforcement in its sandbox.
 
+Known gap: `BrowserNetworkGuard` re-resolves and validates each request's hostname
+in Python before allowing `route.continue_()`, but Chromium performs its own,
+independent DNS resolution when it actually opens the connection. A DNS-rebinding
+host that answers with a public address for the guard's lookups and a private
+address for Chromium's own lookup can still reach the private address; the
+post-response peer check (`validate_response_peer`) detects this only after the
+request has already been delivered, so it stops the run but cannot undo the
+delivery. Closing this gap requires pinning Chromium's connection to the
+guard-validated address set (for example via an external egress
+proxy/`--host-resolver-rules`-style mechanism that preserves Host/SNI) rather than
+relying on Python-side re-resolution; this is not yet implemented, so browser mode
+should not be presented as fully SSRF-safe until it is.
+
 The bundled PDF extractor intentionally supports a conservative text subset. Complex
 PDFs fail closed. Add a new parser only after isolated fuzzing and checklist review.
 

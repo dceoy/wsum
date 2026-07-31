@@ -42,7 +42,11 @@ Use a stable external run ID for retries of the same scheduled invocation.
 Keep `static` as the default. Enable `browser` only after documenting why static
 fetching is insufficient, approving required hostnames, installing an ephemeral
 Playwright runtime, running its security fixtures, and accepting the added cost and
-attack surface. Never use persistent browser profiles or auto-escalation.
+attack surface. Never use persistent browser profiles or auto-escalation. Browser
+mode has a known, currently unmitigated DNS-rebinding gap between the guard's
+Python-side validation and Chromium's own connection; see
+[security.md](security.md) before approving it for any target that is not fully
+trusted.
 
 ## Delivery
 

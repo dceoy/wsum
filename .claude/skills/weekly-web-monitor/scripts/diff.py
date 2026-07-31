@@ -51,6 +51,7 @@ class DiffConfig:
     max_diff_chars: int = 12_000
     max_sections: int = 30
     context_lines: int = 1
+    max_diff_lines: int = 20_000
     price_weight: int = 30
     specification_weight: int = 20
     terms_weight: int = 30
@@ -68,6 +69,10 @@ class DiffConfig:
             raise MonitorError("invalid_configuration", "max_sections must be 1-100")
         if not 0 <= self.context_lines <= 5:
             raise MonitorError("invalid_configuration", "context_lines must be 0-5")
+        if not 1_000 <= self.max_diff_lines <= 200_000:
+            raise MonitorError(
+                "invalid_configuration", "max_diff_lines must be 1000-200000"
+            )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> DiffConfig:
@@ -254,6 +259,28 @@ def _bounded_sections(
     return tuple(output), truncated
 
 
+def _budget_exceeded_result(
+    before_lines: list[str], after_lines: list[str]
+) -> DiffResult:
+    section = DiffSection(
+        _section_id("document", "replace", 0, 0, [], []),
+        "document",
+        "modified",
+        (),
+        (f"{len(before_lines)} lines (diff budget exceeded)",),
+        (f"{len(after_lines)} lines (diff budget exceeded)",),
+    )
+    return DiffResult(
+        "candidate_material",
+        100,
+        "high",
+        1.0,
+        (section,),
+        True,
+        ("diff_budget_exceeded",),
+    )
+
+
 def compare_content(
     previous_text: str | None,
     current_text: str,
@@ -274,6 +301,11 @@ def compare_content(
 
     before_lines = previous_text.splitlines()
     after_lines = current_text.splitlines()
+    if (
+        len(before_lines) > active.max_diff_lines
+        or len(after_lines) > active.max_diff_lines
+    ):
+        return _budget_exceeded_result(before_lines, after_lines)
     matcher = difflib.SequenceMatcher(None, before_lines, after_lines, autojunk=False)
     raw_sections: list[DiffSection] = []
     for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():

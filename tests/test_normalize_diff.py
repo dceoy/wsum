@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import unittest
 
 import support  # noqa: F401
@@ -151,6 +152,27 @@ class NormalizationTests(unittest.TestCase):
         text, _ = normalize_feed(xml)
         self.assertIn("CONTENT Full article body", text)
 
+    def test_rss_content_encoded_survives_alongside_description(self) -> None:
+        def render(encoded: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
+            <channel>
+              <item>
+                <guid>1</guid>
+                <title>Post</title>
+                <description>Stable teaser</description>
+                <content:encoded>{encoded}</content:encoded>
+              </item>
+            </channel></rss>""".encode()
+            text, _ = normalize_feed(xml)
+            return text
+
+        first = render("Original full article body")
+        second = render("Edited full article body")
+        self.assertIn("Stable teaser", first)
+        self.assertIn("Original full article body", first)
+        self.assertNotEqual(first, second)
+
     def test_feed_rejects_entities_malformed_and_type_mismatch(self) -> None:
         with self.assertRaisesRegex(MonitorError, "DOCTYPE"):
             normalize_content(
@@ -232,6 +254,21 @@ class DiffTests(unittest.TestCase):
         self.assertTrue(result.truncated)
         rendered = str(result.as_dict())
         self.assertLess(len(rendered), 3_000)
+
+    def test_oversized_input_short_circuits_instead_of_quadratic_diffing(self) -> None:
+        before = "\n".join(["shared line"] * 40_000)
+        after = "\n".join(["shared line"] * 39_999 + ["changed line"])
+        started = time.monotonic()
+        result = compare_content(
+            before, after, config=DiffConfig(max_diff_lines=20_000)
+        )
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual("candidate_material", result.result)
+        self.assertTrue(result.should_summarize)
+        self.assertTrue(result.truncated)
+        self.assertIn("diff_budget_exceeded", result.scoring_reasons)
+        self.assertEqual(1, len(result.sections))
 
     def test_sections_contain_only_changed_lines_plus_separate_context(self) -> None:
         result = compare_content(

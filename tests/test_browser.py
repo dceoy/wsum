@@ -54,6 +54,27 @@ class FakeResponse:
         return {"ipAddress": self.peer, "port": "443"}
 
 
+class FakePopup:
+    def __init__(self, requests: list[FakeRequest], context: "FakeContext") -> None:
+        self.requests = requests
+        self.context = context
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+        # A real popup's initial request is issued by Chromium as soon as the
+        # popup target is created, independent of when Playwright's "popup"
+        # event reaches Python. Model that by routing it through the
+        # context-level handlers before close() is observed.
+        for request in self.requests:
+            route = FakeRoute(request)
+            self.context.route_handler(route)
+            if not route.aborted and "response" in self.context.handlers:
+                self.context.handlers["response"](
+                    FakeResponse(request.url, headers={"content-length": "100"})
+                )
+
+
 class FakePage:
     def __init__(
         self,
@@ -61,32 +82,35 @@ class FakePage:
         html: str,
         requests: list[FakeRequest],
         timeout: bool = False,
+        popup_requests: list[FakeRequest] | None = None,
     ) -> None:
         self.html = html
         self.requests = requests
         self.timeout = timeout
+        self.popup_requests = popup_requests or []
         self.handlers: dict[str, object] = {}
-        self.route_handler = None
+        self.context: "FakeContext | None" = None
         self.url = requests[0].url
 
     def on(self, event: str, handler) -> None:
         self.handlers[event] = handler
 
-    def route(self, _: str, handler) -> None:
-        self.route_handler = handler
-
     def goto(self, url: str, **_: object) -> FakeResponse:
         self.url = url
         if self.timeout:
             raise FakePlaywrightTimeout
-        assert self.route_handler is not None
+        assert self.context is not None
+        assert self.context.route_handler is not None
         for request in self.requests:
             route = FakeRoute(request)
-            self.route_handler(route)
-            if not route.aborted and "response" in self.handlers:
-                self.handlers["response"](
+            self.context.route_handler(route)
+            if not route.aborted and "response" in self.context.handlers:
+                self.context.handlers["response"](
                     FakeResponse(request.url, headers={"content-length": "100"})
                 )
+        if self.popup_requests:
+            popup = FakePopup(self.popup_requests, self.context)
+            self.handlers["popup"](popup)
         return FakeResponse(url, headers={"etag": "fixture"})
 
     def content(self) -> str:
@@ -97,8 +121,17 @@ class FakeContext:
     def __init__(self, page: FakePage) -> None:
         self.page = page
         self.closed = False
+        self.handlers: dict[str, object] = {}
+        self.route_handler = None
+
+    def route(self, _: str, handler) -> None:
+        self.route_handler = handler
+
+    def on(self, event: str, handler) -> None:
+        self.handlers[event] = handler
 
     def new_page(self) -> FakePage:
+        self.page.context = self
         return self.page
 
     def close(self) -> None:
@@ -185,6 +218,15 @@ class BrowserFetcherTests(unittest.TestCase):
                 self.assertRaisesRegex(MonitorError, "non-public"),
             ):
                 self.run_fake(page)
+
+    def test_popup_with_private_initial_url_is_denied(self) -> None:
+        page = FakePage(
+            html="<html></html>",
+            requests=[FakeRequest("https://example.com")],
+            popup_requests=[FakeRequest("http://169.254.169.254/latest/meta-data")],
+        )
+        with self.assertRaisesRegex(MonitorError, "non-public"):
+            self.run_fake(page)
 
     def test_timeout_request_limit_and_rendered_size_fail(self) -> None:
         timeout_page = FakePage(

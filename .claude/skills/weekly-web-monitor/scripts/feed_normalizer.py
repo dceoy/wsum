@@ -50,6 +50,17 @@ def _first_text(element: ET.Element, *names: str) -> str:
     return ""
 
 
+def _all_text(element: ET.Element, *names: str) -> str:
+    seen: list[str] = []
+    for child in _children(element, *names):
+        value = "".join(child.itertext())
+        if value.strip():
+            cleaned = _clean(value)
+            if cleaned not in seen:
+                seen.append(cleaned)
+    return " ".join(seen)
+
+
 def _entry_link(element: ET.Element) -> str:
     for child in _children(element, "link"):
         href = child.attrib.get("href", "")
@@ -127,7 +138,7 @@ def normalize_feed(
         stable_id = _first_text(entry, "guid", "id") or link
         published = _first_text(entry, "pubdate", "published")
         updated = _first_text(entry, "updated")
-        content = _first_text(entry, "description", "summary", "content", "encoded")
+        content = _all_text(entry, "description", "summary", "content", "encoded")
         if not stable_id:
             stable_id = hashlib.sha256(
                 f"{title}\n{published}\n{content}".encode()
