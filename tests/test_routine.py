@@ -206,6 +206,45 @@ class RoutineTests(unittest.TestCase):
         self.assertEqual(1, flaky_store.states["one"].consecutive_failures)
         self.assertEqual("failed", flaky_store.runs["run-2:one"].result)
 
+    def test_persistent_state_read_failure_still_records_run_without_state_write(
+        self,
+    ) -> None:
+        # get_state fails on every call, including _finish_failure's single
+        # retry. The run must still complete (not raise out of
+        # _process_target) and the real State row must be left completely
+        # untouched rather than replaced with the empty placeholder.
+        self.run_cycle(response(1000), "run-1")
+        baseline_hash = self.store.states["one"].normalized_hash
+        self.assertTrue(baseline_hash)
+
+        class AlwaysFailingStateStore(MemoryOperationalStore):
+            def __init__(self, targets, states) -> None:
+                super().__init__(targets)
+                self.states = states
+
+            def get_state(self, target_id):
+                raise MonitorError("state_read_failed", "simulated persistent failure")
+
+        broken_store = AlwaysFailingStateStore([self.target], dict(self.store.states))
+        routine = WeeklyMonitorRoutine(
+            store=broken_store,
+            snapshots=self.snapshots,
+            summary_client=EvidenceSummaryClient(),
+            slack=self.slack,
+            fetcher=FixtureFetcher({"one": response(1200)}),
+            config=RoutineConfig(
+                max_concurrency=2,
+                retry=RetryConfig(),
+                failure_alert_threshold=3,
+            ),
+            sleeper=lambda _: None,
+        )
+        result = routine.run(run_id="run-2")
+        self.assertEqual(1, result.metrics.failed)
+        self.assertEqual(baseline_hash, broken_store.states["one"].normalized_hash)
+        self.assertEqual(0, broken_store.states["one"].consecutive_failures)
+        self.assertEqual("failed", broken_store.runs["run-2:one"].result)
+
     def test_one_target_failure_does_not_abort_other_targets(self) -> None:
         targets = [make_target("good"), make_target("bad")]
         store = MemoryOperationalStore(targets)
