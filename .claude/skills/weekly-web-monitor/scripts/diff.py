@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import sys
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -52,6 +53,7 @@ class DiffConfig:
     max_sections: int = 30
     context_lines: int = 1
     max_diff_lines: int = 20_000
+    max_diff_complexity: int = 2_000_000
     price_weight: int = 30
     specification_weight: int = 20
     terms_weight: int = 30
@@ -72,6 +74,11 @@ class DiffConfig:
         if not 1_000 <= self.max_diff_lines <= 200_000:
             raise MonitorError(
                 "invalid_configuration", "max_diff_lines must be 1000-200000"
+            )
+        if not 100_000 <= self.max_diff_complexity <= 50_000_000:
+            raise MonitorError(
+                "invalid_configuration",
+                "max_diff_complexity must be 100000-50000000",
             )
 
     @classmethod
@@ -130,6 +137,10 @@ class DiffResult:
     def budget_exceeded(self) -> bool:
         return "diff_budget_exceeded" in self.scoring_reasons
 
+    @property
+    def signal_section_truncated(self) -> bool:
+        return "material_signal_truncated" in self.scoring_reasons
+
     def as_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["sections"] = [section.as_dict() for section in self.sections]
@@ -178,6 +189,19 @@ def _changed_char_ratio(
     )
     denominator = max(len(previous_text), len(current_text), 1)
     return min(1.0, changed / denominator)
+
+
+def _section_signal(section: DiffSection) -> bool:
+    joined = "\n".join((*section.before, *section.after))
+    return any(
+        pattern.search(joined)
+        for pattern in (PRICE_RE, SPEC_RE, TERMS_RE, AVAILABILITY_RE, ELIGIBILITY_RE)
+    )
+
+
+def _section_priority(section: DiffSection) -> tuple[bool, int]:
+    size = sum(len(line) for line in (*section.before, *section.after))
+    return (not _section_signal(section), -size)
 
 
 def _score(
@@ -264,6 +288,35 @@ def _bounded_sections(
     return tuple(output), truncated
 
 
+def _complexity_budget_exceeded(
+    before_lines: list[str], after_lines: list[str], limit: int
+) -> bool:
+    """Estimate SequenceMatcher's worst-case matching cost before running it.
+
+    ``difflib.SequenceMatcher`` with ``autojunk=False`` does O(count_before(v) *
+    count_after(v)) work for each line value ``v`` shared by both sequences.
+    A document dominated by a handful of heavily repeated lines (rather than
+    simply many lines) can hit this cost well under ``max_diff_lines``, so it
+    must be bounded independently of the line-count cap.
+    """
+    before_counts = Counter(before_lines)
+    after_counts = Counter(after_lines)
+    smaller, larger = (
+        (before_counts, after_counts)
+        if len(before_counts) <= len(after_counts)
+        else (after_counts, before_counts)
+    )
+    total = 0
+    for value, count in smaller.items():
+        other = larger.get(value)
+        if not other:
+            continue
+        total += count * other
+        if total > limit:
+            return True
+    return False
+
+
 def _budget_exceeded_result(
     before_lines: list[str], after_lines: list[str]
 ) -> DiffResult:
@@ -309,6 +362,9 @@ def compare_content(
     if (
         len(before_lines) > active.max_diff_lines
         or len(after_lines) > active.max_diff_lines
+        or _complexity_budget_exceeded(
+            before_lines, after_lines, active.max_diff_complexity
+        )
     ):
         return _budget_exceeded_result(before_lines, after_lines)
     matcher = difflib.SequenceMatcher(None, before_lines, after_lines, autojunk=False)
@@ -344,7 +400,15 @@ def compare_content(
         )
     ratio = _changed_char_ratio(previous_text, current_text, raw_sections)
     score, reasons = _score(ratio, raw_sections, active)
-    sections, truncated = _bounded_sections(raw_sections, active)
+    ordered_sections = sorted(raw_sections, key=_section_priority)
+    sections, truncated = _bounded_sections(ordered_sections, active)
+    if truncated:
+        signal_ids = {
+            section.section_id for section in raw_sections if _section_signal(section)
+        }
+        retained_ids = {section.section_id for section in sections}
+        if signal_ids - retained_ids:
+            reasons = (*reasons, "material_signal_truncated")
     result = "minor" if score < active.minor_threshold else "candidate_material"
     significance = (
         "minor"

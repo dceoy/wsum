@@ -54,6 +54,27 @@ def many_lines_response(line_count: int) -> FixtureResponse:
     )
 
 
+def paragraphs_response(paragraphs: list[str]) -> FixtureResponse:
+    body = "".join(f"<p>{text}</p>" for text in paragraphs)
+    return FixtureResponse(
+        f"<html><body><main><h1>Product</h1>{body}</main></body></html>".encode(),
+        "text/html",
+    )
+
+
+class NonMaterialSummary:
+    def summarize(self, request):
+        return {
+            "material": False,
+            "significance": request["deterministic_assessment"]["significance"],
+            "summary_ja": "重要な変更は確認されませんでした。",
+            "evidence": [],
+            "recommended_action_ja": "",
+            "notification_text_ja": "",
+            "source_url": request["target"]["source_url"],
+        }
+
+
 class RoutineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.target = make_target()
@@ -294,6 +315,113 @@ class RoutineTests(unittest.TestCase):
         self.assertEqual(baseline_hash, self.store.states["one"].normalized_hash)
         self.assertEqual(1, self.store.states["one"].consecutive_failures)
         self.assertEqual(0, len(self.slack.messages))
+
+    def test_non_material_over_ordinary_truncation_still_advances_baseline(
+        self,
+    ) -> None:
+        # 40 changed paragraphs with one price change buried among them: this
+        # truncates under a small max_sections, but the price section is
+        # prioritized into the retained evidence, so a genuine non-material
+        # verdict from the model is trusted and the baseline still advances.
+        baseline_paragraphs = [
+            "Price: ¥10" if index == 35 else f"Note {index} original"
+            for index in range(40)
+        ]
+        changed_paragraphs = [
+            "Price: ¥20" if index == 35 else f"Note {index} changed"
+            for index in range(40)
+        ]
+        routine_config = RoutineConfig(
+            max_concurrency=2,
+            retry=RetryConfig(),
+            failure_alert_threshold=3,
+            diff=DiffConfig(max_sections=30),
+        )
+        baseline_routine = WeeklyMonitorRoutine(
+            store=self.store,
+            snapshots=self.snapshots,
+            summary_client=NonMaterialSummary(),
+            slack=self.slack,
+            fetcher=FixtureFetcher({"one": paragraphs_response(baseline_paragraphs)}),
+            audit_sink=self.store,
+            config=routine_config,
+            sleeper=lambda _: None,
+        )
+        baseline_routine.run(run_id="signal-1")
+        baseline_hash = self.store.states["one"].normalized_hash
+        self.assertTrue(baseline_hash)
+
+        changed_routine = WeeklyMonitorRoutine(
+            store=self.store,
+            snapshots=self.snapshots,
+            summary_client=NonMaterialSummary(),
+            slack=self.slack,
+            fetcher=FixtureFetcher({"one": paragraphs_response(changed_paragraphs)}),
+            audit_sink=self.store,
+            config=routine_config,
+            sleeper=lambda _: None,
+        )
+        result = changed_routine.run(run_id="signal-2")
+        self.assertEqual(1, result.metrics.minor)
+        self.assertEqual(
+            "non_material", self.store.runs["signal-2:one"].result
+        )
+        self.assertNotEqual(baseline_hash, self.store.states["one"].normalized_hash)
+        self.assertEqual(0, self.store.states["one"].consecutive_failures)
+
+    def test_truncated_signal_sections_with_non_material_verdict_fail_closed(
+        self,
+    ) -> None:
+        # Five separate price changes but only two sections fit the budget:
+        # some signal-bearing evidence is unavoidably dropped, so a
+        # non-material verdict cannot be trusted to advance the baseline.
+        # Anchor paragraphs between each price keep them as distinct diff
+        # opcodes instead of collapsing into a single contiguous replace.
+        baseline_paragraphs = []
+        changed_paragraphs = []
+        for index in range(5):
+            baseline_paragraphs.append(f"Anchor {index}")
+            changed_paragraphs.append(f"Anchor {index}")
+            baseline_paragraphs.append(f"Price: ¥{100 + index}")
+            changed_paragraphs.append(f"Price: ¥{200 + index}")
+        routine_config = RoutineConfig(
+            max_concurrency=2,
+            retry=RetryConfig(),
+            failure_alert_threshold=3,
+            diff=DiffConfig(max_sections=2),
+        )
+        baseline_routine = WeeklyMonitorRoutine(
+            store=self.store,
+            snapshots=self.snapshots,
+            summary_client=NonMaterialSummary(),
+            slack=self.slack,
+            fetcher=FixtureFetcher({"one": paragraphs_response(baseline_paragraphs)}),
+            audit_sink=self.store,
+            config=routine_config,
+            sleeper=lambda _: None,
+        )
+        baseline_routine.run(run_id="dropped-1")
+        baseline_hash = self.store.states["one"].normalized_hash
+        self.assertTrue(baseline_hash)
+
+        changed_routine = WeeklyMonitorRoutine(
+            store=self.store,
+            snapshots=self.snapshots,
+            summary_client=NonMaterialSummary(),
+            slack=self.slack,
+            fetcher=FixtureFetcher({"one": paragraphs_response(changed_paragraphs)}),
+            audit_sink=self.store,
+            config=routine_config,
+            sleeper=lambda _: None,
+        )
+        result = changed_routine.run(run_id="dropped-2")
+        self.assertEqual(1, result.metrics.failed)
+        self.assertEqual(
+            "truncated_diff_non_material",
+            self.store.runs["dropped-2:one"].error_code,
+        )
+        self.assertEqual(baseline_hash, self.store.states["one"].normalized_hash)
+        self.assertEqual(1, self.store.states["one"].consecutive_failures)
 
 
 if __name__ == "__main__":

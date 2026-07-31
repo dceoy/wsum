@@ -32,11 +32,45 @@ class FakeResponse:
         return chunk
 
 
+class FakeSocket:
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TrickleResponse(FakeResponse):
+    """Sends one byte per read, just under the per-op timeout each time."""
+
+    def __init__(
+        self, clock: FakeClock, seconds_per_byte: float, total_bytes: int
+    ) -> None:
+        super().__init__(200, b"x" * total_bytes, {"Content-Type": "text/html"})
+        self._clock = clock
+        self._seconds_per_byte = seconds_per_byte
+        self.read_count = 0
+
+    def read(self, amount: int) -> bytes:
+        self._clock.advance(self._seconds_per_byte)
+        self.read_count += 1
+        return super().read(min(amount, 1))
+
+
 class FakeConnection:
     def __init__(self, response: FakeResponse) -> None:
         self.response = response
         self.closed = False
         self.request_headers: dict[str, str] = {}
+        self.sock = FakeSocket()
 
     def request(self, method: str, path: str, headers: dict[str, str]) -> None:
         self.method = method
@@ -251,6 +285,33 @@ class FetchTests(unittest.TestCase):
                 fetch_url("https://example.com", resolver=support.public_resolver)
             self.assertEqual("fetch_timeout", raised.exception.code)
             self.assertTrue(raised.exception.retryable)
+
+    def test_slow_trickle_is_stopped_by_the_total_deadline(self) -> None:
+        # Each read individually completes just before the per-op timeout, so
+        # a per-read socket timeout alone never fires; only a total wall-clock
+        # deadline across all reads can stop this from running indefinitely.
+        clock = FakeClock()
+        response = TrickleResponse(clock, seconds_per_byte=10.0, total_bytes=10_000_000)
+        connection = FakeConnection(response)
+        with (
+            patch.object(fetch, "monotonic", clock.monotonic),
+            patch.object(fetch, "_open_connection", return_value=connection),
+        ):
+            with self.assertRaises(MonitorError) as raised:
+                fetch_url(
+                    "https://example.com",
+                    resolver=support.public_resolver,
+                    config=FetchConfig(
+                        timeout_seconds=15.0,
+                        max_total_seconds=60.0,
+                        max_response_bytes=10_000_000,
+                    ),
+                )
+        self.assertEqual("fetch_timeout", raised.exception.code)
+        self.assertTrue(raised.exception.retryable)
+        # It must have bailed out via the deadline, not by reading everything:
+        # 60 seconds of budget at 10 seconds per byte allows at most 6 reads.
+        self.assertLessEqual(response.read_count, 6)
 
     def test_server_and_rate_limit_are_retryable(self) -> None:
         for status, code in ((429, "http_rate_limited"), (503, "http_server_error")):

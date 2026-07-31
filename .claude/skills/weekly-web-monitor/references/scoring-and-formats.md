@@ -36,6 +36,21 @@ default, at most 30 sections, and at most 12,000 changed-context characters.
 Include stable section IDs and the nearest heading or feed entry anchor. Mark
 truncation explicitly.
 
+`SequenceMatcher` with auto-junk disabled does O(count_before(v) * count_after(v))
+work per repeated line value `v`; a document dominated by a handful of heavily
+repeated lines can hit that cost well under the line-count cap. Before diffing,
+estimate this cost from per-line frequency counts and short-circuit to the same
+budget-exceeded result as the line-count cap (`diff_budget_exceeded`, a synthetic
+document-level section, fail-closed) when it exceeds `max_diff_complexity`.
+
+When the retained section budget (30 sections / 12,000 characters) cannot hold
+every changed section, prioritize sections that match a scoring signal (price,
+specification, terms, availability, eligibility) over sections that do not, so a
+truncated evidence set is never missing the content that drove the score. If even
+the signal-bearing sections do not all fit, mark `signal_section_truncated`: the
+routine must not trust a `material=false` verdict made over that incomplete
+evidence to advance the baseline (see routine-setup.md).
+
 Equal hashes return `unchanged`. A missing previous snapshot returns
 `baseline_created` and never notifies.
 
@@ -61,7 +76,11 @@ edits.
 
 ## Resource and retry defaults
 
-- Static timeout: 15 seconds.
+- Static timeout: 15 seconds per socket operation (connect, header read, or a
+  single body-read chunk), bounded by a 60 second total wall-clock deadline
+  across connect, redirects, and all body reads for one `fetch_url` call. The
+  per-op timeout alone cannot stop a server that trickles single bytes just
+  before each timeout; the total deadline can.
 - Redirects: 5 maximum.
 - Fetched response: 5 MB maximum.
 - Loaded normalized snapshot: 10 MB maximum.

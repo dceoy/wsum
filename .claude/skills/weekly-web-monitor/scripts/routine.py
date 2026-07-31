@@ -620,6 +620,14 @@ class WeeklyMonitorRoutine:
                     source_url=target.url,
                     max_notification_chars=self.config.max_notification_chars,
                 )
+                if not validated["material"] and diff.signal_section_truncated:
+                    raise MonitorError(
+                        "truncated_diff_non_material",
+                        "diff truncation dropped a price/terms/availability/"
+                        "specification/eligibility section that the model never "
+                        "saw; a non-material verdict over incomplete evidence "
+                        "needs manual review before the baseline can advance",
+                    )
                 with self._snapshot_lock:
                     reference = self.snapshots.save(
                         target.target_id,

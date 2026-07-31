@@ -283,6 +283,86 @@ class DiffTests(unittest.TestCase):
         self.assertTrue(result.truncated)
         self.assertFalse(result.budget_exceeded)
 
+    def test_repeated_lines_below_the_line_cap_still_short_circuit(self) -> None:
+        # Below max_diff_lines, so the existing line-count guard cannot fire;
+        # only the complexity budget can stop the O(n^2) SequenceMatcher pass.
+        before = "\n".join(["shared line"] * 19_999)
+        after = "\n".join(["shared line"] * 19_998 + ["changed line"])
+        started = time.monotonic()
+        result = compare_content(
+            before, after, config=DiffConfig(max_diff_lines=20_000)
+        )
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.0)
+        self.assertTrue(result.budget_exceeded)
+        self.assertTrue(result.truncated)
+
+    def test_multi_value_repetition_also_bounded_by_complexity_budget(self) -> None:
+        # A different adversarial shape than the single-value case above: ten
+        # distinct values repeated evenly, at the line-count cap boundary.
+        before_lines = [f"value {index % 10}" for index in range(20_000)]
+        after_lines = list(before_lines)
+        after_lines[10_000] = "changed line"
+        started = time.monotonic()
+        result = compare_content(
+            "\n".join(before_lines),
+            "\n".join(after_lines),
+            config=DiffConfig(max_diff_lines=20_000),
+        )
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.0)
+        self.assertTrue(result.budget_exceeded)
+
+    def test_ordinary_repetition_stays_under_the_complexity_budget(self) -> None:
+        before_lines = (
+            ["separator"] * 500 + ["Price: $10"] + [f"row {i}" for i in range(500)]
+        )
+        after_lines = (
+            ["separator"] * 500 + ["Price: $20"] + [f"row {i}" for i in range(500)]
+        )
+        result = compare_content("\n".join(before_lines), "\n".join(after_lines))
+        self.assertFalse(result.budget_exceeded)
+        self.assertIn("price", result.scoring_reasons)
+
+    def test_signal_bearing_section_survives_section_count_truncation(self) -> None:
+        before_lines: list[str] = []
+        after_lines: list[str] = []
+        for index in range(40):
+            before_lines.append(f"anchor {index}")
+            after_lines.append(f"anchor {index}")
+            if index == 35:
+                before_lines.append("Price: $10")
+                after_lines.append("Price: $20")
+            else:
+                before_lines.append(f"note {index} original")
+                after_lines.append(f"note {index} changed")
+        result = compare_content(
+            "\n".join(before_lines),
+            "\n".join(after_lines),
+            config=DiffConfig(max_sections=30),
+        )
+        self.assertTrue(result.truncated)
+        self.assertFalse(result.signal_section_truncated)
+        self.assertTrue(
+            any("Price: $20" in section.after for section in result.sections)
+        )
+
+    def test_signal_section_truncated_when_not_all_signals_fit(self) -> None:
+        before_lines = []
+        after_lines = []
+        for index in range(5):
+            before_lines.append(f"anchor {index}")
+            after_lines.append(f"anchor {index}")
+            before_lines.append(f"Price: ${100 + index}")
+            after_lines.append(f"Price: ${200 + index}")
+        result = compare_content(
+            "\n".join(before_lines),
+            "\n".join(after_lines),
+            config=DiffConfig(max_sections=2),
+        )
+        self.assertTrue(result.truncated)
+        self.assertTrue(result.signal_section_truncated)
+
     def test_sections_contain_only_changed_lines_plus_separate_context(self) -> None:
         result = compare_content(
             "# Product\nPrice $10\nAvailable",

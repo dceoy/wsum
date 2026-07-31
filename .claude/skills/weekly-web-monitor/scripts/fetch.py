@@ -10,6 +10,7 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -40,6 +41,7 @@ SUPPORTED_CONTENT_TYPES = frozenset(
 @dataclass(frozen=True, slots=True)
 class FetchConfig:
     timeout_seconds: float = 15.0
+    max_total_seconds: float = 60.0
     max_redirects: int = 5
     max_response_bytes: int = 5_000_000
     user_agent: str = "weekly-web-monitor/1.0"
@@ -48,6 +50,15 @@ class FetchConfig:
         if not 0.1 <= self.timeout_seconds <= 120:
             raise MonitorError(
                 "invalid_configuration", "timeout must be 0.1-120 seconds"
+            )
+        if not 1.0 <= self.max_total_seconds <= 600.0:
+            raise MonitorError(
+                "invalid_configuration", "max_total_seconds must be 1-600 seconds"
+            )
+        if self.max_total_seconds < self.timeout_seconds:
+            raise MonitorError(
+                "invalid_configuration",
+                "max_total_seconds must be at least timeout_seconds",
             )
         if not 0 <= self.max_redirects <= 10:
             raise MonitorError("invalid_configuration", "max_redirects must be 0-10")
@@ -154,7 +165,7 @@ def _host_header(target: ResolvedTarget) -> str:
 def _open_connection(
     target: ResolvedTarget,
     address: str,
-    config: FetchConfig,
+    timeout: float,
     ssl_context: ssl.SSLContext,
 ) -> http.client.HTTPConnection:
     if target.scheme == "https":
@@ -162,7 +173,7 @@ def _open_connection(
             target.host,
             address,
             target.port,
-            config.timeout_seconds,
+            timeout,
             target.addresses,
             ssl_context,
         )
@@ -170,7 +181,7 @@ def _open_connection(
         target.host,
         address,
         target.port,
-        config.timeout_seconds,
+        timeout,
         target.addresses,
     )
 
@@ -230,6 +241,7 @@ def fetch_url(
     etag = _safe_validator(etag, "ETag")
     last_modified = _safe_validator(last_modified, "Last-Modified")
     redirects = 0
+    deadline = monotonic() + active_config.max_total_seconds
     while True:
         headers = {
             "Accept": "text/html,application/xhtml+xml,application/pdf,"
@@ -251,11 +263,24 @@ def fetch_url(
         connection: http.client.HTTPConnection | None = None
         last_error: Exception | None = None
         for address in target.addresses:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                last_error = TimeoutError()
+                break
             try:
                 connection = _open_connection(
-                    target, address, active_config, tls_context
+                    target,
+                    address,
+                    min(active_config.timeout_seconds, remaining),
+                    tls_context,
                 )
                 connection.request("GET", _request_path(target.url), headers=headers)
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise TimeoutError()
+                connection.sock.settimeout(
+                    min(active_config.timeout_seconds, remaining)
+                )
                 response = connection.getresponse()
                 break
             except TimeoutError as exc:
@@ -349,6 +374,16 @@ def fetch_url(
             chunks: list[bytes] = []
             size = 0
             while True:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise MonitorError(
+                        "fetch_timeout",
+                        "response read exceeded the total request deadline",
+                        retryable=True,
+                    )
+                connection.sock.settimeout(
+                    min(active_config.timeout_seconds, remaining)
+                )
                 chunk = response.read(
                     min(65_536, active_config.max_response_bytes - size + 1)
                 )

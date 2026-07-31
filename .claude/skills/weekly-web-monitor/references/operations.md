@@ -30,7 +30,10 @@ approval.
 2. Do not paste fetched bodies, connector errors, credentials, or signed URLs into
    logs or tickets.
 3. Classify retryable transport/platform failures separately from permanent policy,
-   selector, parser, or validation failures.
+   selector, parser, or validation failures. `diff_budget_exceeded` and
+   `truncated_diff_non_material` are neither: they mean the deterministic diff or
+   the model's evidence could not rule out a material change, so the baseline was
+   intentionally not advanced. Investigate manually; do not just retry.
 4. Confirm the previous state hash/reference remains intact.
 5. Fix configuration or parser policy, run local fixtures, then retry with a stable
    external run ID.

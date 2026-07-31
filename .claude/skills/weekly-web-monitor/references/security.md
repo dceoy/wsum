@@ -27,6 +27,7 @@ The critical boundaries are:
 | Browser exfiltration | Explicit mode and allowed hosts; route every request; block service workers, downloads, pop-ups, media/fonts, private hosts, excess requests, excess declared bytes, and excess DOM output; destroy context |
 | Prompt injection | Never send raw HTML or unrelated page content; fixed system prompt treats page instructions as data; page content cannot select tools, connectors, destination, or data; validate output evidence and instruction-like text |
 | Oversized/parser attacks | Bound compressed input, decompressed PDF streams, objects, feed entries, response bytes, rendered bytes, diff sections, and output lengths; reject XML DTD/entities and encrypted/image-only PDFs |
+| Slow-trickle / algorithmic DoS | A total wall-clock deadline across connect, redirects, and body reads (`max_total_seconds`) bounds one fetch regardless of per-op timeouts; a per-line-frequency complexity estimate (`max_diff_complexity`) short-circuits `SequenceMatcher` before its worst-case quadratic cost, independently of the line-count cap |
 | Duplicate/ambiguous delivery | Stable event ID; persistent state before and after send; never auto-retry `pending`/`sending`; direct and Outbox paths mutually exclusive |
 | Secret leakage | No credentials in code, Sheets, URLs, model context, logs, errors, fixtures, snapshots, or audit metadata; native secret stores only |
 | Connector misuse | Least-privilege scopes; deployment-owned destination mapping; deterministic code chooses connector calls, never page/model content |
