@@ -88,6 +88,20 @@ _ALLOWED_CHARSET_CODECS = frozenset(
 )
 
 
+def _decode_strict(body: bytes, codec_name: str) -> str:
+    # errors="replace" would map distinct invalid byte sequences to the same
+    # U+FFFD filler, so two different malformed responses could normalize to
+    # identical text and hashes and silently mask a real change. Decoding
+    # strictly and failing closed keeps a malformed body from ever being
+    # treated as equivalent to another one.
+    try:
+        return body.decode(codec_name)
+    except UnicodeDecodeError as exc:
+        raise MonitorError(
+            "malformed_text", "document bytes are not valid for the detected charset"
+        ) from exc
+
+
 def _decode_text(body: bytes, charset: str = "") -> str:
     declared = charset.strip()
     declared_unsupported = False
@@ -102,7 +116,7 @@ def _decode_text(body: bytes, charset: str = "") -> str:
         # not start hard-failing.
         if codec is not None:
             if codec.name in _ALLOWED_CHARSET_CODECS:
-                return body.decode(codec.name, errors="replace")
+                return _decode_strict(body, codec.name)
             # A declared charset that *does* resolve to a real codec but
             # isn't allowlisted (e.g. iso-2022-jp) must not silently fall
             # through to the UTF-8 default below -- that would decode
@@ -111,9 +125,9 @@ def _decode_text(body: bytes, charset: str = "") -> str:
             # to rescue it first, same as a genuinely absent charset.
             declared_unsupported = True
     if body.startswith(codecs.BOM_UTF8):
-        return body.decode("utf-8-sig", errors="replace")
+        return _decode_strict(body, "utf-8-sig")
     if body.startswith((codecs.BOM_UTF16_BE, codecs.BOM_UTF16_LE)):
-        return body.decode("utf-16", errors="replace")
+        return _decode_strict(body, "utf-16")
     match = CHARSET_RE.search(body[:4_096])
     if match is None and declared_unsupported:
         raise MonitorError(
@@ -128,7 +142,7 @@ def _decode_text(body: bytes, charset: str = "") -> str:
         ) from exc
     if codec.name not in _ALLOWED_CHARSET_CODECS:
         raise MonitorError("unsupported_charset", "document charset is unsupported")
-    return body.decode(codec.name, errors="replace")
+    return _decode_strict(body, codec.name)
 
 
 def _normalize_plain_text(body: bytes, charset: str = "") -> str:

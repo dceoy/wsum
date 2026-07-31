@@ -102,11 +102,14 @@ class NormalizationTests(unittest.TestCase):
 
     def test_http_charset_is_used_before_bom_or_body_sniffing(self) -> None:
         body = "価格改定のお知らせ".encode("shift_jis")
-        without_charset = normalize_content(body, content_type="text/plain")
+        # Without the declared charset, the shift_jis bytes are not valid
+        # UTF-8 and must fail closed rather than silently decode as garbage
+        # replacement text (which could mask a real change).
+        with self.assertRaisesRegex(MonitorError, "malformed"):
+            normalize_content(body, content_type="text/plain")
         with_charset = normalize_content(
             body, content_type="text/plain", charset="shift_jis"
         )
-        self.assertNotEqual("価格改定のお知らせ", without_charset.text)
         self.assertEqual("価格改定のお知らせ", with_charset.text)
 
     def test_unusable_declared_charset_falls_back_to_bom_instead_of_failing(
@@ -143,6 +146,21 @@ class NormalizationTests(unittest.TestCase):
             body, content_type="text/plain", charset="iso-2022-jp"
         )
         self.assertIn("価格改定のお知らせ", result.text)
+
+    def test_malformed_bytes_fail_closed_instead_of_collapsing_to_replacement(
+        self,
+    ) -> None:
+        # Two distinct invalid UTF-8 byte sequences both decode under
+        # errors="replace" to the same U+FFFD-filled text ("Price: �10"),
+        # which would make genuinely different responses hash identically
+        # and silently mask a real change. Decoding must fail closed on
+        # both instead of quietly treating them as equivalent.
+        first = b"Price: \xff10"
+        second = b"Price: \xfe10"
+        with self.assertRaisesRegex(MonitorError, "malformed"):
+            normalize_content(first, content_type="text/plain")
+        with self.assertRaisesRegex(MonitorError, "malformed"):
+            normalize_content(second, content_type="text/plain")
 
     def test_meaningful_price_specification_and_terms_change_hash(self) -> None:
         values = [
