@@ -13,6 +13,12 @@ TEXT_BLOCK_RE = re.compile(rb"BT(.*?)ET", re.DOTALL)
 TJ_RE = re.compile(rb"\[(.*?)\]\s*TJ", re.DOTALL)
 TJ_ITEM_RE = re.compile(rb"\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>")
 SINGLE_TJ_RE = re.compile(rb"(\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>)\s*Tj")
+# ' (move to next line and show text) and " (set word/char spacing, move to
+# next line, show text) also show a single literal/hex string operand -- the
+# numeric word/char-spacing operands of " precede the string, so capturing
+# the operand immediately before the operator is sufficient for extraction.
+SINGLE_QUOTE_RE = re.compile(rb"(\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>)\s*'")
+DOUBLE_QUOTE_RE = re.compile(rb"(\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>)\s*\"")
 METADATA_RE = re.compile(rb"/(Title|Author|Subject)\s*\((?:\\.|[^\\()])*\)")
 
 
@@ -152,17 +158,19 @@ def extract_pdf_text(
                 text = "".join(values).strip()
                 if text:
                     fragments.append(text)
-            for match in SINGLE_TJ_RE.finditer(block):
-                if any(start <= match.start() < end for start, end in consumed):
-                    continue
-                pdf_string = match.group(1)
-                text = (
-                    _decode_literal(pdf_string)
-                    if pdf_string.startswith(b"(")
-                    else _decode_hex(pdf_string)
-                ).strip()
-                if text:
-                    fragments.append(text)
+            for pattern in (SINGLE_TJ_RE, SINGLE_QUOTE_RE, DOUBLE_QUOTE_RE):
+                for match in pattern.finditer(block):
+                    if any(start <= match.start() < end for start, end in consumed):
+                        continue
+                    consumed.add(match.span())
+                    pdf_string = match.group(1)
+                    text = (
+                        _decode_literal(pdf_string)
+                        if pdf_string.startswith(b"(")
+                        else _decode_hex(pdf_string)
+                    ).strip()
+                    if text:
+                        fragments.append(text)
     lines = [
         re.sub(r"\s+", " ", unicodedata.normalize("NFKC", fragment)).strip()
         for fragment in fragments

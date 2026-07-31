@@ -604,6 +604,7 @@ class WeeklyMonitorRoutine:
                     previous_hash=previous_state.normalized_hash,
                     current_hash=normalized.normalized_hash,
                     config=self.config.diff,
+                    watch_focus=target.watch_focus,
                 )
                 if diff.budget_exceeded:
                     raise MonitorError(

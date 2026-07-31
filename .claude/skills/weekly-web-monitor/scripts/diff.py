@@ -359,6 +359,7 @@ def compare_content(
     previous_hash: str = "",
     current_hash: str = "",
     config: DiffConfig | None = None,
+    watch_focus: str = "",
 ) -> DiffResult:
     active = config or DiffConfig()
     if previous_text is None:
@@ -428,9 +429,22 @@ def compare_content(
         if signal_ids - fully_retained_ids:
             reasons = (*reasons, "material_signal_truncated")
     result = "minor" if score < active.minor_threshold else "candidate_material"
+    if (
+        result == "minor"
+        and watch_focus.strip()
+        and "noise_only" not in reasons
+    ):
+        # The deterministic score/pattern gate has no notion of a target's
+        # configured watch_focus (e.g. "executive changes"), which rarely
+        # matches the fixed price/spec/terms/availability/eligibility
+        # patterns above. Rather than silently discard a non-noise change on
+        # a focused target, always let the summary model -- which does see
+        # watch_focus -- assess it.
+        result = "candidate_material"
+        reasons = (*reasons, "watch_focus_configured")
     significance = (
         "minor"
-        if score < active.minor_threshold
+        if result == "minor"
         else "high"
         if score >= active.high_threshold
         else "moderate"

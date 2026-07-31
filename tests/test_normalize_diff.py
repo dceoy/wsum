@@ -318,6 +318,33 @@ class NormalizationTests(unittest.TestCase):
         self.assertIn("Total: 9999", after.text)
         self.assertNotEqual(before.normalized_hash, after.normalized_hash)
 
+    def test_pdf_quote_operators_are_not_silently_dropped(self) -> None:
+        # ' (move to next line, show text) and " (set spacing, move to next
+        # line, show text) are valid text-showing operators alongside Tj/TJ.
+        # A parser that only understands Tj/TJ extracts the header but
+        # silently drops content shown only via ' or ", so an edit confined
+        # to that content would leave the normalized hash unchanged.
+        before = normalize_content(
+            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
+            b"BT (Header) Tj (Old status) ' ET\nendstream\nendobj\n%%EOF",
+            content_type="application/pdf",
+        )
+        after = normalize_content(
+            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
+            b"BT (Header) Tj (New status) ' ET\nendstream\nendobj\n%%EOF",
+            content_type="application/pdf",
+        )
+        self.assertIn("Old status", before.text)
+        self.assertIn("New status", after.text)
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
+        double_quote = normalize_content(
+            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
+            b'BT (Header) Tj 0 0 (Quoted status) " ET\nendstream\nendobj\n%%EOF',
+            content_type="application/pdf",
+        )
+        self.assertIn("Quoted status", double_quote.text)
+
 
 class DiffTests(unittest.TestCase):
     def test_unchanged_and_first_fetch_short_circuit(self) -> None:
@@ -344,6 +371,34 @@ class DiffTests(unittest.TestCase):
                 result = compare_content(before, after)
                 self.assertEqual("candidate_material", result.result)
                 self.assertTrue(result.should_summarize)
+
+    def test_watch_focus_overrides_a_minor_verdict_outside_fixed_patterns(
+        self,
+    ) -> None:
+        # A small change that matches none of the five fixed signal patterns
+        # (price/spec/terms/availability/eligibility) is classified "minor"
+        # by default. A target explicitly focused on this kind of change
+        # (e.g. tracking executive changes) must still get it summarized
+        # rather than silently advancing the baseline.
+        before, after = "# CEO\nAlice", "# CEO\nBob"
+        unfocused = compare_content(before, after)
+        self.assertEqual("minor", unfocused.result)
+        self.assertFalse(unfocused.should_summarize)
+
+        focused = compare_content(before, after, watch_focus="executive changes")
+        self.assertEqual("candidate_material", focused.result)
+        self.assertTrue(focused.should_summarize)
+        self.assertIn("watch_focus_configured", focused.scoring_reasons)
+
+        # A change clamped as pure noise (e.g. a bare "last updated" date)
+        # must not be forced to candidate_material just because a focus is
+        # configured -- that would defeat the noise clamp entirely.
+        noise = compare_content(
+            "Updated: 2026-07-30",
+            "Updated: 2026-07-31",
+            watch_focus="executive changes",
+        )
+        self.assertEqual("minor", noise.result)
 
     def test_label_value_split_across_lines_is_still_material(self) -> None:
         # A label and its value are often on separate lines (a heading
