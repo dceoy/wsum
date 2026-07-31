@@ -121,6 +121,49 @@ class _RealSlowTrickleServer:
         self._listener.close()
 
 
+class _RealTruncatedServer:
+    """A real local TCP server that declares a ``Content-Length`` but closes
+    the connection after sending only part of the body.
+
+    ``HTTPResponse.read1()`` returns an empty byte string on premature EOF
+    instead of raising ``IncompleteRead``, so only a real socket proves a
+    connection that closes early is rejected rather than normalized as a
+    successful, silently truncated fetch.
+    """
+
+    def __init__(self, declared_length: int, sent_body: bytes) -> None:
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self.port = self._listener.getsockname()[1]
+        self._declared_length = declared_length
+        self._sent_body = sent_body
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        try:
+            conn, _ = self._listener.accept()
+        except OSError:
+            return
+        with conn:
+            try:
+                conn.recv(65_536)
+                header = (
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/html\r\n"
+                    f"Content-Length: {self._declared_length}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+                conn.sendall(header)
+                conn.sendall(self._sent_body)
+            except OSError:
+                return
+
+    def close(self) -> None:
+        self._listener.close()
+
+
 class _RealSlowTrickleChunkedServer:
     """A real local TCP server that sends valid headers immediately, then
     trickles a padded chunk-size line (chunk-extension bytes before the
@@ -376,6 +419,17 @@ class FetchTests(unittest.TestCase):
                 ),
                 "malformed_response",
             ),
+            (
+                # Declares more bytes than the body actually carries: the
+                # response closes right after the short body, so the read
+                # loop stops without ever seeing the declared length.
+                FakeResponse(
+                    200,
+                    b"x",
+                    {"Content-Type": "text/html", "Content-Length": "50"},
+                ),
+                "malformed_response",
+            ),
         )
         for response, code in cases:
             with (
@@ -489,6 +543,23 @@ class FetchTests(unittest.TestCase):
             )
         self.assertEqual("fetched", result.result)
         self.assertEqual(body, result.body)
+
+    def test_real_socket_truncated_body_is_rejected_as_malformed(self) -> None:
+        server = _RealTruncatedServer(declared_length=100, sent_body=b"short body")
+        self.addCleanup(server.close)
+        real_connection = http.client.HTTPConnection(
+            "127.0.0.1", server.port, timeout=1.0
+        )
+        self.addCleanup(real_connection.close)
+        with patch.object(fetch, "_open_connection", return_value=real_connection):
+            with self.assertRaises(MonitorError) as raised:
+                fetch_url(
+                    "http://example.com/",
+                    resolver=support.public_resolver,
+                    config=FetchConfig(timeout_seconds=1.0, max_total_seconds=2.0),
+                )
+        self.assertEqual("malformed_response", raised.exception.code)
+        self.assertTrue(raised.exception.retryable)
 
     def test_real_socket_slow_trickle_is_stopped_by_the_total_deadline(self) -> None:
         # A real trickling server can complete ``HTTPResponse.read()``'s

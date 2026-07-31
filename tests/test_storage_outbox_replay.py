@@ -102,6 +102,41 @@ class DriveTests(unittest.TestCase):
         )
         self.assertNotIn(references[0], [item.file_ref for item in candidates])
 
+    def test_retention_plan_retains_the_entire_current_reference_group(
+        self,
+    ) -> None:
+        # The current baseline's hash can fall outside the newest
+        # ``retain_snapshots`` groups (as here, with retain_snapshots=1 and
+        # the oldest snapshot still the active baseline). The whole group --
+        # not just the file matching current_ref -- must be retained so its
+        # metadata/diff audit artifacts survive alongside normalized.txt.
+        connector = MemoryDriveConnector()
+        store = SnapshotStore(connector)
+        references: list[str] = []
+        for value in ("one", "two", "three"):
+            content = normalize_content(
+                f"<p>{value}</p>".encode(), content_type="text/html"
+            )
+            references.append(store.save("target", content))
+        current_ref = references[0]
+        current_path = next(
+            path
+            for path, file_ref in connector.paths.items()
+            if file_ref == current_ref
+        )
+        current_prefix = current_path.rsplit("/", 1)[0] + "/"
+        sibling_paths = {
+            path
+            for path in connector.paths
+            if path.startswith(current_prefix) and path != current_path
+        }
+        self.assertTrue(sibling_paths)
+        candidates = store.plan_cleanup(
+            "target", current_ref=current_ref, retain_snapshots=1
+        )
+        candidate_paths = {item.path for item in candidates}
+        self.assertEqual(set(), sibling_paths & candidate_paths)
+
 
 class OutboxTests(unittest.TestCase):
     def test_sheet_parsing_duplicate_detection_and_raw_upsert(self) -> None:

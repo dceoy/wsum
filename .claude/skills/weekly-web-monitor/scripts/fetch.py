@@ -500,6 +500,7 @@ def fetch_url(
                     "compressed HTTP content encoding is not supported",
                 )
             content_length_header = response.getheader("Content-Length")
+            declared_length: int | None = None
             if content_length_header:
                 try:
                     declared_length = int(content_length_header)
@@ -551,6 +552,12 @@ def fetch_url(
                     raise MonitorError(
                         "response_too_large", "response exceeds the size limit"
                     )
+            if declared_length is not None and size != declared_length:
+                raise MonitorError(
+                    "malformed_response",
+                    "response body length does not match declared Content-Length",
+                    retryable=True,
+                )
             return FetchResult(
                 result="fetched",
                 final_url=target.url,

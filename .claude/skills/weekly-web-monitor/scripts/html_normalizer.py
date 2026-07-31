@@ -33,7 +33,6 @@ NOISE_TAGS = frozenset(
         "style",
         "nav",
         "footer",
-        "header",
         "aside",
         "form",
         "noscript",
@@ -43,6 +42,10 @@ NOISE_TAGS = frozenset(
         "canvas",
     }
 )
+# ``<header>`` is page chrome only when it isn't nested in a content
+# container: ``<article><header><h1>title</h1></header>…</article>`` is a
+# section heading, not boilerplate, so it must survive noise stripping.
+CONTENT_SECTIONING_TAGS = frozenset({"article", "section", "main"})
 BLOCK_TAGS = frozenset(
     {
         "address",
@@ -61,6 +64,7 @@ BLOCK_TAGS = frozenset(
         "h4",
         "h5",
         "h6",
+        "header",
         "li",
         "main",
         "p",
@@ -264,8 +268,19 @@ def select(root: Node, value: str) -> list[Node]:
     return [node for node in iter_nodes(root) if _matches_selector(node, selector)]
 
 
+def _has_content_ancestor(node: Node) -> bool:
+    cursor = node.parent
+    while cursor is not None:
+        if cursor.tag in CONTENT_SECTIONING_TAGS:
+            return True
+        cursor = cursor.parent
+    return False
+
+
 def _is_noise(node: Node) -> bool:
     if node.tag in NOISE_TAGS:
+        return True
+    if node.tag == "header" and not _has_content_ancestor(node):
         return True
     if "hidden" in node.attrs or node.attrs.get("aria-hidden", "").lower() == "true":
         return True

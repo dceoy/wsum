@@ -189,6 +189,23 @@ class SnapshotStore:
             reverse=True,
         )
         retained_hashes = {digest for digest, _ in ordered[:retain_snapshots]}
+        current_group_digest = next(
+            (
+                digest
+                for digest, group in ordered
+                if any(
+                    str(file.get("file_ref", "")) == current_ref for file in group
+                )
+            ),
+            None,
+        )
+        if current_ref and current_group_digest is not None:
+            # The current baseline's hash can fall outside the newest
+            # ``retain_snapshots`` groups (e.g. an older capture is still
+            # the active baseline). Retain that whole group so its
+            # metadata/diff audit artifacts survive alongside normalized.txt,
+            # not just the single file matching ``current_ref``.
+            retained_hashes.add(current_group_digest)
         candidates: list[CleanupCandidate] = []
         for digest, group in ordered:
             if digest in retained_hashes:

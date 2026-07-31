@@ -45,6 +45,31 @@ class NormalizationTests(unittest.TestCase):
         plain = normalize_content("ＡＢＣ".encode(), content_type="text/plain")
         self.assertEqual("ABC", plain.text)
 
+    def test_article_header_title_change_is_not_silently_missed(self) -> None:
+        # A <header> nested inside <article>/<section> is a content
+        # sub-heading, not page chrome, so a change confined to it must
+        # still change the normalized hash.
+        before = normalize_content(
+            b"<html><body><article><header><h1>Old Title</h1></header>"
+            b"<p>Body text.</p></article></body></html>",
+            content_type="text/html",
+        )
+        after = normalize_content(
+            b"<html><body><article><header><h1>New Title</h1></header>"
+            b"<p>Body text.</p></article></body></html>",
+            content_type="text/html",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        self.assertIn("New Title", after.text)
+        # A page-level header outside any content container remains
+        # boilerplate and is still stripped.
+        page_header = normalize_content(
+            b"<html><body><header>Site Nav</header>"
+            b"<main><p>Body text.</p></main></body></html>",
+            content_type="text/html",
+        )
+        self.assertNotIn("Site Nav", page_header.text)
+
     def test_http_charset_is_used_before_bom_or_body_sniffing(self) -> None:
         body = "価格改定のお知らせ".encode("shift_jis")
         without_charset = normalize_content(body, content_type="text/plain")
