@@ -433,7 +433,21 @@ class WeeklyMonitorRoutine:
         error: MonitorError,
         started_at: str,
         attempts: Sequence[Attempt],
+        *,
+        state_loaded: bool = True,
     ) -> RunRecord:
+        if not state_loaded:
+            # The real previous state was never loaded before this failure
+            # (get_run or _state itself raised), so previous_state is still
+            # the empty placeholder. Try once more here: if it succeeds we
+            # get a correct consecutive_failures count and can safely
+            # replace State; if it fails again, skip replace_state entirely
+            # rather than overwrite a real baseline with blank data.
+            try:
+                previous_state = self._state(target)
+                state_loaded = True
+            except Exception:
+                pass
         failed_state = replace(
             previous_state,
             last_checked_at=utc_now(),
@@ -466,7 +480,10 @@ class WeeklyMonitorRoutine:
             combined,
         )
         try:
-            self._persist_success(failed_state, run)
+            if state_loaded:
+                self._persist_success(failed_state, run)
+            else:
+                self._append_run(run)
         finally:
             self._failure_alert(target, failed_state, error.code, run_id)
             self._audit(
@@ -483,6 +500,7 @@ class WeeklyMonitorRoutine:
     ) -> RunRecord | _PendingMaterial:
         started_at = utc_now()
         previous_state = State(target.target_id)
+        state_loaded = False
         attempts: tuple[Attempt, ...] = ()
         try:
             with self._store_lock:
@@ -493,6 +511,7 @@ class WeeklyMonitorRoutine:
                 # refetching, re-writing state, or re-notifying.
                 return claimed
             previous_state = self._state(target)
+            state_loaded = True
             with tempfile.TemporaryDirectory(
                 prefix=f"weekly-web-monitor-{target.target_id}-"
             ) as temporary:
@@ -688,6 +707,7 @@ class WeeklyMonitorRoutine:
                 exc,
                 started_at,
                 attempts,
+                state_loaded=state_loaded,
             )
         except Exception:
             return self._finish_failure(
@@ -699,6 +719,7 @@ class WeeklyMonitorRoutine:
                 ),
                 started_at,
                 attempts,
+                state_loaded=state_loaded,
             )
 
     def _finish_material(

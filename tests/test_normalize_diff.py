@@ -384,6 +384,29 @@ class DiffTests(unittest.TestCase):
         self.assertTrue(result.truncated)
         self.assertTrue(result.signal_section_truncated)
 
+    def test_signal_section_truncated_when_tail_of_retained_section_is_cut(
+        self,
+    ) -> None:
+        # One oversized replace hunk (every line differs, so difflib emits a
+        # single contiguous section) whose only price signal sits in the
+        # last line. A tight char budget retains the section's ID (its
+        # leading lines fit) but must cut off before that last line, so the
+        # section is present yet incomplete -- the section-ID-only check
+        # this guards against would miss that the retained content is
+        # missing the very evidence that made the section signal-bearing.
+        before_lines = [f"row {index} original text" for index in range(150)]
+        after_lines = [f"row {index} changed text" for index in range(150)]
+        after_lines[-1] = "row 149 changed text Price: $999"
+        result = compare_content(
+            "\n".join(before_lines),
+            "\n".join(after_lines),
+            config=DiffConfig(max_diff_chars=1_500, max_sections=30),
+        )
+        self.assertTrue(result.truncated)
+        self.assertTrue(result.signal_section_truncated)
+        for section in result.sections:
+            self.assertNotIn("Price: $999", "\n".join(section.after))
+
     def test_sections_contain_only_changed_lines_plus_separate_context(self) -> None:
         result = compare_content(
             "# Product\nPrice $10\nAvailable",

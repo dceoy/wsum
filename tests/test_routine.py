@@ -160,6 +160,52 @@ class RoutineTests(unittest.TestCase):
         self.assertEqual(1, recovered.metrics.baseline)
         self.assertEqual(0, self.store.states["one"].consecutive_failures)
 
+    def test_transient_state_read_failure_does_not_wipe_existing_baseline(
+        self,
+    ) -> None:
+        # get_state fails on the very first call (before the real previous
+        # state is ever loaded) but succeeds on a later call, simulating a
+        # transient read failure that a naive fix would paper over by
+        # persisting the empty placeholder State and destroying the
+        # existing baseline.
+        self.run_cycle(response(1000), "run-1")
+        baseline_hash = self.store.states["one"].normalized_hash
+        self.assertTrue(baseline_hash)
+
+        class FlakyStateStore(MemoryOperationalStore):
+            def __init__(self, targets, states) -> None:
+                super().__init__(targets)
+                self.states = states
+                self.get_state_calls = 0
+
+            def get_state(self, target_id):
+                self.get_state_calls += 1
+                if self.get_state_calls == 1:
+                    raise MonitorError(
+                        "state_read_failed", "simulated transient failure"
+                    )
+                return super().get_state(target_id)
+
+        flaky_store = FlakyStateStore([self.target], dict(self.store.states))
+        routine = WeeklyMonitorRoutine(
+            store=flaky_store,
+            snapshots=self.snapshots,
+            summary_client=EvidenceSummaryClient(),
+            slack=self.slack,
+            fetcher=FixtureFetcher({"one": response(1200)}),
+            config=RoutineConfig(
+                max_concurrency=2,
+                retry=RetryConfig(),
+                failure_alert_threshold=3,
+            ),
+            sleeper=lambda _: None,
+        )
+        result = routine.run(run_id="run-2")
+        self.assertEqual(1, result.metrics.failed)
+        self.assertEqual(baseline_hash, flaky_store.states["one"].normalized_hash)
+        self.assertEqual(1, flaky_store.states["one"].consecutive_failures)
+        self.assertEqual("failed", flaky_store.runs["run-2:one"].result)
+
     def test_one_target_failure_does_not_abort_other_targets(self) -> None:
         targets = [make_target("good"), make_target("bad")]
         store = MemoryOperationalStore(targets)

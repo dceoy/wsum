@@ -242,10 +242,11 @@ def _score(
 
 def _bounded_sections(
     sections: list[DiffSection], config: DiffConfig
-) -> tuple[tuple[DiffSection, ...], bool]:
+) -> tuple[tuple[DiffSection, ...], bool, frozenset[str]]:
     output: list[DiffSection] = []
     used = 0
     truncated = False
+    partial_ids: set[str] = set()
     for section in sections:
         if len(output) >= config.max_sections:
             truncated = True
@@ -258,15 +259,20 @@ def _bounded_sections(
         before: list[str] = []
         after: list[str] = []
         context: list[str] = []
-        for source, destination in (
-            (section.before, before),
-            (section.after, after),
-            (section.context, context),
+        # Only a cut inside before/after loses evidence _section_signal()
+        # inspects; a cut confined to context is not signal-relevant.
+        section_partial = False
+        for source, destination, is_signal_bearing in (
+            (section.before, before, True),
+            (section.after, after, True),
+            (section.context, context, False),
         ):
             for line in source:
                 line_size = len(line) + 1
                 if line_size > remaining:
                     truncated = True
+                    if is_signal_bearing:
+                        section_partial = True
                     break
                 destination.append(line)
                 remaining -= line_size
@@ -283,9 +289,11 @@ def _bounded_sections(
                 )
             )
             used += base_size
+            if section_partial:
+                partial_ids.add(section.section_id)
         if truncated:
             break
-    return tuple(output), truncated
+    return tuple(output), truncated, frozenset(partial_ids)
 
 
 def _complexity_budget_exceeded(
@@ -401,13 +409,18 @@ def compare_content(
     ratio = _changed_char_ratio(previous_text, current_text, raw_sections)
     score, reasons = _score(ratio, raw_sections, active)
     ordered_sections = sorted(raw_sections, key=_section_priority)
-    sections, truncated = _bounded_sections(ordered_sections, active)
+    sections, truncated, partial_ids = _bounded_sections(ordered_sections, active)
     if truncated:
         signal_ids = {
             section.section_id for section in raw_sections if _section_signal(section)
         }
-        retained_ids = {section.section_id for section in sections}
-        if signal_ids - retained_ids:
+        # A signal-bearing section only counts as preserved if it was kept in
+        # full; one retained but cut mid-section (partial_ids) may be missing
+        # the very content that made it signal-bearing.
+        fully_retained_ids = {
+            section.section_id for section in sections
+        } - partial_ids
+        if signal_ids - fully_retained_ids:
             reasons = (*reasons, "material_signal_truncated")
     result = "minor" if score < active.minor_threshold else "candidate_material"
     significance = (
