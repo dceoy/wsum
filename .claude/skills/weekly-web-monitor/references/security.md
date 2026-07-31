@@ -72,6 +72,23 @@ implemented by this code, `fetch_rendered` fails closed by default: it raises
 after the browser process has been placed under a verified external memory
 cap.
 
+Known gap: `config.timeout_seconds` is only passed to `page.goto()`.
+`page.evaluate()` and `page.content()` — used afterward to measure and read
+the rendered DOM — are plain Playwright sync-API calls with no `timeout`
+parameter of their own, so an unresponsive or CPU-saturated renderer can
+occupy a Routine worker indefinitely after navigation succeeds. Interrupting
+a blocked Playwright sync call from a watchdog thread is not a
+documented/thread-safe operation, so this code does not attempt it. Closing
+this gap requires running the browser process under an external wall-clock
+or liveness supervisor (a process-group timeout or container liveness probe
+that kills the process tree past the configured deadline) rather than an
+in-process timeout. Because that is not implemented by this code,
+`fetch_rendered` fails closed by default: it raises
+`browser_execution_bound_not_verified` unless the operator explicitly sets
+`BrowserFetchConfig.verified_execution_bound=True`, which should only be
+done after the browser process has been placed under a verified external
+wall-clock/liveness supervisor.
+
 Known gap: `SheetsStore` has no atomic create-if-absent/conditional-write primitive
 (the Sheets Values API cannot express one), so the claim-before-side-effects
 sequence in `_process_target` (run lookup), `_persist_success` (Run/State write

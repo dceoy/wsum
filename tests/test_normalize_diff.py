@@ -34,6 +34,29 @@ class NormalizationTests(unittest.TestCase):
             normalized_first.normalized_hash, normalized_second.normalized_hash
         )
         self.assertEqual("2026-01", normalized_first.normalization_version)
+
+    def test_form_content_inside_main_is_preserved_but_outside_is_dropped(
+        self,
+    ) -> None:
+        before = b"""
+        <html><body>
+        <form id="site-search"><input type="search"></form>
+        <main><form><p>Application deadline: 2026-08-31</p></form></main>
+        </body></html>
+        """
+        after = b"""
+        <html><body>
+        <form id="site-search"><input type="search"></form>
+        <main><form><p>Application deadline: 2026-09-30</p></form></main>
+        </body></html>
+        """
+        normalized_before = normalize_content(before, content_type="text/html")
+        normalized_after = normalize_content(after, content_type="text/html")
+        self.assertIn("2026-08-31", normalized_before.text)
+        self.assertIn("2026-09-30", normalized_after.text)
+        self.assertNotEqual(
+            normalized_before.normalized_hash, normalized_after.normalized_hash
+        )
         bom_feed = (
             b"\xef\xbb\xbf<!--synthetic--><rss><channel>"
             b"<item><guid>1</guid><title>One</title></item>"
@@ -685,6 +708,28 @@ class DiffTests(unittest.TestCase):
         self.assertIn("watch_focus_configured", focused.scoring_reasons)
 
         unrelated_focus = compare_content(before, after, watch_focus="為替")
+        self.assertEqual("minor", unrelated_focus.result)
+
+    def test_watch_focus_matches_short_uppercase_acronym(self) -> None:
+        # A len(term) > 2 filter also drops common two-letter Latin
+        # acronyms such as "AI"; those are deliberate uppercase tokens, not
+        # accidental word fragments, so they must still reach the summary
+        # model under a matching watch_focus instead of being clamped as
+        # noise.
+        before, after = "# AI\n100", "# AI\n101"
+        unfocused = compare_content(before, after)
+        self.assertEqual("minor", unfocused.result)
+        self.assertIn("noise_only", unfocused.scoring_reasons)
+
+        focused = compare_content(before, after, watch_focus="AI")
+        self.assertEqual("candidate_material", focused.result)
+        self.assertTrue(focused.should_summarize)
+        self.assertIn("watch_focus_configured", focused.scoring_reasons)
+
+        lowercase_focus = compare_content(before, after, watch_focus="ai")
+        self.assertEqual("minor", lowercase_focus.result)
+
+        unrelated_focus = compare_content(before, after, watch_focus="HR")
         self.assertEqual("minor", unrelated_focus.result)
 
     def test_label_value_split_across_lines_is_still_material(self) -> None:

@@ -59,6 +59,13 @@ It also fails closed with `browser_memory_bound_not_verified` unless
 only happen after the browser process has been placed under a verified external
 hard memory limit (container/cgroup cap) — the rendered-size guard cannot bound
 Chromium's own DOM memory before it is measured; see [security.md](security.md).
+It also fails closed with `browser_execution_bound_not_verified` unless
+`BrowserFetchConfig.verified_execution_bound=True` is explicitly set, which
+should only happen after the browser process has been placed under a verified
+external wall-clock/liveness supervisor — `config.timeout_seconds` only bounds
+`page.goto()`, and `page.evaluate()`/`page.content()` have no timeout of their
+own, so an unresponsive renderer can otherwise hang a Routine worker
+indefinitely; see [security.md](security.md).
 
 ## Delivery
 

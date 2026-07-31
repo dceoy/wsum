@@ -20,6 +20,20 @@ API, so `fetch_rendered` also fails closed unless the operator explicitly sets
 `BrowserFetchConfig.verified_memory_bound=True` after placing the browser
 process under an external hard memory limit (for example a container/cgroup
 memory cap that kills the process before host memory is exhausted).
+
+`config.timeout_seconds` is only passed to `page.goto()`. The subsequent
+`page.evaluate()` and `page.content()` calls are plain Playwright sync-API
+calls with no `timeout` parameter of their own, so an unresponsive or
+CPU-saturated renderer can occupy a Routine worker indefinitely after
+navigation succeeds; there is no supported way to attach a wall-clock
+deadline to those specific calls, and interrupting a blocked Playwright sync
+call from a watchdog thread is not a documented/thread-safe operation. This
+module cannot bound total execution time from the Playwright API, so
+`fetch_rendered` also fails closed unless the operator explicitly sets
+`BrowserFetchConfig.verified_execution_bound=True` after placing the browser
+process under an external wall-clock/liveness supervisor (for example a
+process-group timeout or container liveness probe that kills the process
+tree if it runs past the configured deadline).
 """
 
 from __future__ import annotations
@@ -44,6 +58,7 @@ class BrowserFetchConfig:
     block_resource_types: tuple[str, ...] = ("font", "media")
     verified_egress_pinning: bool = False
     verified_memory_bound: bool = False
+    verified_execution_bound: bool = False
 
     def __post_init__(self) -> None:
         if not 1 <= self.timeout_seconds <= 120:
@@ -94,6 +109,16 @@ def fetch_rendered(
             "verified external hard memory limit (e.g. a container/cgroup "
             "memory cap); the rendered-size guard cannot bound Chromium's "
             "own DOM memory before it is measured, see references/security.md",
+        )
+    if not active.verified_execution_bound:
+        raise MonitorError(
+            "browser_execution_bound_not_verified",
+            "browser mode is blocked until the browser process runs under a "
+            "verified external wall-clock/liveness supervisor; "
+            "page.evaluate()/page.content() have no timeout of their own, "
+            "so an unresponsive renderer can hang past config.timeout_seconds "
+            "with no supported way to bound it from this module, see "
+            "references/security.md",
         )
     guard = BrowserNetworkGuard(
         url, allowed_hosts=active.allowed_hosts, resolver=resolver
@@ -211,7 +236,7 @@ def fetch_rendered(
                 raise MonitorError(
                     "browser_navigation_failed", "browser produced no main response"
                 )
-            guard.validate_request(page.url)
+            validated = guard.validate_request(page.url)
             if response.status >= 400:
                 retryable = response.status == 429 or response.status >= 500
                 code = (
@@ -240,7 +265,7 @@ def fetch_rendered(
                 )
             return FetchResult(
                 result="fetched",
-                final_url=page.url,
+                final_url=validated.url,
                 status=response.status,
                 content_type="text/html",
                 charset="utf-8",

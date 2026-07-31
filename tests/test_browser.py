@@ -8,6 +8,7 @@ from unittest.mock import patch
 import support
 from errors import MonitorError
 from fetch_browser import BrowserFetchConfig, fetch_rendered
+from models import State
 
 
 class FakePlaywrightError(Exception):
@@ -186,7 +187,9 @@ class BrowserFetcherTests(unittest.TestCase):
         context = FakeContext(page)
         browser = FakeBrowser(context)
         active_config = config or BrowserFetchConfig(
-            verified_egress_pinning=True, verified_memory_bound=True
+            verified_egress_pinning=True,
+            verified_memory_bound=True,
+            verified_execution_bound=True,
         )
         with patch.dict(sys.modules, playwright_modules(browser)):
             result = fetch_rendered(
@@ -206,6 +209,30 @@ class BrowserFetcherTests(unittest.TestCase):
         self.assertEqual("text/html", result.content_type)
         self.assertTrue(context.closed)
         self.assertTrue(browser.closed)
+
+    def test_final_url_fragment_set_by_page_js_is_canonicalized(self) -> None:
+        # Page JavaScript can rewrite `location.hash` after load (e.g. a
+        # client-side router setting `#result`). `page.url` then carries
+        # that fragment, but `State.from_mapping()` rejects any URL with a
+        # fragment, so persisting the raw `page.url` as `validated_url`
+        # would make State round-trip fail on the very next run. The
+        # canonical URL returned by the SSRF guard strips the fragment.
+        class FragmentPage(FakePage):
+            def goto(self, url: str, **kwargs: object) -> FakeResponse:
+                response = super().goto(url, **kwargs)
+                self.url = f"{url}#result"
+                return response
+
+        page = FragmentPage(
+            html="<html><body><main>Rendered</main></body></html>",
+            requests=[FakeRequest("https://example.com")],
+        )
+        result, _, _ = self.run_fake(page)
+        self.assertEqual("https://example.com/", result.final_url)
+        state = State.from_mapping(
+            {"target_id": "t1", "validated_url": result.final_url}
+        )
+        self.assertEqual("https://example.com/", state.validated_url)
 
     def test_private_subresource_and_redirect_are_denied(self) -> None:
         for private_url in (
@@ -256,6 +283,7 @@ class BrowserFetcherTests(unittest.TestCase):
                     max_requests=1,
                     verified_egress_pinning=True,
                     verified_memory_bound=True,
+                    verified_execution_bound=True,
                 ),
             )
         large_page = FakePage(
@@ -269,6 +297,7 @@ class BrowserFetcherTests(unittest.TestCase):
                     max_rendered_bytes=1_024,
                     verified_egress_pinning=True,
                     verified_memory_bound=True,
+                    verified_execution_bound=True,
                 ),
             )
 
@@ -285,6 +314,18 @@ class BrowserFetcherTests(unittest.TestCase):
             fetch_rendered(
                 "https://example.com",
                 config=BrowserFetchConfig(verified_egress_pinning=True),
+                resolver=support.public_resolver,
+            )
+
+    def test_browser_mode_fails_closed_without_verified_execution_bound(self) -> None:
+        with self.assertRaisesRegex(
+            MonitorError, "browser_execution_bound_not_verified"
+        ):
+            fetch_rendered(
+                "https://example.com",
+                config=BrowserFetchConfig(
+                    verified_egress_pinning=True, verified_memory_bound=True
+                ),
                 resolver=support.public_resolver,
             )
 

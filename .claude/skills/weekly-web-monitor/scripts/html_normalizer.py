@@ -34,7 +34,6 @@ NOISE_TAGS = frozenset(
         "nav",
         "footer",
         "aside",
-        "form",
         "noscript",
         "iframe",
         "template",
@@ -285,7 +284,7 @@ def _has_content_ancestor(node: Node) -> bool:
 def _is_noise(node: Node) -> bool:
     if node.tag in NOISE_TAGS:
         return True
-    if node.tag == "header" and not _has_content_ancestor(node):
+    if node.tag in {"header", "form"} and not _has_content_ancestor(node):
         return True
     if "hidden" in node.attrs or node.attrs.get("aria-hidden", "").lower() == "true":
         return True

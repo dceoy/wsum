@@ -210,6 +210,12 @@ def _watch_focus_terms(watch_focus: str) -> tuple[re.Pattern[str], ...]:
             patterns.append(re.compile(re.escape(term), re.IGNORECASE))
         elif len(term) > 2:
             patterns.append(re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE))
+        elif term.isupper() and term.isalnum():
+            # Short Latin terms are usually accidental noise, but an
+            # all-uppercase token (``AI``, ``HR``, ``EV``, ``3D``) is
+            # deliberately an acronym, not a word fragment, so it is matched
+            # case-sensitively rather than discarded outright.
+            patterns.append(re.compile(r"\b" + re.escape(term) + r"\b"))
     return tuple(patterns)
 
 
