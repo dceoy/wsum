@@ -26,6 +26,77 @@ DOUBLE_QUOTE_RE = re.compile(rb"(\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>)\s*\"")
 METADATA_RE = re.compile(rb"/(Title|Author|Subject)\s*\((?:\\.|[^\\()])*\)")
 
 
+def _mask_strings_and_comments(stream: bytes) -> bytes:
+    # BT/ET are recognized by matching the literal bytes "BT"/"ET" anywhere
+    # in the stream, including inside a literal string, hex string, or
+    # comment operand (e.g. "BT (status ET old) Tj ET" would otherwise treat
+    # the "ET" inside the parenthesized operand as the end-text operator and
+    # truncate the block before the real "Tj"). Replace those regions with a
+    # same-length, content-free placeholder byte so operator matching on the
+    # masked copy only ever sees bytes that are actually outside a
+    # string/comment, while the caller still slices the *original* bytes at
+    # the located offsets to decode the real operand content. Fail closed
+    # (rather than masking to end-of-stream) when a string/comment never
+    # terminates, since silently masking the remainder would drop any real
+    # BT/ET pairs after it -- the same silent-miss failure mode this guards
+    # against.
+    masked = bytearray(stream)
+    length = len(stream)
+    index = 0
+    while index < length:
+        byte = stream[index]
+        if byte == 0x25:  # '%' comment runs to end of line (not masked past EOL)
+            end = index
+            while end < length and stream[end] not in (0x0A, 0x0D):
+                end += 1
+            masked[index:end] = b"." * (end - index)
+            index = end
+            continue
+        if byte == 0x28:  # '(' literal string, balanced/escaped parens
+            start = index
+            depth = 1
+            index += 1
+            while index < length and depth > 0:
+                current = stream[index]
+                if current == 0x5C:  # backslash escapes the next byte
+                    index += 2
+                    continue
+                if current == 0x28:
+                    depth += 1
+                elif current == 0x29:
+                    depth -= 1
+                index += 1
+            if depth > 0:
+                raise MonitorError(
+                    "pdf_malformed", "PDF content stream has an unterminated string"
+                )
+            masked[start:index] = b"." * (index - start)
+            continue
+        if byte == 0x3C and (index + 1 >= length or stream[index + 1] != 0x3C):
+            # '<' hex string, but not the '<<' that opens a dictionary
+            start = index
+            index += 1
+            while index < length and stream[index] != 0x3E:
+                index += 1
+            if index >= length:
+                raise MonitorError(
+                    "pdf_malformed", "PDF content stream has an unterminated hex string"
+                )
+            index += 1
+            masked[start:index] = b"." * (index - start)
+            continue
+        index += 1
+    return bytes(masked)
+
+
+def _text_blocks(stream: bytes) -> list[bytes]:
+    masked = _mask_strings_and_comments(stream)
+    return [
+        stream[match.start(1) : match.end(1)]
+        for match in TEXT_BLOCK_RE.finditer(masked)
+    ]
+
+
 def _decode_literal(value: bytes) -> str:
     if value.startswith(b"(") and value.endswith(b")"):
         value = value[1:-1]
@@ -217,7 +288,7 @@ def extract_pdf_text(
 
     fragments: list[str] = []
     for stream in _stream_data(pdf, max_decompressed_bytes):
-        for block in TEXT_BLOCK_RE.findall(stream):
+        for block in _text_blocks(stream):
             consumed: set[tuple[int, int]] = set()
             for array_match in TJ_RE.finditer(block):
                 consumed.add(array_match.span())

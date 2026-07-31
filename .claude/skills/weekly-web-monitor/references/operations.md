@@ -6,7 +6,10 @@ For the initial approximately 10-target pilot:
 
 - Finish a weekly static run within 15 minutes.
 - Achieve at least 95% successful target checks over four weeks.
-- Produce zero duplicate successful change notifications.
+- Produce zero duplicate successful change notifications under normal
+  single-instance operation; see the concurrent-invocation gap in
+  [security.md](security.md) for the bound that applies if invocations
+  overlap.
 - Alert after three consecutive target failures.
 - Retain at least 12 normalized snapshots per target.
 - Investigate any failed target within one business day and any security-policy

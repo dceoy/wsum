@@ -56,6 +56,24 @@ default: it raises `browser_egress_not_verified` unless the operator explicitly
 sets `BrowserFetchConfig.verified_egress_pinning=True`, which should only be done
 after a real network-level pinning mechanism has been configured and verified.
 
+Known gap: `SheetsStore` has no atomic create-if-absent/conditional-write primitive
+(the Sheets Values API cannot express one), so the claim-before-side-effects
+sequence in `_process_target` (run lookup), `_persist_success` (Run/State write
+order), and `deliver_grouped`/`_queue_outbox_message`
+(`get_notification`-then-`upsert_notification`) are each a non-atomic
+read-modify-write, not a lease. Two Routine invocations that overlap -- the same
+`run_id` re-entered concurrently, or different `run_id` values racing the same
+target/notification event -- can both observe "no row" and both act, producing a
+duplicate Slack send or, if both appends use the same deterministic event ID,
+`sheet_duplicate_id` on `load_notifications()` that breaks subsequent notification
+reads entirely. The `_store_lock`/`RLock` only serializes writes within one process;
+it provides no cross-instance coordination. Closing this gap requires a store-level
+atomic claim primitive or a different backend; until then, do not schedule or
+manually trigger overlapping Routine invocations against the same target set, and
+treat the "zero duplicate notifications" SLO in
+[operations.md](operations.md) as conditioned on that operational constraint,
+not as a guarantee the code enforces.
+
 The bundled PDF extractor intentionally supports a conservative text subset. Complex
 PDFs fail closed. Add a new parser only after isolated fuzzing and checklist review.
 

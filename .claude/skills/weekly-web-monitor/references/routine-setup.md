@@ -35,7 +35,12 @@ native secret stores.
 9. Configure the weekly schedule in the Claude Code Routine control plane, not in
    this repository.
 
-Use a stable external run ID for retries of the same scheduled invocation.
+Use a stable external run ID for retries of the same scheduled invocation. Do not
+trigger a manual/replay run while the scheduled run is still in flight, and do not
+configure overlapping schedules against the same target set: the store has no
+cross-instance claim primitive, so overlapping invocations can duplicate
+notifications (see the concurrent-invocation known gap in
+[security.md](security.md)).
 
 ## Browser mode
 

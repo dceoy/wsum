@@ -436,6 +436,36 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertIn("Quoted status", double_quote.text)
 
+    def test_pdf_et_inside_a_string_operand_does_not_truncate_the_text_block(
+        self,
+    ) -> None:
+        # TEXT_BLOCK_RE locates a block by the first "ET" bytes after "BT".
+        # A literal string operand that happens to contain "ET" (e.g. inside
+        # "status ET old") must not be mistaken for the end-text operator,
+        # or the block is truncated before the real Tj call and that text is
+        # silently dropped from the hash.
+        before = normalize_content(
+            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
+            b"BT (status ET old) Tj ET\nendstream\nendobj\n%%EOF",
+            content_type="application/pdf",
+        )
+        after = normalize_content(
+            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
+            b"BT (status ET new) Tj ET\nendstream\nendobj\n%%EOF",
+            content_type="application/pdf",
+        )
+        self.assertIn("status ET old", before.text)
+        self.assertIn("status ET new", after.text)
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_pdf_unterminated_string_fails_closed(self) -> None:
+        pdf = (
+            b"%PDF-1.4\n1 0 obj\n<< /Length 30 >>\nstream\n"
+            b"BT (unterminated Tj ET\nendstream\nendobj\n%%EOF"
+        )
+        with self.assertRaisesRegex(MonitorError, "pdf_malformed|malformed"):
+            normalize_content(pdf, content_type="application/pdf")
+
     def test_pdf_unsupported_filter_streams_are_rejected_not_skipped(self) -> None:
         # A stream without /FlateDecode is currently assumed to already be
         # decoded plain content. But /ASCIIHexDecode, /ASCII85Decode,
