@@ -201,6 +201,7 @@ def fetch_url(
     *,
     etag: str = "",
     last_modified: str = "",
+    validated_url: str = "",
     config: FetchConfig | None = None,
     resolver: Resolver = socket.getaddrinfo,
     ssl_context: ssl.SSLContext | None = None,
@@ -228,7 +229,6 @@ def fetch_url(
     target = resolve_public_url(url, resolver=resolver)
     etag = _safe_validator(etag, "ETag")
     last_modified = _safe_validator(last_modified, "Last-Modified")
-    initial_origin = target.origin
     redirects = 0
     while True:
         headers = {
@@ -239,11 +239,14 @@ def fetch_url(
             "Host": _host_header(target),
             "User-Agent": active_config.user_agent,
         }
-        if target.origin == initial_origin:
+        if target.url == validated_url:
             if etag:
                 headers["If-None-Match"] = etag[:1_000]
             if last_modified:
                 headers["If-Modified-Since"] = last_modified[:1_000]
+        sent_conditional_request = (
+            "If-None-Match" in headers or "If-Modified-Since" in headers
+        )
         response: http.client.HTTPResponse | None = None
         connection: http.client.HTTPConnection | None = None
         last_error: Exception | None = None
@@ -288,7 +291,7 @@ def fetch_url(
                 redirects += 1
                 continue
             if status == 304:
-                if not etag and not last_modified:
+                if not sent_conditional_request:
                     raise MonitorError(
                         "unexpected_not_modified",
                         "server returned HTTP 304 without a conditional request",

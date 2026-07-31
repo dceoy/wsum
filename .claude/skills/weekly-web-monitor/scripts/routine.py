@@ -54,6 +54,7 @@ class SnapshotStorage(Protocol):
         target_id: str,
         content: NormalizedContent,
         diff: DiffResult | None = None,
+        previous_hash: str = "",
     ) -> str: ...
 
     def load_normalized(self, snapshot_ref: str) -> str: ...
@@ -144,6 +145,7 @@ class DefaultFetcher:
             target.url,
             etag=state.etag,
             last_modified=state.last_modified,
+            validated_url=state.validated_url,
             config=self._static,
         )
 
@@ -234,6 +236,7 @@ class WeeklyMonitorRoutine:
             last_checked_at=fetched.fetched_at,
             etag=fetched.etag,
             last_modified=fetched.last_modified,
+            validated_url=fetched.final_url,
             normalized_hash=normalized_hash,
             snapshot_ref=snapshot_ref,
             consecutive_failures=0,
@@ -497,6 +500,8 @@ class WeeklyMonitorRoutine:
                         etag=fetched.etag or previous_state.etag,
                         last_modified=fetched.last_modified
                         or previous_state.last_modified,
+                        validated_url=fetched.final_url
+                        or previous_state.validated_url,
                         consecutive_failures=0,
                     )
                     run = self._run_record(
@@ -570,7 +575,10 @@ class WeeklyMonitorRoutine:
                 if not diff.should_summarize:
                     with self._snapshot_lock:
                         reference = self.snapshots.save(
-                            target.target_id, normalized, diff
+                            target.target_id,
+                            normalized,
+                            diff,
+                            previous_hash=previous_state.normalized_hash,
                         )
                     next_state = self._success_state(
                         previous_state,
@@ -606,7 +614,12 @@ class WeeklyMonitorRoutine:
                     max_notification_chars=self.config.max_notification_chars,
                 )
                 with self._snapshot_lock:
-                    reference = self.snapshots.save(target.target_id, normalized, diff)
+                    reference = self.snapshots.save(
+                        target.target_id,
+                        normalized,
+                        diff,
+                        previous_hash=previous_state.normalized_hash,
+                    )
                 next_state = self._success_state(
                     previous_state,
                     fetched,

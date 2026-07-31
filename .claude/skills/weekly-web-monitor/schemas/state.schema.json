@@ -9,6 +9,7 @@
     "last_checked_at",
     "etag",
     "last_modified",
+    "validated_url",
     "normalized_hash",
     "snapshot_ref",
     "consecutive_failures"
@@ -26,6 +27,12 @@
     },
     "etag": {"type": "string", "maxLength": 1000},
     "last_modified": {"type": "string", "maxLength": 1000},
+    "validated_url": {
+      "oneOf": [
+        {"const": ""},
+        {"type": "string", "format": "uri", "maxLength": 2048}
+      ]
+    },
     "normalized_hash": {
       "oneOf": [
         {"const": ""},

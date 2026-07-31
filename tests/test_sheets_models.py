@@ -85,12 +85,24 @@ class ModelsAndSheetsTests(unittest.TestCase):
         with self.assertRaises(MonitorError):
             Target.from_mapping(base)
 
+    def test_exclude_selectors_enforce_count_and_length_bounds(self) -> None:
+        base = {
+            "target_id": "one",
+            "enabled": True,
+            "name": "One",
+            "url": "https://example.com",
+        }
+        with self.assertRaisesRegex(MonitorError, "count or length limit"):
+            Target.from_mapping({**base, "exclude_selectors": [".a"] * 51})
+        with self.assertRaisesRegex(MonitorError, "count or length limit"):
+            Target.from_mapping({**base, "exclude_selectors": ["." + "a" * 500]})
+
     def test_state_and_notification_queries(self) -> None:
         digest = "a" * 64
         states = load_states(
             table(
                 STATE_COLUMNS,
-                ["one", "", "", "", digest, "drive:1", 2],
+                ["one", "", "", "", "", digest, "drive:1", 2],
             )
         )
         self.assertEqual(2, states["one"][0])
@@ -117,7 +129,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
 
     def test_write_payload_generation(self) -> None:
         state = State("one")
-        self.assertEqual("State!A3:G3", replace_state_payload(3, state)["range"])
+        self.assertEqual("State!A3:H3", replace_state_payload(3, state)["range"])
         run = RunRecord(
             "run:one",
             "one",
@@ -149,7 +161,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls: list[tuple[str, str]] = []
                 self.values = {
-                    "State!A:G": [list(STATE_COLUMNS)],
+                    "State!A:H": [list(STATE_COLUMNS)],
                     "Runs!A:H": [list(RUN_COLUMNS)],
                     "Notifications!A:F": [list(NOTIFICATION_COLUMNS)],
                 }

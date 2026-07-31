@@ -138,6 +138,19 @@ class NormalizationTests(unittest.TestCase):
             any(section.anchor.startswith("ENTRY 2") for section in feed_diff.sections)
         )
 
+    def test_rss_content_encoded_body_is_captured(self) -> None:
+        xml = b"""<?xml version="1.0"?>
+        <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
+        <channel>
+          <item>
+            <guid>1</guid>
+            <title>Post</title>
+            <content:encoded>Full article body</content:encoded>
+          </item>
+        </channel></rss>"""
+        text, _ = normalize_feed(xml)
+        self.assertIn("CONTENT Full article body", text)
+
     def test_feed_rejects_entities_malformed_and_type_mismatch(self) -> None:
         with self.assertRaisesRegex(MonitorError, "DOCTYPE"):
             normalize_content(

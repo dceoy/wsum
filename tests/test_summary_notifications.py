@@ -135,6 +135,16 @@ class SummaryValidationTests(unittest.TestCase):
                 source_url=request["target"]["source_url"],
             )
 
+    def test_evidence_beyond_the_schema_limit_is_rejected(self) -> None:
+        request, summary = request_and_summary()
+        oversized = {**summary, "evidence": [summary["evidence"][0]] * 31}
+        with self.assertRaisesRegex(MonitorError, "item limit"):
+            validate_summary(
+                oversized,
+                changed_sections=request["changed_sections"],
+                source_url=request["target"]["source_url"],
+            )
+
     def test_slack_mentions_and_external_links_are_rejected(self) -> None:
         request, summary = request_and_summary()
         for text in (

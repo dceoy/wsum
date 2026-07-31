@@ -25,8 +25,8 @@ deployment-owned columns after them.
 
 ### State
 
-`target_id`, `last_checked_at`, `etag`, `last_modified`, `normalized_hash`,
-`snapshot_ref`, `consecutive_failures`
+`target_id`, `last_checked_at`, `etag`, `last_modified`, `validated_url`,
+`normalized_hash`, `snapshot_ref`, `consecutive_failures`
 
 Replace one target row as a unit. Preserve `normalized_hash` and `snapshot_ref` on
 any fetch, parse, summary, Drive, or notification failure. Reset
@@ -70,7 +70,7 @@ Use deterministic paths:
 ```text
 snapshots/<target_id>/<normalized_hash>/normalized.txt
 snapshots/<target_id>/<normalized_hash>/metadata.json
-snapshots/<target_id>/<normalized_hash>/diff.json
+snapshots/<target_id>/<normalized_hash>/diff-<previous_hash>.json
 ```
 
 Look up each path before upload. Update `State.snapshot_ref` only when all required

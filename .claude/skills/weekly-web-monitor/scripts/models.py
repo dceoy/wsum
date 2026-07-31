@@ -130,14 +130,21 @@ def _parse_selectors(value: Any) -> tuple[str, ...]:
     if value is None or value == "":
         return ()
     if isinstance(value, str):
-        return tuple(part.strip() for part in value.split(",") if part.strip())
-    if isinstance(value, (list, tuple)) and all(
+        selectors = tuple(part.strip() for part in value.split(",") if part.strip())
+    elif isinstance(value, (list, tuple)) and all(
         isinstance(item, str) for item in value
     ):
-        return tuple(item.strip() for item in value if item.strip())
-    raise MonitorError(
-        "invalid_record", "exclude_selectors must be a comma-separated string or list"
-    )
+        selectors = tuple(item.strip() for item in value if item.strip())
+    else:
+        raise MonitorError(
+            "invalid_record",
+            "exclude_selectors must be a comma-separated string or list",
+        )
+    if len(selectors) > 50 or any(len(item) > 500 for item in selectors):
+        raise MonitorError(
+            "invalid_record", "exclude_selectors exceeds the count or length limit"
+        )
+    return selectors
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +218,7 @@ class State:
     last_checked_at: str = ""
     etag: str = ""
     last_modified: str = ""
+    validated_url: str = ""
     normalized_hash: str = ""
     snapshot_ref: str = ""
     consecutive_failures: int = 0
@@ -249,11 +257,15 @@ class State:
                 "invalid_record",
                 f"state {target_id}: validator or snapshot reference is invalid",
             )
+        validated_url = str(value.get("validated_url", "") or "").strip()
+        if validated_url:
+            validated_url = validate_http_url(validated_url, "validated_url")
         return cls(
             target_id=target_id,
             last_checked_at=timestamp,
             etag=etag,
             last_modified=last_modified,
+            validated_url=validated_url,
             normalized_hash=normalized_hash,
             snapshot_ref=snapshot_ref,
             consecutive_failures=failures,

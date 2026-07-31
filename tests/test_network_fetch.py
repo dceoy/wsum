@@ -93,6 +93,7 @@ class FetchTests(unittest.TestCase):
                 "https://example.com/page",
                 etag="old",
                 last_modified="Mon, 01 Jan 2024 00:00:00 GMT",
+                validated_url="https://example.com/page",
                 resolver=support.public_resolver,
             )
         self.assertEqual("unchanged", result.result)
@@ -114,6 +115,21 @@ class FetchTests(unittest.TestCase):
                 resolver=support.public_resolver,
             )
 
+    def test_304_is_rejected_when_validators_could_not_be_bound(self) -> None:
+        with patch.object(
+            fetch,
+            "_open_connection",
+            return_value=FakeConnection(FakeResponse(304, b"")),
+        ):
+            with self.assertRaisesRegex(MonitorError, "without a conditional"):
+                fetch_url(
+                    "https://example.com",
+                    etag="old",
+                    last_modified="Mon, 01 Jan 2024 00:00:00 GMT",
+                    validated_url="https://example.com/final",
+                    resolver=support.public_resolver,
+                )
+
     def test_redirect_target_is_revalidated(self) -> None:
         response = FakeResponse(302, b"", {"Location": "http://127.0.0.1/admin"})
         with patch.object(
@@ -124,6 +140,26 @@ class FetchTests(unittest.TestCase):
                     "https://example.com",
                     resolver=support.public_resolver,
                 )
+
+    def test_validators_bind_to_the_final_url_not_the_origin(self) -> None:
+        redirect = FakeConnection(
+            FakeResponse(302, b"", {"Location": "https://example.com/final"})
+        )
+        revalidated = FakeConnection(FakeResponse(304, b"", {"ETag": "new"}))
+        with patch.object(
+            fetch, "_open_connection", side_effect=[redirect, revalidated]
+        ):
+            result = fetch_url(
+                "https://example.com",
+                etag="old",
+                last_modified="Mon, 01 Jan 2024 00:00:00 GMT",
+                validated_url="https://example.com/final",
+                resolver=support.public_resolver,
+            )
+        self.assertEqual("unchanged", result.result)
+        self.assertNotIn("If-None-Match", redirect.request_headers)
+        self.assertNotIn("If-Modified-Since", redirect.request_headers)
+        self.assertEqual("old", revalidated.request_headers["If-None-Match"])
 
     def test_response_size_content_type_and_malformed_length_errors(self) -> None:
         cases = (

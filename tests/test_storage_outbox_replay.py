@@ -50,6 +50,44 @@ class DriveTests(unittest.TestCase):
         with self.assertRaisesRegex(MonitorError, "size limit"):
             bounded.load_normalized("drive:large")
 
+    def test_diff_artifact_is_versioned_by_previous_hash_on_a_b_c_b_cycle(
+        self,
+    ) -> None:
+        connector = MemoryDriveConnector()
+        store = SnapshotStore(connector)
+        content_a = normalize_content(b"<p>A</p>", content_type="text/html")
+        content_b = normalize_content(b"<p>B</p>", content_type="text/html")
+        content_c = normalize_content(b"<p>C</p>", content_type="text/html")
+        diff_a_to_b = compare_content(
+            content_a.text,
+            content_b.text,
+            previous_hash=content_a.normalized_hash,
+            current_hash=content_b.normalized_hash,
+        )
+        diff_c_to_b = compare_content(
+            content_c.text,
+            content_b.text,
+            previous_hash=content_c.normalized_hash,
+            current_hash=content_b.normalized_hash,
+        )
+        ref_first_b = store.save(
+            "one", content_b, diff_a_to_b, previous_hash=content_a.normalized_hash
+        )
+        store.save("one", content_c, previous_hash=content_b.normalized_hash)
+        ref_second_b = store.save(
+            "one", content_b, diff_c_to_b, previous_hash=content_c.normalized_hash
+        )
+        self.assertEqual(ref_first_b, ref_second_b)
+        b_prefix = f"snapshots/one/{content_b.normalized_hash}/"
+        diff_paths = [
+            path
+            for path in connector.paths
+            if path.startswith(b_prefix) and "diff" in path
+        ]
+        self.assertEqual(2, len(diff_paths))
+        contents = {connector.files[connector.paths[path]] for path in diff_paths}
+        self.assertEqual(2, len(contents))
+
     def test_retention_plan_never_deletes_current_reference(self) -> None:
         connector = MemoryDriveConnector()
         store = SnapshotStore(connector)

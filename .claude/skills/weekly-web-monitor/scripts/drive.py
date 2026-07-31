@@ -40,15 +40,20 @@ class CleanupCandidate:
     path: str
 
 
-def snapshot_paths(target_id: str, normalized_hash: str) -> SnapshotPaths:
+def snapshot_paths(
+    target_id: str, normalized_hash: str, previous_hash: str = ""
+) -> SnapshotPaths:
     validate_target_id(target_id)
     if not HASH_RE.fullmatch(normalized_hash):
         raise MonitorError("invalid_snapshot", "normalized_hash is invalid")
+    if previous_hash and not HASH_RE.fullmatch(previous_hash):
+        raise MonitorError("invalid_snapshot", "previous_hash is invalid")
     prefix = f"snapshots/{target_id}/{normalized_hash}"
+    diff_name = f"diff-{previous_hash}.json" if previous_hash else "diff.json"
     return SnapshotPaths(
         normalized=f"{prefix}/normalized.txt",
         metadata=f"{prefix}/metadata.json",
-        diff=f"{prefix}/diff.json",
+        diff=f"{prefix}/{diff_name}",
     )
 
 
@@ -94,8 +99,9 @@ class SnapshotStore:
         target_id: str,
         content: NormalizedContent,
         diff: DiffResult | None = None,
+        previous_hash: str = "",
     ) -> str:
-        paths = snapshot_paths(target_id, content.normalized_hash)
+        paths = snapshot_paths(target_id, content.normalized_hash, previous_hash)
         normalized_bytes = content.text.encode("utf-8")
         if len(normalized_bytes) > self._max_snapshot_bytes:
             raise MonitorError(

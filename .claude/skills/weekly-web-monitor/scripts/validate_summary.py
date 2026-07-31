@@ -40,6 +40,7 @@ ALLOWED_KEYS = frozenset(
     }
 )
 EVIDENCE_KEYS = frozenset({"section_id", "claim_ja", "before", "after"})
+MAX_EVIDENCE_ITEMS = 30
 
 
 def _require_string(
@@ -174,6 +175,8 @@ def validate_summary(
     evidence = summary.get("evidence")
     if not isinstance(evidence, Sequence) or isinstance(evidence, (str, bytes)):
         raise MonitorError("summary_invalid", "evidence must be an array")
+    if len(evidence) > MAX_EVIDENCE_ITEMS:
+        raise MonitorError("summary_invalid", "evidence exceeds the item limit")
     if material and not evidence:
         raise MonitorError("summary_unsupported", "material summary has no evidence")
 

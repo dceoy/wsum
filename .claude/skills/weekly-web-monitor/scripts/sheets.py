@@ -30,6 +30,7 @@ STATE_COLUMNS = (
     "last_checked_at",
     "etag",
     "last_modified",
+    "validated_url",
     "normalized_hash",
     "snapshot_ref",
     "consecutive_failures",
@@ -223,13 +224,13 @@ def replace_state_payload(row_number: int, state: State) -> dict[str, Any]:
     if row_number < 2:
         raise MonitorError("sheet_invalid_row", "State row_number must be at least 2")
     return {
-        "range": f"State!A{row_number}:G{row_number}",
+        "range": f"State!A{row_number}:H{row_number}",
         "values": [state_row(state)],
     }
 
 
 def append_state_payload(state: State) -> dict[str, Any]:
-    return {"range": "State!A:G", "values": [state_row(state)]}
+    return {"range": "State!A:H", "values": [state_row(state)]}
 
 
 def append_run_payload(run: RunRecord) -> dict[str, Any]:
@@ -272,7 +273,7 @@ class SheetsStore:
 
     def _states(self) -> dict[str, tuple[int, State]]:
         return load_states(
-            self._connector.read_values(self._spreadsheet_id, "State!A:G")
+            self._connector.read_values(self._spreadsheet_id, "State!A:H")
         )
 
     def get_state(self, target_id: str) -> State | None:
