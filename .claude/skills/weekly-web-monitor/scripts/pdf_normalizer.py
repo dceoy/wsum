@@ -9,6 +9,8 @@ import zlib
 from errors import MonitorError
 
 STREAM_RE = re.compile(rb"stream\r?\n(.*?)\r?\nendstream", re.DOTALL)
+FILTER_RE = re.compile(rb"/Filter\s*(/[A-Za-z0-9]+|\[[^\]]*\])")
+FILTER_NAME_RE = re.compile(rb"/[A-Za-z0-9]+")
 TEXT_BLOCK_RE = re.compile(rb"BT(.*?)ET", re.DOTALL)
 TJ_RE = re.compile(rb"\[(.*?)\]\s*TJ", re.DOTALL)
 TJ_ITEM_RE = re.compile(rb"\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>")
@@ -109,14 +111,30 @@ def _bounded_decompress(value: bytes, limit: int) -> bytes:
     return result
 
 
+def _stream_filters(dictionary: bytes) -> list[bytes]:
+    match = FILTER_RE.search(dictionary)
+    if match is None:
+        return []
+    value = match.group(1)
+    if value.startswith(b"["):
+        return FILTER_NAME_RE.findall(value)
+    return [value]
+
+
 def _stream_data(pdf: bytes, limit: int) -> list[bytes]:
     streams: list[bytes] = []
     total = 0
     for match in STREAM_RE.finditer(pdf):
         dictionary = pdf[max(0, match.start() - 1_024) : match.start()]
         stream = match.group(1)
-        if b"/FlateDecode" in dictionary:
+        filters = _stream_filters(dictionary)
+        if filters == [b"/FlateDecode"]:
             stream = _bounded_decompress(stream, limit - total)
+        elif filters:
+            raise MonitorError(
+                "pdf_unsupported_filter",
+                "PDF stream uses an unsupported filter",
+            )
         total += len(stream)
         if total > limit:
             raise MonitorError(

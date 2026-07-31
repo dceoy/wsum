@@ -133,6 +133,24 @@ class NormalizationTests(unittest.TestCase):
         }
         self.assertEqual(4, len(hashes))
 
+    def test_standalone_deadline_date_is_preserved_not_erased(self) -> None:
+        # A date/time-only line is stripped as routine-timestamp noise, but
+        # that must not erase a standalone date that is itself the monitored
+        # business data (e.g. an application deadline with no "updated"/
+        # "modified"/"published" label). Only explicitly labelled timestamp
+        # lines should be treated as noise.
+        before = normalize_content(
+            b"<main><h2>Application deadline</h2><p>2026-08-31</p></main>",
+            content_type="text/html",
+        )
+        after = normalize_content(
+            b"<main><h2>Application deadline</h2><p>2026-09-30</p></main>",
+            content_type="text/html",
+        )
+        self.assertIn("2026-08-31", before.text)
+        self.assertIn("2026-09-30", after.text)
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
     def test_direct_text_before_and_after_a_block_child_is_not_dropped(self) -> None:
         # An element that mixes its own direct text with a block-level
         # child (e.g. a status line followed by a details <div>) must not
@@ -374,6 +392,31 @@ class NormalizationTests(unittest.TestCase):
             content_type="application/pdf",
         )
         self.assertIn("Quoted status", double_quote.text)
+
+    def test_pdf_unsupported_filter_streams_are_rejected_not_skipped(self) -> None:
+        # A stream without /FlateDecode is currently assumed to already be
+        # decoded plain content. But /ASCIIHexDecode, /ASCII85Decode,
+        # /LZWDecode, /RunLengthDecode, and filter chains are also valid and
+        # leave their bytes filter-encoded, not plain text. If only the
+        # unfiltered stream is scanned, a change confined to a filtered
+        # stream would leave the normalized hash unchanged, so such filters
+        # must be rejected rather than silently skipped.
+        before = (
+            b"%PDF-1.4\n1 0 obj\n<< /Length 20 >>\nstream\n"
+            b"BT (Stable label) Tj ET\nendstream\nendobj\n"
+            b"2 0 obj\n<< /Filter /ASCIIHexDecode /Length 20 >>\nstream\n"
+            b"28546f74616c3a20303030302947\nendstream\nendobj\n%%EOF"
+        )
+        after = (
+            b"%PDF-1.4\n1 0 obj\n<< /Length 20 >>\nstream\n"
+            b"BT (Stable label) Tj ET\nendstream\nendobj\n"
+            b"2 0 obj\n<< /Filter /ASCIIHexDecode /Length 20 >>\nstream\n"
+            b"28546f74616c3a20393939392947\nendstream\nendobj\n%%EOF"
+        )
+        with self.assertRaisesRegex(MonitorError, "filter"):
+            normalize_content(before, content_type="application/pdf")
+        with self.assertRaisesRegex(MonitorError, "filter"):
+            normalize_content(after, content_type="application/pdf")
 
     def test_pdf_custom_font_encodings_are_rejected_not_mishashed(self) -> None:
         # A font's /ToUnicode CMap or /Differences array can remap a

@@ -85,7 +85,7 @@ NOISE_TOKEN_RE = re.compile(
 # ``main`` is a content sub-heading, not page chrome.
 HEADER_NOISE_TOKEN_RE = re.compile(r"(?:^|[-_])header(?:$|[-_])", re.IGNORECASE)
 TIMESTAMP_ONLY_RE = re.compile(
-    r"^(?:(?:last\s+)?(?:updated|modified|published)\s*[:：]?\s*)?"
+    r"^(?:last\s+)?(?:updated|modified|published)\s*[:：]?\s*"
     r"(?:\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?"
     r"(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?"
     r"|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}"
