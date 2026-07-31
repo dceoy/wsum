@@ -442,6 +442,32 @@ class NormalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(MonitorError, "filter"):
             normalize_content(after, content_type="application/pdf")
 
+    def test_pdf_filter_beyond_a_fixed_lookbehind_window_is_still_detected(
+        self,
+    ) -> None:
+        # A stream dictionary can exceed a fixed-size lookbehind window. If
+        # /Filter appears more than that window's width before the "stream"
+        # keyword, a scan bounded by a fixed window would see no filter and
+        # silently treat the still-encoded bytes as plain content instead of
+        # rejecting the unsupported filter.
+        padding = b"x" * 1_200
+        pdf = (
+            b"%PDF-1.4\n1 0 obj\n<< /Filter /ASCIIHexDecode /Length 20 "
+            b"/Extra (" + padding + b") >>\nstream\n"
+            b"28546f74616c3a20303030302947\nendstream\nendobj\n%%EOF"
+        )
+        with self.assertRaisesRegex(MonitorError, "filter"):
+            normalize_content(pdf, content_type="application/pdf")
+
+    def test_pdf_stream_without_an_enclosing_object_fails_closed(self) -> None:
+        # A stream with no discoverable "N G obj" header before it has no
+        # provable dictionary association; the filter cannot be trusted
+        # either way, so this must reject rather than treat it as unfiltered
+        # plain content.
+        pdf = b"%PDF-1.4\nstream\nBT (Hello) Tj ET\nendstream\n%%EOF"
+        with self.assertRaisesRegex(MonitorError, "pdf_malformed|malformed"):
+            normalize_content(pdf, content_type="application/pdf")
+
     def test_pdf_custom_font_encodings_are_rejected_not_mishashed(self) -> None:
         # A font's /ToUnicode CMap or /Differences array can remap a
         # character code to a different rendered glyph without the raw
@@ -575,6 +601,25 @@ class DiffTests(unittest.TestCase):
         unrelated_focus = compare_content(
             before, after, watch_focus="executive changes"
         )
+        self.assertEqual("minor", unrelated_focus.result)
+
+    def test_watch_focus_matches_short_cjk_terms(self) -> None:
+        # A len(term) > 2 filter drops common two-character Japanese
+        # focuses, and \b is not a reliable tokenizer for CJK text (there is
+        # no whitespace between words). A bare numeric label/value change
+        # under a matching CJK focus must still reach the summary model
+        # instead of being silently clamped as noise.
+        before, after = "# 株価\n100", "# 株価\n101"
+        unfocused = compare_content(before, after)
+        self.assertEqual("minor", unfocused.result)
+        self.assertIn("noise_only", unfocused.scoring_reasons)
+
+        focused = compare_content(before, after, watch_focus="株価")
+        self.assertEqual("candidate_material", focused.result)
+        self.assertTrue(focused.should_summarize)
+        self.assertIn("watch_focus_configured", focused.scoring_reasons)
+
+        unrelated_focus = compare_content(before, after, watch_focus="為替")
         self.assertEqual("minor", unrelated_focus.result)
 
     def test_label_value_split_across_lines_is_still_material(self) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import re
 import unicodedata
 import zlib
@@ -9,6 +10,7 @@ import zlib
 from errors import MonitorError
 
 STREAM_RE = re.compile(rb"stream\r?\n(.*?)\r?\nendstream", re.DOTALL)
+OBJECT_HEADER_RE = re.compile(rb"\d+\s+\d+\s+obj\b")
 FILTER_RE = re.compile(rb"/Filter\s*(/[A-Za-z0-9]+|\[[^\]]*\])")
 FILTER_NAME_RE = re.compile(rb"/[A-Za-z0-9]+")
 TEXT_BLOCK_RE = re.compile(rb"BT(.*?)ET", re.DOTALL)
@@ -121,11 +123,35 @@ def _stream_filters(dictionary: bytes) -> list[bytes]:
     return [value]
 
 
+def _stream_dictionary(
+    pdf: bytes, object_starts: list[int], stream_start: int
+) -> bytes:
+    # The dictionary that governs a stream is everything between its
+    # enclosing "N G obj" header and the "stream" keyword -- unlike a fixed
+    # lookbehind window, this is correct regardless of how large the
+    # dictionary is. Fail closed if no enclosing object can be found or the
+    # bytes between them do not look like a dictionary, rather than silently
+    # treating an unprovable association as "no filter".
+    index = bisect.bisect_right(object_starts, stream_start) - 1
+    if index < 0:
+        raise MonitorError(
+            "pdf_malformed", "PDF stream has no enclosing object dictionary"
+        )
+    dictionary = pdf[object_starts[index] : stream_start]
+    stripped = dictionary.strip()
+    if not (stripped.startswith(b"<<") and stripped.endswith(b">>")):
+        raise MonitorError(
+            "pdf_malformed", "PDF stream dictionary could not be parsed"
+        )
+    return dictionary
+
+
 def _stream_data(pdf: bytes, limit: int) -> list[bytes]:
     streams: list[bytes] = []
     total = 0
+    object_starts = [match.end() for match in OBJECT_HEADER_RE.finditer(pdf)]
     for match in STREAM_RE.finditer(pdf):
-        dictionary = pdf[max(0, match.start() - 1_024) : match.start()]
+        dictionary = _stream_dictionary(pdf, object_starts, match.start())
         stream = match.group(1)
         filters = _stream_filters(dictionary)
         if filters == [b"/FlateDecode"]:

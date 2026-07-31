@@ -280,8 +280,16 @@ class WeeklyMonitorRoutine:
 
     def _persist_success(self, state: State, run: RunRecord) -> RunRecord:
         with self._store_lock:
-            self.store.replace_state(state)
+            # Run is the durable idempotency checkpoint _process_target's
+            # claimed-run replay depends on (the get_run check near the top
+            # of _process_target). Writing it before State means that if the
+            # process fails between these two independent connector writes,
+            # a retry with the same run_id finds the terminal Run and
+            # replays it instead of re-fetching or re-notifying. The reverse
+            # order can advance State while the Run write never lands,
+            # silently dropping the result the State change was based on.
             self.store.append_run(run)
+            self.store.replace_state(state)
         return run
 
     def _failure_alert(

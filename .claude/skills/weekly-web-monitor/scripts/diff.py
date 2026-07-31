@@ -192,12 +192,25 @@ def _changed_char_ratio(
     return min(1.0, changed / denominator)
 
 
+CJK_RE = re.compile(
+    r"[぀-ヿ㐀-䶿一-鿿豈-﫿ｦ-ﾟ]"
+)
+
+
 def _watch_focus_terms(watch_focus: str) -> tuple[re.Pattern[str], ...]:
-    return tuple(
-        re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE)
-        for term in re.split(r"\s+", watch_focus.strip())
-        if len(term) > 2
-    )
+    patterns = []
+    for term in re.split(r"\s+", watch_focus.strip()):
+        if not term:
+            continue
+        if CJK_RE.search(term):
+            # \b is not a reliable tokenizer for CJK text (there is no
+            # whitespace between words), and CJK focus terms are commonly
+            # only one or two characters, so match the literal substring
+            # unbounded instead of requiring a word boundary and length > 2.
+            patterns.append(re.compile(re.escape(term), re.IGNORECASE))
+        elif len(term) > 2:
+            patterns.append(re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE))
+    return tuple(patterns)
 
 
 def _watch_focus_matches_section(

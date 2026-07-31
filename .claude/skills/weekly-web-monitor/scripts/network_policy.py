@@ -20,6 +20,43 @@ from errors import MonitorError
 
 Resolver = Callable[..., Sequence[tuple]]
 
+_SENSITIVE_QUERY_NAMES = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "auth",
+        "authorization",
+        "awsaccesskeyid",
+        "credential",
+        "password",
+        "secret",
+        "sig",
+        "signature",
+        "token",
+    }
+)
+_SENSITIVE_QUERY_SUFFIXES = (
+    "credential",
+    "signature",
+    "security-token",
+    "session-token",
+)
+
+
+def is_sensitive_query_name(name: str) -> bool:
+    """True for exact credential names and provider-prefixed signed-URL params.
+
+    Provider signed-URL schemes namespace their credential/signature params
+    under a prefix (``X-Amz-Credential``, ``X-Amz-Signature``,
+    ``X-Goog-Signature``, ...) that an exact-name check misses entirely, so
+    those are matched by suffix instead of by exact name.
+    """
+    normalized = name.strip().lower()
+    if normalized in _SENSITIVE_QUERY_NAMES:
+        return True
+    return normalized.replace("_", "-").endswith(_SENSITIVE_QUERY_SUFFIXES)
+
 
 @dataclass(frozen=True, slots=True)
 class ResolvedTarget:
@@ -85,21 +122,8 @@ def canonicalize_url(value: str) -> tuple[str, SplitResult]:
         raise _deny("URL host is required")
     if parsed.username is not None or parsed.password is not None:
         raise _deny("embedded URL credentials are forbidden")
-    sensitive_query_names = {
-        "access_token",
-        "api_key",
-        "apikey",
-        "auth",
-        "authorization",
-        "credential",
-        "password",
-        "secret",
-        "sig",
-        "signature",
-        "token",
-    }
     if any(
-        name.lower() in sensitive_query_names
+        is_sensitive_query_name(name)
         for name, _ in parse_qsl(parsed.query, keep_blank_values=True)
     ):
         raise _deny("credential-like URL query parameters are forbidden")

@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from errors import MonitorError
+from network_policy import is_sensitive_query_name
 
 TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HASH_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -70,21 +71,8 @@ def validate_http_url(value: str, field_name: str = "url") -> str:
             "invalid_record",
             f"{field_name} must be an HTTP(S) URL without embedded credentials",
         )
-    sensitive_query_names = {
-        "access_token",
-        "api_key",
-        "apikey",
-        "auth",
-        "authorization",
-        "credential",
-        "password",
-        "secret",
-        "sig",
-        "signature",
-        "token",
-    }
     if any(
-        name.lower() in sensitive_query_names
+        is_sensitive_query_name(name)
         for name, _ in parse_qsl(parsed.query, keep_blank_values=True)
     ):
         raise MonitorError(

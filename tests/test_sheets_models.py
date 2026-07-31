@@ -85,6 +85,28 @@ class ModelsAndSheetsTests(unittest.TestCase):
         with self.assertRaises(MonitorError):
             Target.from_mapping(base)
 
+    def test_rejects_provider_prefixed_signed_url_credentials(self) -> None:
+        # An exact-name denylist misses namespaced signed-URL parameters:
+        # a signed target URL would otherwise reach the summary model
+        # context and the Slack notification text.
+        base = {
+            "target_id": "one",
+            "enabled": True,
+            "name": "One",
+            "url": "https://example.com",
+        }
+        signed_urls = (
+            "https://bucket.s3.amazonaws.com/key"
+            "?X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request",
+            "https://bucket.s3.amazonaws.com/key?X-Amz-Signature=abc123",
+            "https://storage.googleapis.com/bucket/key?X-Goog-Signature=abc123",
+            "https://bucket.s3.amazonaws.com/key?AWSAccessKeyId=AKIAEXAMPLE",
+        )
+        for url in signed_urls:
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(MonitorError, "credential-like"):
+                    Target.from_mapping({**base, "url": url})
+
     def test_exclude_selectors_enforce_count_and_length_bounds(self) -> None:
         base = {
             "target_id": "one",

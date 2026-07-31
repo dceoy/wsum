@@ -245,6 +245,36 @@ class RoutineTests(unittest.TestCase):
         self.assertEqual(0, broken_store.states["one"].consecutive_failures)
         self.assertEqual("failed", broken_store.runs["run-2:one"].result)
 
+    def test_run_is_written_before_state_on_success(self) -> None:
+        # If the process fails between the two independent connector writes
+        # in _persist_success, only the write ordering determines whether a
+        # retry with the same run_id finds a terminal Run to replay (safe)
+        # or an advanced State with no matching Run (silently drops the
+        # outcome the State change was based on). Run must land first.
+        calls: list[str] = []
+
+        class RecordingStore(MemoryOperationalStore):
+            def append_run(self, run) -> None:
+                calls.append("append_run")
+                super().append_run(run)
+
+            def replace_state(self, state) -> None:
+                calls.append("replace_state")
+                super().replace_state(state)
+
+        store = RecordingStore([self.target])
+        routine = WeeklyMonitorRoutine(
+            store=store,
+            snapshots=self.snapshots,
+            summary_client=EvidenceSummaryClient(),
+            slack=self.slack,
+            fetcher=FixtureFetcher({"one": response(1000)}),
+            config=RoutineConfig(max_concurrency=2, retry=RetryConfig()),
+            sleeper=lambda _: None,
+        )
+        routine.run(run_id="run-1")
+        self.assertEqual(["append_run", "replace_state"], calls)
+
     def test_one_target_failure_does_not_abort_other_targets(self) -> None:
         targets = [make_target("good"), make_target("bad")]
         store = MemoryOperationalStore(targets)
