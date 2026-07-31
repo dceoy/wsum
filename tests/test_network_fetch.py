@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import http.client
+import socket
 import ssl
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -31,6 +34,12 @@ class FakeResponse:
         chunk = self._body[self._position : self._position + amount]
         self._position += len(chunk)
         return chunk
+
+    def read1(self, amount: int) -> bytes:
+        return self.read(amount)
+
+    def isclosed(self) -> bool:
+        return self._position >= len(self._body)
 
 
 class FakeSocket:
@@ -64,6 +73,52 @@ class TrickleResponse(FakeResponse):
         self._clock.advance(self._seconds_per_byte)
         self.read_count += 1
         return super().read(min(amount, 1))
+
+
+class _RealSlowTrickleServer:
+    """A real local TCP server that trickles an HTTP response body one byte
+    at a time.
+
+    A hand-rolled fake ``read()`` cannot reproduce ``http.client``'s own
+    buffered-socket read loop, which can perform many real recvs inside a
+    single ``HTTPResponse.read()`` call. Driving an actual socket proves the
+    fix against that real buffering instead of a fake that already returns
+    after one byte per call.
+    """
+
+    def __init__(self, body: bytes, seconds_per_byte: float) -> None:
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self.port = self._listener.getsockname()[1]
+        self._body = body
+        self._seconds_per_byte = seconds_per_byte
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        try:
+            conn, _ = self._listener.accept()
+        except OSError:
+            return
+        with conn:
+            try:
+                conn.recv(65_536)
+                header = (
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/html\r\n"
+                    f"Content-Length: {len(self._body)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+                conn.sendall(header)
+                for byte in self._body:
+                    conn.sendall(bytes((byte,)))
+                    time.sleep(self._seconds_per_byte)
+            except OSError:
+                return
+
+    def close(self) -> None:
+        self._listener.close()
 
 
 class FakeConnection:
@@ -291,6 +346,9 @@ class FetchTests(unittest.TestCase):
         # Each read individually completes just before the per-op timeout, so
         # a per-read socket timeout alone never fires; only a total wall-clock
         # deadline across all reads can stop this from running indefinitely.
+        # This exercises only the loop's own bookkeeping with a fake clock;
+        # it does not model http.client's real buffered socket reads, which
+        # is covered separately below with a real socket.
         clock = FakeClock()
         response = TrickleResponse(clock, seconds_per_byte=10.0, total_bytes=10_000_000)
         connection = FakeConnection(response)
@@ -313,6 +371,60 @@ class FetchTests(unittest.TestCase):
         # It must have bailed out via the deadline, not by reading everything:
         # 60 seconds of budget at 10 seconds per byte allows at most 6 reads.
         self.assertLessEqual(response.read_count, 6)
+
+    def test_real_socket_fetch_succeeds_when_server_closes_the_connection(
+        self,
+    ) -> None:
+        # fetch_url always sends ``Connection: close``, and a compliant
+        # server echoes that in its response. http.client's getresponse()
+        # then nulls out connection.sock as soon as it sees the response
+        # will close the connection, even though the underlying socket (and
+        # the response body) is still readable. A FakeConnection/FakeSocket
+        # never models that, so only a real socket proves a normal fetch
+        # survives it.
+        body = b"<html><body>hello real socket</body></html>"
+        server = _RealSlowTrickleServer(body=body, seconds_per_byte=0.0)
+        self.addCleanup(server.close)
+        real_connection = http.client.HTTPConnection(
+            "127.0.0.1", server.port, timeout=1.0
+        )
+        self.addCleanup(real_connection.close)
+        with patch.object(fetch, "_open_connection", return_value=real_connection):
+            result = fetch_url(
+                "http://example.com/",
+                resolver=support.public_resolver,
+                config=FetchConfig(timeout_seconds=1.0, max_total_seconds=2.0),
+            )
+        self.assertEqual("fetched", result.result)
+        self.assertEqual(body, result.body)
+
+    def test_real_socket_slow_trickle_is_stopped_by_the_total_deadline(self) -> None:
+        # A real trickling server can complete ``HTTPResponse.read()``'s
+        # internal multi-recv loop well past the total deadline, since each
+        # individual recv comfortably beats the per-op timeout. Only reading
+        # via an API bounded to a single underlying recv (read1) lets the
+        # deadline be rechecked often enough to bail out promptly.
+        server = _RealSlowTrickleServer(body=b"x" * 30, seconds_per_byte=0.3)
+        self.addCleanup(server.close)
+        real_connection = http.client.HTTPConnection(
+            "127.0.0.1", server.port, timeout=1.0
+        )
+        self.addCleanup(real_connection.close)
+        started = time.perf_counter()
+        with patch.object(fetch, "_open_connection", return_value=real_connection):
+            with self.assertRaises(MonitorError) as raised:
+                fetch_url(
+                    "http://example.com/",
+                    resolver=support.public_resolver,
+                    config=FetchConfig(timeout_seconds=1.0, max_total_seconds=1.5),
+                )
+        elapsed = time.perf_counter() - started
+        self.assertEqual("fetch_timeout", raised.exception.code)
+        self.assertTrue(raised.exception.retryable)
+        # Fully trickling the 30-byte body would take 30 * 0.3s = 9s; bailing
+        # out near the 1.5s deadline (not after ~9s) proves the read is
+        # bounded per-recv rather than per-full-buffer-fill.
+        self.assertLess(elapsed, 4.0)
 
     def test_server_and_rate_limit_are_retryable(self) -> None:
         for status, code in ((429, "http_rate_limited"), (503, "http_server_error")):

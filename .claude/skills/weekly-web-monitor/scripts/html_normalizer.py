@@ -358,6 +358,13 @@ def _extract_lines(root: Node, excluded: set[Node]) -> list[str]:
             if full_text:
                 lines.append(full_text)
                 return
+        if direct_text and has_block_child:
+            # The element mixes its own text with block-level children
+            # (e.g. ``<main>Status text<div>Details</div></main>``).
+            # Emitting it here keeps a change to that text from being
+            # silently dropped from the normalized hash, even though the
+            # block children below are still emitted as separate lines.
+            lines.append(direct_text)
         for child in child_nodes:
             visit(child)
 

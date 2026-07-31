@@ -306,6 +306,7 @@ def fetch_url(
         )
         response: http.client.HTTPResponse | None = None
         connection: http.client.HTTPConnection | None = None
+        sock: socket.socket | None = None
         last_error: Exception | None = None
         for address in target.addresses:
             remaining = deadline - monotonic()
@@ -323,9 +324,15 @@ def fetch_url(
                 remaining = deadline - monotonic()
                 if remaining <= 0:
                     raise TimeoutError()
-                connection.sock.settimeout(
-                    min(active_config.timeout_seconds, remaining)
-                )
+                # Capture the socket now: ``getresponse()`` below calls
+                # ``connection.close()`` (nulling ``connection.sock``) as
+                # soon as it sees the response will close the connection,
+                # which happens on every request here since we always send
+                # ``Connection: close``. The underlying socket itself stays
+                # open for the response body to use; only the connection's
+                # reference to it is cleared.
+                sock = connection.sock
+                sock.settimeout(min(active_config.timeout_seconds, remaining))
                 response = connection.getresponse()
                 break
             except TimeoutError as exc:
@@ -336,7 +343,7 @@ def fetch_url(
                 last_error = exc
                 if connection:
                     connection.close()
-        if response is None or connection is None:
+        if response is None or connection is None or sock is None:
             if isinstance(last_error, (TimeoutError, socket.timeout)):
                 raise MonitorError(
                     "fetch_timeout", "request exceeded its timeout", retryable=True
@@ -423,6 +430,13 @@ def fetch_url(
             chunks: list[bytes] = []
             size = 0
             while True:
+                # ``read1()`` closes the response (and its socket) as soon
+                # as the last byte of a known Content-Length is consumed,
+                # not on a subsequent empty read. Check first so the
+                # deadline check and settimeout below never touch a socket
+                # the response has already torn down.
+                if response.isclosed():
+                    break
                 remaining = deadline - monotonic()
                 if remaining <= 0:
                     raise MonitorError(
@@ -430,10 +444,15 @@ def fetch_url(
                         "response read exceeded the total request deadline",
                         retryable=True,
                     )
-                connection.sock.settimeout(
-                    min(active_config.timeout_seconds, remaining)
-                )
-                chunk = response.read(
+                sock.settimeout(min(active_config.timeout_seconds, remaining))
+                # ``read()`` loops internally (via the buffered socket file
+                # object) until the requested amount is filled or EOF, which
+                # can span many socket recvs without ever rechecking the
+                # deadline below. ``read1()`` performs at most one
+                # underlying recv and returns whatever is currently
+                # available, so the deadline is rechecked after every actual
+                # socket read.
+                chunk = response.read1(
                     min(65_536, active_config.max_response_bytes - size + 1)
                 )
                 if not chunk:

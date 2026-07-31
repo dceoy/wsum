@@ -459,6 +459,63 @@ class RoutineTests(unittest.TestCase):
         self.assertNotEqual(baseline_hash, self.store.states["one"].normalized_hash)
         self.assertEqual(0, self.store.states["one"].consecutive_failures)
 
+    def test_truncated_non_signal_sections_with_non_material_verdict_fail_closed(
+        self,
+    ) -> None:
+        # None of the changed sections match a recognized price/spec/terms/
+        # availability/eligibility pattern, so signal_section_truncated is
+        # False; but the diff is candidate_material on changed ratio alone,
+        # and truncation still drops sections the model never saw. A
+        # non-material verdict over that incomplete evidence must not be
+        # trusted just because no *recognized* pattern was cut.
+        baseline_paragraphs = []
+        changed_paragraphs = []
+        for index in range(5):
+            baseline_paragraphs.append(f"Anchor {index}")
+            changed_paragraphs.append(f"Anchor {index}")
+            baseline_paragraphs.append(f"Note {index} original text here")
+            changed_paragraphs.append(
+                f"Note {index} completely different content now present"
+            )
+        routine_config = RoutineConfig(
+            max_concurrency=2,
+            retry=RetryConfig(),
+            failure_alert_threshold=3,
+            diff=DiffConfig(max_sections=3),
+        )
+        baseline_routine = WeeklyMonitorRoutine(
+            store=self.store,
+            snapshots=self.snapshots,
+            summary_client=NonMaterialSummary(),
+            slack=self.slack,
+            fetcher=FixtureFetcher({"one": paragraphs_response(baseline_paragraphs)}),
+            audit_sink=self.store,
+            config=routine_config,
+            sleeper=lambda _: None,
+        )
+        baseline_routine.run(run_id="nonsignal-1")
+        baseline_hash = self.store.states["one"].normalized_hash
+        self.assertTrue(baseline_hash)
+
+        changed_routine = WeeklyMonitorRoutine(
+            store=self.store,
+            snapshots=self.snapshots,
+            summary_client=NonMaterialSummary(),
+            slack=self.slack,
+            fetcher=FixtureFetcher({"one": paragraphs_response(changed_paragraphs)}),
+            audit_sink=self.store,
+            config=routine_config,
+            sleeper=lambda _: None,
+        )
+        result = changed_routine.run(run_id="nonsignal-2")
+        self.assertEqual(1, result.metrics.failed)
+        self.assertEqual(
+            "truncated_diff_non_material",
+            self.store.runs["nonsignal-2:one"].error_code,
+        )
+        self.assertEqual(baseline_hash, self.store.states["one"].normalized_hash)
+        self.assertEqual(1, self.store.states["one"].consecutive_failures)
+
     def test_truncated_signal_sections_with_non_material_verdict_fail_closed(
         self,
     ) -> None:

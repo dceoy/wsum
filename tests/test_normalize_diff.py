@@ -78,6 +78,38 @@ class NormalizationTests(unittest.TestCase):
         }
         self.assertEqual(4, len(hashes))
 
+    def test_direct_text_before_and_after_a_block_child_is_not_dropped(self) -> None:
+        # An element that mixes its own direct text with a block-level
+        # child (e.g. a status line followed by a details <div>) must not
+        # silently lose that text from the normalized hash.
+        open_before = normalize_content(
+            b"<main>Applications are now open<div>Details</div></main>",
+            content_type="text/html",
+        )
+        closed_before = normalize_content(
+            b"<main>Applications are now closed<div>Details</div></main>",
+            content_type="text/html",
+        )
+        self.assertNotEqual(
+            open_before.normalized_hash, closed_before.normalized_hash
+        )
+        self.assertIn("Applications are now closed", closed_before.text)
+        self.assertIn("Details", closed_before.text)
+
+        open_after = normalize_content(
+            b"<main><div>Details</div>Applications are now open</main>",
+            content_type="text/html",
+        )
+        closed_after = normalize_content(
+            b"<main><div>Details</div>Applications are now closed</main>",
+            content_type="text/html",
+        )
+        self.assertNotEqual(
+            open_after.normalized_hash, closed_after.normalized_hash
+        )
+        self.assertIn("Applications are now closed", closed_after.text)
+        self.assertIn("Details", closed_after.text)
+
     def test_selectors_tables_ads_and_drift(self) -> None:
         body = b"""
         <html><body>
