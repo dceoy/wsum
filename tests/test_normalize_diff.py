@@ -433,6 +433,22 @@ class DiffTests(unittest.TestCase):
         self.assertLess(elapsed, 1.0)
         self.assertTrue(result.budget_exceeded)
 
+    def test_unique_line_permutation_is_bounded_before_sequence_matcher(self) -> None:
+        # Unique lines defeat frequency-based complexity estimates even though
+        # SequenceMatcher can still take quadratic time on this permutation.
+        before_lines = [f"unique line {index}" for index in range(20_000)]
+        after_lines = before_lines[::2] + before_lines[1::2]
+        started = time.monotonic()
+        result = compare_content(
+            "\n".join(before_lines),
+            "\n".join(after_lines),
+            config=DiffConfig(max_diff_lines=20_000),
+        )
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.0)
+        self.assertTrue(result.budget_exceeded)
+        self.assertTrue(result.truncated)
+
     def test_ordinary_repetition_stays_under_the_complexity_budget(self) -> None:
         before_lines = (
             ["separator"] * 500 + ["Price: $10"] + [f"row {i}" for i in range(500)]

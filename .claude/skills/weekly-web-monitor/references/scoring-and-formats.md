@@ -36,12 +36,12 @@ default, at most 30 sections, and at most 12,000 changed-context characters.
 Include stable section IDs and the nearest heading or feed entry anchor. Mark
 truncation explicitly.
 
-`SequenceMatcher` with auto-junk disabled does O(count_before(v) * count_after(v))
-work per repeated line value `v`; a document dominated by a handful of heavily
-repeated lines can hit that cost well under the line-count cap. Before diffing,
-estimate this cost from per-line frequency counts and short-circuit to the same
-budget-exceeded result as the line-count cap (`diff_budget_exceeded`, a synthetic
-document-level section, fail-closed) when it exceeds `max_diff_complexity`.
+`SequenceMatcher` with auto-junk disabled has a quadratic worst case for both
+heavily repeated lines and adversarial permutations of unique lines. Before
+diffing, conservatively bound that work by the product of the before/after line
+counts and short-circuit to the same budget-exceeded result as the line-count cap
+(`diff_budget_exceeded`, a synthetic document-level section, fail-closed) when it
+exceeds `max_diff_complexity`.
 
 When the retained section budget (30 sections / 12,000 characters) cannot hold
 every changed section, prioritize sections that match a scoring signal (price,

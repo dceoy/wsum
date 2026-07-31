@@ -7,7 +7,6 @@ import hashlib
 import json
 import re
 import sys
-from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -321,30 +320,14 @@ def _bounded_sections(
 def _complexity_budget_exceeded(
     before_lines: list[str], after_lines: list[str], limit: int
 ) -> bool:
-    """Estimate SequenceMatcher's worst-case matching cost before running it.
+    """Conservatively bound SequenceMatcher's quadratic worst case.
 
-    ``difflib.SequenceMatcher`` with ``autojunk=False`` does O(count_before(v) *
-    count_after(v)) work for each line value ``v`` shared by both sequences.
-    A document dominated by a handful of heavily repeated lines (rather than
-    simply many lines) can hit this cost well under ``max_diff_lines``, so it
-    must be bounded independently of the line-count cap.
+    Frequency-based estimates miss adversarial permutations whose lines are
+    unique.  The sequence-length product is a safe upper-work proxy for both
+    repeated-line and unique-line worst cases, so fail closed before invoking
+    ``SequenceMatcher`` whenever that product exceeds the configured budget.
     """
-    before_counts = Counter(before_lines)
-    after_counts = Counter(after_lines)
-    smaller, larger = (
-        (before_counts, after_counts)
-        if len(before_counts) <= len(after_counts)
-        else (after_counts, before_counts)
-    )
-    total = 0
-    for value, count in smaller.items():
-        other = larger.get(value)
-        if not other:
-            continue
-        total += count * other
-        if total > limit:
-            return True
-    return False
+    return len(before_lines) * len(after_lines) > limit
 
 
 def _budget_exceeded_result(
