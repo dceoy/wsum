@@ -10,8 +10,8 @@ from errors import MonitorError
 
 STREAM_RE = re.compile(rb"stream\r?\n(.*?)\r?\nendstream", re.DOTALL)
 TEXT_BLOCK_RE = re.compile(rb"BT(.*?)ET", re.DOTALL)
-LITERAL_RE = re.compile(rb"\((?:\\.|[^\\()])*\)")
 TJ_RE = re.compile(rb"\[(.*?)\]\s*TJ", re.DOTALL)
+TJ_ITEM_RE = re.compile(rb"\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>")
 SINGLE_TJ_RE = re.compile(rb"(\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>)\s*Tj")
 METADATA_RE = re.compile(rb"/(Title|Author|Subject)\s*\((?:\\.|[^\\()])*\)")
 
@@ -145,7 +145,9 @@ def extract_pdf_text(
                 consumed.add(array_match.span())
                 values = [
                     _decode_literal(item)
-                    for item in LITERAL_RE.findall(array_match.group(1))
+                    if item.startswith(b"(")
+                    else _decode_hex(item)
+                    for item in TJ_ITEM_RE.findall(array_match.group(1))
                 ]
                 text = "".join(values).strip()
                 if text:

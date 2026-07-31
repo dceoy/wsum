@@ -268,6 +268,31 @@ class NormalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(MonitorError, "image-only"):
             normalize_content(image_only, content_type="application/pdf")
 
+    def test_pdf_tj_array_hex_strings_are_not_silently_dropped(self) -> None:
+        # TJ arrays commonly mix literal (...) runs with hex-encoded <...>
+        # runs (e.g. a font/CMap-encoded value between literal label text).
+        # Only extracting the literal runs would keep the normalized hash
+        # stable even when the hex-encoded content changes.
+        mixed = (
+            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
+            b"BT [(Hello ) <576f726c64>] TJ ET\nendstream\nendobj\n%%EOF"
+        )
+        result = normalize_content(mixed, content_type="application/pdf")
+        self.assertIn("Hello World", result.text)
+        before = normalize_content(
+            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
+            b"BT [(Total: ) <30303030>] TJ ET\nendstream\nendobj\n%%EOF",
+            content_type="application/pdf",
+        )
+        after = normalize_content(
+            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
+            b"BT [(Total: ) <39393939>] TJ ET\nendstream\nendobj\n%%EOF",
+            content_type="application/pdf",
+        )
+        self.assertIn("Total: 0000", before.text)
+        self.assertIn("Total: 9999", after.text)
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
 
 class DiffTests(unittest.TestCase):
     def test_unchanged_and_first_fetch_short_circuit(self) -> None:
@@ -294,6 +319,23 @@ class DiffTests(unittest.TestCase):
                 result = compare_content(before, after)
                 self.assertEqual("candidate_material", result.result)
                 self.assertTrue(result.should_summarize)
+
+    def test_label_value_split_across_lines_is_still_material(self) -> None:
+        # A label and its value are often on separate lines (a heading
+        # anchor plus a bare value line below it), so only the value line
+        # itself is among the changed lines. The label word never appears
+        # there, and a bare numeric value alone would otherwise be clamped
+        # as noise -- both must be covered via the section anchor.
+        price = compare_content("# Price\n10", "# Price\n20")
+        self.assertEqual("candidate_material", price.result)
+        self.assertIn("price", price.scoring_reasons)
+        self.assertNotIn("noise_only", price.scoring_reasons)
+        deadline = compare_content("# Deadline\n2026-01-01", "# Deadline\n2026-02-01")
+        self.assertEqual("candidate_material", deadline.result)
+        self.assertIn("eligibility", deadline.scoring_reasons)
+        japanese_price = compare_content("# 価格\n1000", "# 価格\n2000")
+        self.assertEqual("candidate_material", japanese_price.result)
+        self.assertIn("price", japanese_price.scoring_reasons)
 
     def test_large_rewrite_and_bounded_output(self) -> None:
         before = "\n".join(f"old line {index}" for index in range(500))

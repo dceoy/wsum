@@ -96,6 +96,78 @@ class FetchResult:
         return value
 
 
+class _DeadlineTrackingMixin:
+    """Reject every underlying recv once the fetch's total deadline has passed.
+
+    ``http.client``'s buffered response file performs its own internal
+    ``readline()``/``read()`` loops when parsing headers, chunk-size lines,
+    and trailers, independent of ``read1()``'s single-recv-per-call
+    guarantee used for the body. Each of those internal recvs can complete
+    well inside the per-op socket timeout, so a peer trickling bytes one at
+    a time (e.g. a padded chunk-extension on the chunk-size line) can stall
+    past ``max_total_seconds`` without ever tripping a single recv's
+    timeout. Clamping the socket's own timeout to whatever remains of the
+    deadline before every real recv closes that gap for headers, chunk
+    framing, and trailers alike -- including a recv that blocks completely
+    (no bytes at all), since that recv's own timeout can then never exceed
+    the remaining budget, unlike a per-op timeout set once before a call
+    that can perform many such recvs.
+    """
+
+    _deadline: float = float("inf")
+
+    def _clamp_to_deadline(self) -> None:
+        remaining = self._deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("recv exceeded the fetch deadline")
+        current = self.gettimeout()  # type: ignore[attr-defined]
+        if current is None or current > remaining:
+            self.settimeout(remaining)  # type: ignore[attr-defined]
+
+    def recv_into(self, *args: Any, **kwargs: Any) -> int:
+        self._clamp_to_deadline()
+        return super().recv_into(*args, **kwargs)  # type: ignore[misc]
+
+    def recv(self, *args: Any, **kwargs: Any) -> bytes:
+        self._clamp_to_deadline()
+        return super().recv(*args, **kwargs)  # type: ignore[misc]
+
+
+class _DeadlineSocket(_DeadlineTrackingMixin, socket.socket):
+    pass
+
+
+class _DeadlineSSLSocket(_DeadlineTrackingMixin, ssl.SSLSocket):
+    pass
+
+
+def _connect_pinned_socket(
+    address: str,
+    port: int,
+    timeout: float,
+    source_address: tuple[str, int] | None,
+    deadline: float,
+) -> socket.socket:
+    # ``address`` is always a pre-resolved, already-validated IP literal, so
+    # this performs no network I/O; it mirrors ``socket.create_connection``'s
+    # own family/sockaddr derivation (including IPv6 flowinfo/scope_id)
+    # instead of guessing the family from the address string's shape.
+    family, socktype, proto, _, sockaddr = socket.getaddrinfo(
+        address, port, type=socket.SOCK_STREAM, flags=socket.AI_NUMERICHOST
+    )[0]
+    sock = _DeadlineSocket(family, socktype, proto)
+    sock._deadline = deadline
+    sock.settimeout(timeout)
+    try:
+        if source_address:
+            sock.bind(source_address)
+        sock.connect(sockaddr)
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
 class _PinnedHTTPConnection(http.client.HTTPConnection):
     def __init__(
         self,
@@ -104,14 +176,16 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
         port: int,
         timeout: float,
         allowed_addresses: tuple[str, ...],
+        deadline: float,
     ) -> None:
         super().__init__(origin_host, port=port, timeout=timeout)
         self._address = address
         self._allowed_addresses = allowed_addresses
+        self._deadline = deadline
 
     def connect(self) -> None:
-        self.sock = socket.create_connection(
-            (self._address, self.port), self.timeout, self.source_address
+        self.sock = _connect_pinned_socket(
+            self._address, self.port, self.timeout, self.source_address, self._deadline
         )
         validate_peer_address(self.sock.getpeername()[0], self._allowed_addresses)
 
@@ -125,18 +199,28 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         timeout: float,
         allowed_addresses: tuple[str, ...],
         context: ssl.SSLContext,
+        deadline: float,
     ) -> None:
         super().__init__(origin_host, port=port, timeout=timeout, context=context)
         self._address = address
         self._allowed_addresses = allowed_addresses
+        self._deadline = deadline
 
     def connect(self) -> None:
-        raw_socket = socket.create_connection(
-            (self._address, self.port), self.timeout, self.source_address
+        raw_socket = _connect_pinned_socket(
+            self._address, self.port, self.timeout, self.source_address, self._deadline
         )
         try:
             validate_peer_address(raw_socket.getpeername()[0], self._allowed_addresses)
-            self.sock = self._context.wrap_socket(raw_socket, server_hostname=self.host)
+            # ``wrap_socket`` detaches the raw fd into a brand new socket
+            # object, so the raw socket's own deadline-checked recv is never
+            # actually exercised over TLS; the wrapped object is what
+            # ``http.client`` reads application data through afterward, so
+            # that is where the deadline check must live instead.
+            self._context.sslsocket_class = _DeadlineSSLSocket
+            wrapped = self._context.wrap_socket(raw_socket, server_hostname=self.host)
+            wrapped._deadline = self._deadline  # type: ignore[attr-defined]
+            self.sock = wrapped
             validate_peer_address(self.sock.getpeername()[0], self._allowed_addresses)
         except BaseException:
             raw_socket.close()
@@ -170,6 +254,7 @@ def _open_connection(
     address: str,
     timeout: float,
     ssl_context: ssl.SSLContext,
+    deadline: float,
 ) -> http.client.HTTPConnection:
     if target.scheme == "https":
         return _PinnedHTTPSConnection(
@@ -179,6 +264,7 @@ def _open_connection(
             timeout,
             target.addresses,
             ssl_context,
+            deadline,
         )
     return _PinnedHTTPConnection(
         target.host,
@@ -186,6 +272,7 @@ def _open_connection(
         target.port,
         timeout,
         target.addresses,
+        deadline,
     )
 
 
@@ -319,6 +406,7 @@ def fetch_url(
                     address,
                     min(active_config.timeout_seconds, remaining),
                     tls_context,
+                    deadline,
                 )
                 connection.request("GET", _request_path(target.url), headers=headers)
                 remaining = deadline - monotonic()

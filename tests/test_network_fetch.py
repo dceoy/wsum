@@ -121,6 +121,98 @@ class _RealSlowTrickleServer:
         self._listener.close()
 
 
+class _RealSlowTrickleChunkedServer:
+    """A real local TCP server that sends valid headers immediately, then
+    trickles a padded chunk-size line (chunk-extension bytes before the
+    terminating CRLF) one byte at a time, without ever sending chunk data.
+
+    ``http.client``'s chunked decoder parses the chunk-size line via the
+    buffered file's own ``readline()``, independently of ``read1()``'s
+    single-recv guarantee used for chunk data. A hand-rolled fake response
+    cannot reproduce that internal buffered-read loop, so this drives a
+    real socket to prove the fix against real chunked framing.
+    """
+
+    def __init__(self, chunk_size_line: bytes, seconds_per_byte: float) -> None:
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self.port = self._listener.getsockname()[1]
+        self._chunk_size_line = chunk_size_line
+        self._seconds_per_byte = seconds_per_byte
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        try:
+            conn, _ = self._listener.accept()
+        except OSError:
+            return
+        with conn:
+            try:
+                conn.recv(65_536)
+                header = (
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/html\r\n"
+                    "Transfer-Encoding: chunked\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+                conn.sendall(header)
+                for byte in self._chunk_size_line:
+                    conn.sendall(bytes((byte,)))
+                    time.sleep(self._seconds_per_byte)
+            except OSError:
+                return
+
+    def close(self) -> None:
+        self._listener.close()
+
+
+class _RealStalledChunkedServer:
+    """A real local TCP server that sends valid chunked headers immediately,
+    then goes completely silent (holds the connection open with no further
+    bytes) for the given duration.
+
+    Unlike a trickle, a single recv here can block for the peer's entire
+    silence. That only stays bounded by the fetch's total deadline if the
+    per-recv timeout itself is clamped to whatever remains of the deadline;
+    a per-op timeout set once before the read (and left at its original,
+    larger value for every recv inside it) would let this one recv block
+    for far longer than the deadline permits.
+    """
+
+    def __init__(self, hold_seconds: float) -> None:
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self.port = self._listener.getsockname()[1]
+        self._hold_seconds = hold_seconds
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        try:
+            conn, _ = self._listener.accept()
+        except OSError:
+            return
+        with conn:
+            try:
+                conn.recv(65_536)
+                header = (
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/html\r\n"
+                    "Transfer-Encoding: chunked\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+                conn.sendall(header)
+                time.sleep(self._hold_seconds)
+            except OSError:
+                return
+
+    def close(self) -> None:
+        self._listener.close()
+
+
 class FakeConnection:
     def __init__(self, response: FakeResponse) -> None:
         self.response = response
@@ -425,6 +517,115 @@ class FetchTests(unittest.TestCase):
         # out near the 1.5s deadline (not after ~9s) proves the read is
         # bounded per-recv rather than per-full-buffer-fill.
         self.assertLess(elapsed, 4.0)
+
+    def test_pinned_connection_delivers_a_normal_response_intact(self) -> None:
+        # Every other test that exercises ``_PinnedHTTPConnection``'s
+        # deadline-checked socket asserts a timeout. This is the golden
+        # path: a well-behaved, fast server must still read back exactly
+        # as before, proving the per-recv deadline clamp does not itself
+        # truncate or corrupt an ordinary successful read.
+        body = b"<html><body>hello pinned socket</body></html>"
+        server = _RealSlowTrickleServer(body=body, seconds_per_byte=0.0)
+        self.addCleanup(server.close)
+        connection = fetch._PinnedHTTPConnection(
+            "example.com",
+            "127.0.0.1",
+            server.port,
+            timeout=5.0,
+            allowed_addresses=("127.0.0.1",),
+            deadline=time.monotonic() + 5.0,
+        )
+        self.addCleanup(connection.close)
+        with patch.object(fetch, "validate_peer_address"):
+            connection.request(
+                "GET", "/", headers={"Host": "example.com", "Connection": "close"}
+            )
+        response = connection.getresponse()
+        self.assertEqual(200, response.status)
+        chunks = []
+        while True:
+            chunk = response.read1(65_536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        self.assertEqual(body, b"".join(chunks))
+
+    def test_pinned_connection_deadline_stops_a_trickled_chunk_size_line(
+        self,
+    ) -> None:
+        # A padded chunk-extension on the chunk-size line lets a peer
+        # trickle many bytes before the terminating CRLF, entirely inside
+        # ``_read1_chunked``'s internal ``readline()`` -- independent of the
+        # single-recv-per-call ``read1()`` fix used for chunk data. Only a
+        # deadline check on every real recv (not just between ``read1()``
+        # calls) can bound this. This drives ``_PinnedHTTPConnection``
+        # directly since it owns the deadline-checked socket.
+        chunk_size_line = b"a;" + b"x" * 40 + b"\r\n"
+        server = _RealSlowTrickleChunkedServer(
+            chunk_size_line=chunk_size_line, seconds_per_byte=0.05
+        )
+        self.addCleanup(server.close)
+        connection = fetch._PinnedHTTPConnection(
+            "example.com",
+            "127.0.0.1",
+            server.port,
+            timeout=5.0,
+            allowed_addresses=("127.0.0.1",),
+            deadline=time.monotonic() + 0.5,
+        )
+        self.addCleanup(connection.close)
+        # Address pinning always rejects loopback peers (by design, for
+        # SSRF safety) and is exercised separately by NetworkPolicyTests;
+        # bypass only that check here to reach the real local test server.
+        with patch.object(fetch, "validate_peer_address"):
+            connection.request(
+                "GET", "/", headers={"Host": "example.com", "Connection": "close"}
+            )
+        started = time.perf_counter()
+        with self.assertRaises(TimeoutError):
+            response = connection.getresponse()
+            while True:
+                chunk = response.read1(65_536)
+                if not chunk:
+                    break
+        elapsed = time.perf_counter() - started
+        # Fully trickling the ~44-byte chunk-size line would take over 2s;
+        # bailing out near the 0.5s deadline proves every recv is checked,
+        # not just the boundary between read1() calls.
+        self.assertLess(elapsed, 2.0)
+
+    def test_pinned_connection_deadline_bounds_a_complete_stall(self) -> None:
+        # A peer that sends nothing at all after the headers (rather than
+        # trickling bytes) lets a single recv block for the peer's entire
+        # silence. A per-op timeout set once before the read (and left
+        # unchanged for every recv inside it) would let this one recv run
+        # for far longer than what remains of the fetch's total deadline;
+        # only clamping each recv's own timeout to the remaining budget
+        # bounds it.
+        server = _RealStalledChunkedServer(hold_seconds=5.0)
+        self.addCleanup(server.close)
+        connection = fetch._PinnedHTTPConnection(
+            "example.com",
+            "127.0.0.1",
+            server.port,
+            timeout=5.0,
+            allowed_addresses=("127.0.0.1",),
+            deadline=time.monotonic() + 0.5,
+        )
+        self.addCleanup(connection.close)
+        with patch.object(fetch, "validate_peer_address"):
+            connection.request(
+                "GET", "/", headers={"Host": "example.com", "Connection": "close"}
+            )
+        started = time.perf_counter()
+        with self.assertRaises(TimeoutError):
+            response = connection.getresponse()
+            response.read1(65_536)
+        elapsed = time.perf_counter() - started
+        # The server holds the connection open for 5s; bailing out near
+        # the 0.5s deadline (not after ~5s) proves the recv itself is
+        # bounded by the remaining budget, not the original per-op timeout.
+        self.assertLess(elapsed, 2.0)
 
     def test_server_and_rate_limit_are_retryable(self) -> None:
         for status, code in ((429, "http_rate_limited"), (503, "http_server_error")):

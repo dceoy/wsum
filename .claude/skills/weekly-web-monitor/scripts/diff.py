@@ -15,7 +15,9 @@ from typing import Any
 from errors import MonitorError
 
 PRICE_RE = re.compile(
-    r"(?:[$€£¥￥]\s?\d[\d,.]*|\d[\d,.]*\s?(?:円|usd|eur|gbp|jpy))",
+    r"(?:[$€£¥￥]\s?\d[\d,.]*|\d[\d,.]*\s?(?:円|usd|eur|gbp|jpy)|"
+    r"\b(?:price|cost|fee|fare|charge)\b|"
+    r"価格|料金|費用|金額)",
     re.IGNORECASE,
 )
 SPEC_RE = re.compile(
@@ -192,7 +194,12 @@ def _changed_char_ratio(
 
 
 def _section_signal(section: DiffSection) -> bool:
-    joined = "\n".join((*section.before, *section.after))
+    # The anchor (e.g. a "# Price" heading) is included alongside the
+    # changed lines themselves: a label/value layout where only the value
+    # changes (`# Price\n10` -> `# Price\n20`) would otherwise lose the
+    # label that makes the change material, since the anchor line itself
+    # is never truncated, it is always available here.
+    joined = "\n".join((*section.before, *section.after, section.anchor))
     return any(
         pattern.search(joined)
         for pattern in (PRICE_RE, SPEC_RE, TERMS_RE, AVAILABILITY_RE, ELIGIBILITY_RE)
@@ -215,7 +222,13 @@ def _score(
         for line in (*section.before, *section.after)
         if line.strip()
     ]
-    joined = "\n".join(changed_lines)
+    # Include each section's anchor (e.g. a "# Price" heading) alongside the
+    # changed lines: a label/value layout where only the value changes
+    # (`# Price\n10` -> `# Price\n20`) would otherwise never expose the
+    # label that makes the pattern match, since the anchor itself never
+    # changes and so is never among before/after.
+    anchors = [section.anchor for section in sections if section.anchor]
+    joined = "\n".join((*changed_lines, *anchors))
     base = min(60, round(ratio * 60))
     reasons = [f"changed_ratio:{ratio:.4f}"]
     score = base
@@ -226,15 +239,24 @@ def _score(
         ("availability", AVAILABILITY_RE, config.availability_weight),
         ("eligibility", ELIGIBILITY_RE, config.eligibility_weight),
     )
+    signal_matched = False
     for name, pattern, weight in patterns:
         if pattern.search(joined):
             score += weight
             reasons.append(name)
+            signal_matched = True
     if ratio >= 0.65:
         score += 20
         reasons.append("large_rewrite")
     nonempty = [line for line in changed_lines if line.strip()]
-    if nonempty and all(NOISE_RE.fullmatch(line.strip()) for line in nonempty):
+    # A matched label/value/terms/etc. pattern means the change is material
+    # even if the changed lines alone are noise-shaped (e.g. a bare "10" ->
+    # "20"); only clamp when no such signal was found.
+    if (
+        not signal_matched
+        and nonempty
+        and all(NOISE_RE.fullmatch(line.strip()) for line in nonempty)
+    ):
         score = min(score, 15)
         reasons.append("noise_only")
     return min(100, score), tuple(reasons)
