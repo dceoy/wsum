@@ -110,6 +110,10 @@ def _bounded_decompress(value: bytes, limit: int) -> bytes:
             "pdf_decompressed_too_large",
             "PDF decompressed stream exceeds the size limit",
         )
+    if not decompressor.eof:
+        raise MonitorError(
+            "pdf_malformed", "PDF contains a truncated compressed stream"
+        )
     return result
 
 

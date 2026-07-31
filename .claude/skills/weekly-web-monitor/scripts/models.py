@@ -79,6 +79,11 @@ def validate_http_url(value: str, field_name: str = "url") -> str:
             "invalid_record",
             f"{field_name} must not contain credential-like query parameters",
         )
+    if parsed.fragment:
+        raise MonitorError(
+            "invalid_record",
+            f"{field_name} must not contain a URL fragment",
+        )
     host = (parsed.hostname or "").lower()
     decoded_path = unquote(parsed.path)
     if (

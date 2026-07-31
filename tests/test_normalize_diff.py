@@ -3,6 +3,7 @@ from __future__ import annotations
 import codecs
 import time
 import unittest
+import zlib
 
 import support  # noqa: F401
 from diff import DiffConfig, compare_content
@@ -475,6 +476,22 @@ class NormalizationTests(unittest.TestCase):
             b"28546f74616c3a20303030302947\nendstream\nendobj\n%%EOF"
         )
         with self.assertRaisesRegex(MonitorError, "filter"):
+            normalize_content(pdf, content_type="application/pdf")
+
+    def test_pdf_truncated_flate_stream_fails_closed(self) -> None:
+        # zlib.decompressobj() commonly returns partial output for truncated
+        # input without raising zlib.error, so a stream cut short mid-flush
+        # could otherwise be accepted as valid text instead of rejected.
+        compressed = zlib.compress(b"BT (Hello Flate PDF) Tj ET")
+        truncated = compressed[:-4]
+        pdf = (
+            b"%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode /Length "
+            + str(len(truncated)).encode()
+            + b" >>\nstream\n"
+            + truncated
+            + b"\nendstream\nendobj\n%%EOF"
+        )
+        with self.assertRaisesRegex(MonitorError, "truncated|malformed"):
             normalize_content(pdf, content_type="application/pdf")
 
     def test_pdf_stream_without_an_enclosing_object_fails_closed(self) -> None:

@@ -207,6 +207,13 @@ def fetch_rendered(
                     f"browser main response returned HTTP {response.status}",
                     retryable=retryable,
                 )
+            dom_bytes = page.evaluate(
+                "() => new Blob([document.documentElement.outerHTML]).size"
+            )
+            if not isinstance(dom_bytes, int) or dom_bytes > active.max_rendered_bytes:
+                raise MonitorError(
+                    "response_too_large", "rendered DOM exceeds the size limit"
+                )
             rendered = page.content().encode("utf-8")
             if len(rendered) > active.max_rendered_bytes:
                 raise MonitorError(

@@ -85,6 +85,20 @@ class ModelsAndSheetsTests(unittest.TestCase):
         with self.assertRaises(MonitorError):
             Target.from_mapping(base)
 
+    def test_rejects_url_fragments(self) -> None:
+        # Credential-like query parameters are only checked in parsed.query.
+        # A fragment such as "#access_token=secret" survives that check and
+        # is then copied verbatim into the summary model context and Slack
+        # notification text, so fragments must be rejected outright.
+        base = {
+            "target_id": "one",
+            "enabled": True,
+            "name": "One",
+            "url": "https://example.com/#access_token=secret",
+        }
+        with self.assertRaisesRegex(MonitorError, "fragment"):
+            Target.from_mapping(base)
+
     def test_rejects_provider_prefixed_signed_url_credentials(self) -> None:
         # An exact-name denylist misses namespaced signed-URL parameters:
         # a signed target URL would otherwise reach the summary model

@@ -116,6 +116,9 @@ class FakePage:
     def content(self) -> str:
         return self.html
 
+    def evaluate(self, _script: str) -> int:
+        return len(self.html.encode("utf-8"))
+
 
 class FakeContext:
     def __init__(self, page: FakePage) -> None:
