@@ -192,6 +192,21 @@ def _changed_char_ratio(
     return min(1.0, changed / denominator)
 
 
+def _watch_focus_terms(watch_focus: str) -> tuple[re.Pattern[str], ...]:
+    return tuple(
+        re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE)
+        for term in re.split(r"\s+", watch_focus.strip())
+        if len(term) > 2
+    )
+
+
+def _watch_focus_matches_section(
+    section: DiffSection, terms: tuple[re.Pattern[str], ...]
+) -> bool:
+    joined = "\n".join((*section.before, *section.after, section.anchor))
+    return any(term.search(joined) for term in terms)
+
+
 def _section_signal(section: DiffSection) -> bool:
     # The anchor (e.g. a "# Price" heading) is included alongside the
     # changed lines themselves: a label/value layout where only the value
@@ -429,19 +444,32 @@ def compare_content(
         if signal_ids - fully_retained_ids:
             reasons = (*reasons, "material_signal_truncated")
     result = "minor" if score < active.minor_threshold else "candidate_material"
-    if (
-        result == "minor"
-        and watch_focus.strip()
-        and "noise_only" not in reasons
-    ):
-        # The deterministic score/pattern gate has no notion of a target's
-        # configured watch_focus (e.g. "executive changes"), which rarely
-        # matches the fixed price/spec/terms/availability/eligibility
-        # patterns above. Rather than silently discard a non-noise change on
-        # a focused target, always let the summary model -- which does see
-        # watch_focus -- assess it.
-        result = "candidate_material"
-        reasons = (*reasons, "watch_focus_configured")
+    if result == "minor" and watch_focus.strip():
+        if "noise_only" not in reasons:
+            # The deterministic score/pattern gate has no notion of a
+            # target's configured watch_focus (e.g. "executive changes"),
+            # which rarely matches the fixed price/spec/terms/availability/
+            # eligibility patterns above. Rather than silently discard a
+            # non-noise change on a focused target, always let the summary
+            # model -- which does see watch_focus -- assess it.
+            result = "candidate_material"
+            reasons = (*reasons, "watch_focus_configured")
+        else:
+            # A change clamped as pure noise (e.g. a bare "last updated"
+            # date) must not be forced to candidate_material just because
+            # *any* focus is configured -- that would defeat the noise
+            # clamp entirely. But a focus that names the specific value
+            # being watched (e.g. watch_focus="valuation" on a standalone
+            # "# Valuation\n10" -> "20") must still reach the summary
+            # model: match the focus terms against the section text/anchor
+            # deterministically and only override the clamp on a hit.
+            terms = _watch_focus_terms(watch_focus)
+            if terms and any(
+                _watch_focus_matches_section(section, terms)
+                for section in raw_sections
+            ):
+                result = "candidate_material"
+                reasons = (*reasons, "watch_focus_configured")
     significance = (
         "minor"
         if result == "minor"

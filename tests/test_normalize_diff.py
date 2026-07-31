@@ -120,6 +120,30 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertEqual("Notice", result.text)
 
+    def test_unsupported_declared_charset_fails_closed_without_rescue(
+        self,
+    ) -> None:
+        # A declared charset that resolves to a real (but non-allow-listed)
+        # codec, such as iso-2022-jp, must not silently decode as UTF-8
+        # replacement garbage when there is no BOM or in-body declaration
+        # to rescue it -- that would make distinct legacy-encoded responses
+        # normalize incorrectly or identically, masking real changes.
+        body = "価格改定のお知らせ".encode("iso-2022-jp")
+        with self.assertRaisesRegex(MonitorError, "unsupported"):
+            normalize_content(body, content_type="text/plain", charset="iso-2022-jp")
+
+    def test_unsupported_declared_charset_still_rescued_by_in_body_declaration(
+        self,
+    ) -> None:
+        # Even when the declared charset can't be used, an in-body charset
+        # declaration must still get a chance to rescue the decode, same as
+        # the BOM path above.
+        body = "charset=shift_jis 価格改定のお知らせ".encode("shift_jis")
+        result = normalize_content(
+            body, content_type="text/plain", charset="iso-2022-jp"
+        )
+        self.assertIn("価格改定のお知らせ", result.text)
+
     def test_meaningful_price_specification_and_terms_change_hash(self) -> None:
         values = [
             b"<main><p>Price: $10</p></main>",
@@ -529,6 +553,29 @@ class DiffTests(unittest.TestCase):
             watch_focus="executive changes",
         )
         self.assertEqual("minor", noise.result)
+
+    def test_watch_focus_rescues_labeled_bare_numeric_noise_clamp(self) -> None:
+        # A standalone numeric/date value with no label match against the
+        # five fixed patterns is clamped as noise_only. If the target's
+        # watch_focus names the very label the value is under, that must
+        # still reach the summary model rather than being silently
+        # discarded by the generic noise clamp.
+        before, after = "# Valuation\n10", "# Valuation\n20"
+        unfocused = compare_content(before, after)
+        self.assertEqual("minor", unfocused.result)
+        self.assertIn("noise_only", unfocused.scoring_reasons)
+
+        focused = compare_content(before, after, watch_focus="valuation")
+        self.assertEqual("candidate_material", focused.result)
+        self.assertTrue(focused.should_summarize)
+        self.assertIn("watch_focus_configured", focused.scoring_reasons)
+
+        # A focus that has nothing to do with this label must not rescue
+        # it -- the noise clamp still applies when the focus doesn't match.
+        unrelated_focus = compare_content(
+            before, after, watch_focus="executive changes"
+        )
+        self.assertEqual("minor", unrelated_focus.result)
 
     def test_label_value_split_across_lines_is_still_material(self) -> None:
         # A label and its value are often on separate lines (a heading

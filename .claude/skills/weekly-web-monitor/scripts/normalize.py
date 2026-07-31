@@ -90,21 +90,35 @@ _ALLOWED_CHARSET_CODECS = frozenset(
 
 def _decode_text(body: bytes, charset: str = "") -> str:
     declared = charset.strip()
+    declared_unsupported = False
     if declared:
         try:
             codec = codecs.lookup(declared)
         except LookupError:
             codec = None
-        # An unusable declared charset is treated as absent rather than
-        # fatal, so a page that decoded fine via BOM/body sniffing before
-        # the charset was threaded through does not start hard-failing.
-        if codec is not None and codec.name in _ALLOWED_CHARSET_CODECS:
-            return body.decode(codec.name, errors="replace")
+        # An unresolvable declared charset (garbage name) is treated as
+        # absent rather than fatal, so a page that decoded fine via
+        # BOM/body sniffing before the charset was threaded through does
+        # not start hard-failing.
+        if codec is not None:
+            if codec.name in _ALLOWED_CHARSET_CODECS:
+                return body.decode(codec.name, errors="replace")
+            # A declared charset that *does* resolve to a real codec but
+            # isn't allowlisted (e.g. iso-2022-jp) must not silently fall
+            # through to the UTF-8 default below -- that would decode
+            # legacy-encoded bytes as UTF-8 replacement garbage instead of
+            # failing closed. BOM and in-body sniffing still get a chance
+            # to rescue it first, same as a genuinely absent charset.
+            declared_unsupported = True
     if body.startswith(codecs.BOM_UTF8):
         return body.decode("utf-8-sig", errors="replace")
     if body.startswith((codecs.BOM_UTF16_BE, codecs.BOM_UTF16_LE)):
         return body.decode("utf-16", errors="replace")
     match = CHARSET_RE.search(body[:4_096])
+    if match is None and declared_unsupported:
+        raise MonitorError(
+            "unsupported_charset", "document charset is unsupported"
+        )
     encoding = match.group(1).decode("ascii") if match else "utf-8"
     try:
         codec = codecs.lookup(encoding)
