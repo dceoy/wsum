@@ -14,50 +14,45 @@ OBJECT_HEADER_RE = re.compile(rb"\d+\s+\d+\s+obj\b")
 FILTER_RE = re.compile(rb"/Filter\s*(/[A-Za-z0-9]+|\[[^\]]*\])")
 FILTER_NAME_RE = re.compile(rb"/[A-Za-z0-9]+")
 TEXT_BLOCK_RE = re.compile(rb"BT(.*?)ET", re.DOTALL)
-TJ_RE = re.compile(rb"\[(.*?)\]\s*TJ", re.DOTALL)
-TJ_ITEM_RE = re.compile(rb"\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>")
-SINGLE_TJ_RE = re.compile(rb"(\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>)\s*Tj")
-# ' (move to next line and show text) and " (set word/char spacing, move to
-# next line, show text) also show a single literal/hex string operand -- the
-# numeric word/char-spacing operands of " precede the string, so capturing
-# the operand immediately before the operator is sufficient for extraction.
-SINGLE_QUOTE_RE = re.compile(rb"(\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>)\s*'")
-DOUBLE_QUOTE_RE = re.compile(rb"(\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>)\s*\"")
+TJ_ARRAY_RE = re.compile(rb"\[(.*?)\]\s*TJ", re.DOTALL)
 METADATA_RE = re.compile(rb"/(Title|Author|Subject)\s*\((?:\\.|[^\\()])*\)")
 
+_PDF_WHITESPACE = frozenset(b" \t\r\n\f\x00")
+_PDF_DELIMITERS = frozenset(b"()<>[]{}/%")
+_NAME_TERMINATORS = _PDF_WHITESPACE | _PDF_DELIMITERS
 
-def _mask_strings_and_comments(stream: bytes) -> bytes:
-    # BT/ET are recognized by matching the literal bytes "BT"/"ET" anywhere
-    # in the stream, including inside a literal string, hex string, or
-    # comment operand (e.g. "BT (status ET old) Tj ET" would otherwise treat
-    # the "ET" inside the parenthesized operand as the end-text operator and
-    # truncate the block before the real "Tj"). Replace those regions with a
-    # same-length, content-free placeholder byte so operator matching on the
-    # masked copy only ever sees bytes that are actually outside a
-    # string/comment, while the caller still slices the *original* bytes at
-    # the located offsets to decode the real operand content. Fail closed
-    # (rather than masking to end-of-stream) when a string/comment never
-    # terminates, since silently masking the remainder would drop any real
-    # BT/ET pairs after it -- the same silent-miss failure mode this guards
-    # against.
-    masked = bytearray(stream)
-    length = len(stream)
+
+def _scan_tokens(data: bytes) -> list[tuple[str, int, int]]:
+    # Classify comment, name, and string regions by real PDF lexical rules
+    # rather than matching operator/operand bytes with flat regexes against
+    # raw content. Without this, literal bytes "BT"/"ET" occurring inside a
+    # name token (e.g. "/ETMarker") are indistinguishable from the real
+    # end-text operator, and a flat "\((?:\\.|[^\\()])*\)" string regex
+    # cannot represent balanced *nested* parens (e.g. "(Old (status))"),
+    # silently truncating or dropping the operand. This scanner mirrors the
+    # PDF spec's token boundaries directly: a name/string/comment always
+    # extends to its own terminator regardless of what other operators it
+    # textually resembles. Fail closed (rather than treating the remainder
+    # as unmasked) when a string/comment never terminates, since silently
+    # ignoring the rest of the stream would drop any real operators after
+    # it -- the same silent-miss failure mode this guards against.
+    tokens: list[tuple[str, int, int]] = []
+    length = len(data)
     index = 0
     while index < length:
-        byte = stream[index]
-        if byte == 0x25:  # '%' comment runs to end of line (not masked past EOL)
-            end = index
-            while end < length and stream[end] not in (0x0A, 0x0D):
-                end += 1
-            masked[index:end] = b"." * (end - index)
-            index = end
+        byte = data[index]
+        if byte == 0x25:  # '%' comment runs to end of line (not consumed)
+            start = index
+            while index < length and data[index] not in (0x0A, 0x0D):
+                index += 1
+            tokens.append(("comment", start, index))
             continue
         if byte == 0x28:  # '(' literal string, balanced/escaped parens
             start = index
             depth = 1
             index += 1
             while index < length and depth > 0:
-                current = stream[index]
+                current = data[index]
                 if current == 0x5C:  # backslash escapes the next byte
                     index += 2
                     continue
@@ -70,23 +65,57 @@ def _mask_strings_and_comments(stream: bytes) -> bytes:
                 raise MonitorError(
                     "pdf_malformed", "PDF content stream has an unterminated string"
                 )
-            masked[start:index] = b"." * (index - start)
+            tokens.append(("literal_string", start, index))
             continue
-        if byte == 0x3C and (index + 1 >= length or stream[index + 1] != 0x3C):
+        if byte == 0x3C and (index + 1 >= length or data[index + 1] != 0x3C):
             # '<' hex string, but not the '<<' that opens a dictionary
             start = index
             index += 1
-            while index < length and stream[index] != 0x3E:
+            while index < length and data[index] != 0x3E:
                 index += 1
             if index >= length:
                 raise MonitorError(
                     "pdf_malformed", "PDF content stream has an unterminated hex string"
                 )
             index += 1
-            masked[start:index] = b"." * (index - start)
+            tokens.append(("hex_string", start, index))
+            continue
+        if byte == 0x2F:  # '/' name token, terminated by whitespace/delimiter
+            start = index
+            index += 1
+            while index < length and data[index] not in _NAME_TERMINATORS:
+                index += 1
+            tokens.append(("name", start, index))
             continue
         index += 1
+    return tokens
+
+
+def _mask_strings_and_comments(stream: bytes) -> bytes:
+    # Replace comment/string/name regions with same-length, content-free
+    # placeholder bytes so operator matching (BT/ET, TJ array brackets) on
+    # the masked copy only ever sees bytes that are real operators, while
+    # callers still slice the *original* bytes at the located offsets to
+    # decode the real operand content.
+    masked = bytearray(stream)
+    for _, start, end in _scan_tokens(stream):
+        masked[start:end] = b"." * (end - start)
     return bytes(masked)
+
+
+def _string_spans(data: bytes) -> list[tuple[int, int]]:
+    return [
+        (start, end)
+        for kind, start, end in _scan_tokens(data)
+        if kind in ("literal_string", "hex_string")
+    ]
+
+
+def _decode_operand(data: bytes, start: int, end: int) -> str:
+    value = data[start:end]
+    if value.startswith(b"("):
+        return _decode_literal(value)
+    return _decode_hex(value)
 
 
 def _text_blocks(stream: bytes) -> list[bytes]:
@@ -95,6 +124,42 @@ def _text_blocks(stream: bytes) -> list[bytes]:
         stream[match.start(1) : match.end(1)]
         for match in TEXT_BLOCK_RE.finditer(masked)
     ]
+
+
+def _text_fragments(block: bytes) -> list[str]:
+    masked_block = _mask_strings_and_comments(block)
+    spans = _string_spans(block)
+    consumed: set[int] = set()
+    fragments: list[str] = []
+
+    for array_match in TJ_ARRAY_RE.finditer(masked_block):
+        array_start, array_end = array_match.span(1)
+        array_spans = [
+            (start, end) for start, end in spans if array_start <= start < array_end
+        ]
+        consumed.update(start for start, _ in array_spans)
+        text = "".join(
+            _decode_operand(block, start, end) for start, end in array_spans
+        ).strip()
+        if text:
+            fragments.append(text)
+
+    length = len(masked_block)
+    for start, end in spans:
+        if start in consumed:
+            continue
+        position = end
+        while position < length and masked_block[position] in _PDF_WHITESPACE:
+            position += 1
+        is_show_text_operator = masked_block[position : position + 2] == b"Tj" or (
+            masked_block[position : position + 1] in (b"'", b'"')
+        )
+        if not is_show_text_operator:
+            continue
+        text = _decode_operand(block, start, end).strip()
+        if text:
+            fragments.append(text)
+    return fragments
 
 
 def _decode_literal(value: bytes) -> str:
@@ -289,31 +354,7 @@ def extract_pdf_text(
     fragments: list[str] = []
     for stream in _stream_data(pdf, max_decompressed_bytes):
         for block in _text_blocks(stream):
-            consumed: set[tuple[int, int]] = set()
-            for array_match in TJ_RE.finditer(block):
-                consumed.add(array_match.span())
-                values = [
-                    _decode_literal(item)
-                    if item.startswith(b"(")
-                    else _decode_hex(item)
-                    for item in TJ_ITEM_RE.findall(array_match.group(1))
-                ]
-                text = "".join(values).strip()
-                if text:
-                    fragments.append(text)
-            for pattern in (SINGLE_TJ_RE, SINGLE_QUOTE_RE, DOUBLE_QUOTE_RE):
-                for match in pattern.finditer(block):
-                    if any(start <= match.start() < end for start, end in consumed):
-                        continue
-                    consumed.add(match.span())
-                    pdf_string = match.group(1)
-                    text = (
-                        _decode_literal(pdf_string)
-                        if pdf_string.startswith(b"(")
-                        else _decode_hex(pdf_string)
-                    ).strip()
-                    if text:
-                        fragments.append(text)
+            fragments.extend(_text_fragments(block))
     lines = [
         re.sub(r"\s+", " ", unicodedata.normalize("NFKC", fragment)).strip()
         for fragment in fragments

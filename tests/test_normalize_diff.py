@@ -389,6 +389,30 @@ class NormalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(MonitorError, "unsafe link"):
             normalize_content(unsafe_link, content_type="application/rss+xml")
 
+    def test_html_wide_element_count_is_bounded(self) -> None:
+        # The byte-size cap on the raw response does not bound the number of
+        # parsed Node objects: a few megabytes of tiny tags can still exceed
+        # html_normalizer.MAX_NODES and drive excessive memory use in the
+        # tree walks. This must fail closed rather than parse unboundedly.
+        wide = b"<html><body>" + b"<p>x</p>" * 60_000 + b"</body></html>"
+        with self.assertRaisesRegex(MonitorError, "too many elements"):
+            normalize_content(wide, content_type="text/html")
+
+    def test_html_deep_nesting_is_bounded(self) -> None:
+        # iter_nodes()/_text_content()/visit() all recurse to tree depth.
+        # Nesting beyond html_normalizer.MAX_DEPTH must be rejected during
+        # parsing instead of risking a RecursionError deep inside those
+        # walks on untrusted HTML.
+        deep = (
+            b"<html><body>"
+            + b"<div>" * 300
+            + b"x"
+            + b"</div>" * 300
+            + b"</body></html>"
+        )
+        with self.assertRaisesRegex(MonitorError, "nesting is too deep"):
+            normalize_content(deep, content_type="text/html")
+
     def test_text_pdf_and_pdf_failures(self) -> None:
         pdf = (
             b"%PDF-1.4\n1 0 obj\n<< /Length 38 >>\nstream\n"
@@ -479,6 +503,47 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertIn("status ET old", before.text)
         self.assertIn("status ET new", after.text)
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_pdf_et_inside_a_name_token_does_not_truncate_the_text_block(
+        self,
+    ) -> None:
+        # A name operand like "/ETMarker" contains the literal bytes "ET"
+        # outside of any string. Recognizing "BT"/"ET" by raw byte match
+        # without excluding name tokens truncates the block at that "ET",
+        # dropping the real Tj call that follows.
+        before = normalize_content(
+            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
+            b"BT /ETMarker 12 Tf (Old status) Tj ET\nendstream\nendobj\n%%EOF",
+            content_type="application/pdf",
+        )
+        after = normalize_content(
+            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
+            b"BT /ETMarker 12 Tf (New status) Tj ET\nendstream\nendobj\n%%EOF",
+            content_type="application/pdf",
+        )
+        self.assertIn("Old status", before.text)
+        self.assertIn("New status", after.text)
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_pdf_nested_parens_in_a_string_are_not_silently_dropped(self) -> None:
+        # A literal string can contain balanced, unescaped nested parens
+        # (e.g. "(Old (status))"). A flat, non-recursive string regex only
+        # matches up to the first unescaped ")", misaligning with the "Tj"
+        # that follows and silently dropping the whole operand instead of
+        # extracting "Old (status)".
+        before = normalize_content(
+            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
+            b"BT (Stable) Tj ET BT (Old (status)) Tj ET\nendstream\nendobj\n%%EOF",
+            content_type="application/pdf",
+        )
+        after = normalize_content(
+            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
+            b"BT (Stable) Tj ET BT (New (status)) Tj ET\nendstream\nendobj\n%%EOF",
+            content_type="application/pdf",
+        )
+        self.assertIn("Old (status)", before.text)
+        self.assertIn("New (status)", after.text)
         self.assertNotEqual(before.normalized_hash, after.normalized_hash)
 
     def test_pdf_unterminated_string_fails_closed(self) -> None:

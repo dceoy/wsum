@@ -104,6 +104,20 @@ SIMPLE_HEAD_RE = re.compile(r"^(?:\*|[A-Za-z][A-Za-z0-9_-]*)?")
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*")
 
 
+# Bounds on the parsed tree, independent of the raw byte-size cap applied
+# before parsing (normalize.normalize_content). A few megabytes of tiny or
+# deeply nested tags can still produce hundreds of thousands of Node objects
+# or nesting deep enough to blow the interpreter's recursion limit in the
+# recursive iter_nodes()/_text_content()/visit() tree walks below, so both
+# node count and nesting depth are tracked and rejected during parsing
+# rather than left unbounded. MAX_DEPTH is kept well under
+# sys.getrecursionlimit() (default 1000): _extract_lines.visit() recurses to
+# tree depth and calls _text_content(), which recurses again, so worst-case
+# stack usage is roughly 2x MAX_DEPTH.
+MAX_NODES = 50_000
+MAX_DEPTH = 200
+
+
 class Node:
     __slots__ = ("tag", "attrs", "children", "parent")
 
@@ -121,26 +135,40 @@ class _TreeParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.root = Node("document", {})
         self.current = self.root
+        self.node_count = 0
+        self.depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
         normalized_attrs = {name.lower(): value or "" for name, value in attrs if name}
+        self.node_count += 1
+        if self.node_count > MAX_NODES:
+            raise MonitorError("html_too_large", "HTML document has too many elements")
         node = Node(tag, normalized_attrs, self.current)
         self.current.children.append(node)
         if tag not in VOID_TAGS:
+            if self.depth >= MAX_DEPTH:
+                raise MonitorError(
+                    "html_too_large", "HTML document nesting is too deep"
+                )
             self.current = node
+            self.depth += 1
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
         if tag.lower() not in VOID_TAGS:
             self.current = self.current.parent or self.root
+            self.depth -= 1
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
         cursor: Node | None = self.current
+        levels = 0
         while cursor is not None and cursor is not self.root:
+            levels += 1
             if cursor.tag == tag:
                 self.current = cursor.parent or self.root
+                self.depth -= levels
                 return
             cursor = cursor.parent
 
