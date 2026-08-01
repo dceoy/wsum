@@ -9,8 +9,20 @@ import zlib
 
 from errors import MonitorError
 
-STREAM_RE = re.compile(rb"stream\r?\n(.*?)\r?\nendstream", re.DOTALL)
-OBJECT_HEADER_RE = re.compile(rb"\d+\s+\d+\s+obj\b")
+# Locates only the "stream" keyword + its required end-of-line marker (CRLF
+# or LF, never a bare CR -- see PDF spec 7.3.8.1). The stream's actual end
+# is derived from the dictionary's /Length, not from scanning for the next
+# "endstream" bytes (see _stream_data): an unfiltered content stream can
+# legally contain that literal byte sequence inside a string operand, which
+# would otherwise truncate the stream before later text-showing operators.
+# The negative lookbehind keeps this from matching the "stream" that is
+# itself the tail of an "endstream" keyword -- a stream's own trailing
+# "endstream" is always followed later in the file by another real
+# "stream" keyword (the next object), and without the lookbehind that
+# "endstream\n" tail is indistinguishable from one.
+STREAM_START_RE = re.compile(rb"(?<!end)stream(?:\r\n|\n)")
+OBJECT_HEADER_RE = re.compile(rb"(\d+)\s+(\d+)\s+obj\b")
+LENGTH_RE = re.compile(rb"/Length\s+(\d+)(?:\s+(\d+)\s+R\b)?")
 FILTER_RE = re.compile(rb"/Filter\s*(/[A-Za-z0-9]+|\[[^\]]*\])")
 FILTER_NAME_RE = re.compile(rb"/[A-Za-z0-9]+")
 TEXT_BLOCK_RE = re.compile(rb"BT(.*?)ET", re.DOTALL)
@@ -286,13 +298,76 @@ def _stream_dictionary(
     return dictionary
 
 
+def _object_offsets(pdf: bytes) -> tuple[list[int], dict[tuple[int, int], int]]:
+    starts: list[int] = []
+    by_id: dict[tuple[int, int], int] = {}
+    for match in OBJECT_HEADER_RE.finditer(pdf):
+        starts.append(match.end())
+        by_id.setdefault(
+            (int(match.group(1)), int(match.group(2))), match.end()
+        )
+    return starts, by_id
+
+
+def _resolve_length(
+    pdf: bytes, number: int, generation: int, object_by_id: dict[tuple[int, int], int]
+) -> int:
+    # An indirect /Length (e.g. "/Length 5 0 R") points at a separate
+    # object whose body is just the integer length. Resolve it by object
+    # identity rather than trusting an unrelated later match, and fail
+    # closed if the referenced object cannot be found or is not a bare
+    # integer.
+    start = object_by_id.get((number, generation))
+    if start is None:
+        raise MonitorError(
+            "pdf_malformed",
+            "PDF stream /Length indirect reference could not be resolved",
+        )
+    match = re.match(rb"\s*(\d+)", pdf[start : start + 32])
+    if match is None:
+        raise MonitorError(
+            "pdf_malformed", "PDF stream /Length object is not an integer"
+        )
+    return int(match.group(1))
+
+
 def _stream_data(pdf: bytes, limit: int) -> list[bytes]:
     streams: list[bytes] = []
     total = 0
-    object_starts = [match.end() for match in OBJECT_HEADER_RE.finditer(pdf)]
-    for match in STREAM_RE.finditer(pdf):
+    object_starts, object_by_id = _object_offsets(pdf)
+    for match in STREAM_START_RE.finditer(pdf):
+        data_start = match.end()
         dictionary = _stream_dictionary(pdf, object_starts, match.start())
-        stream = match.group(1)
+        length_match = LENGTH_RE.search(dictionary)
+        if length_match is None:
+            raise MonitorError(
+                "pdf_malformed", "PDF stream dictionary has no /Length"
+            )
+        if length_match.group(2) is not None:
+            length = _resolve_length(
+                pdf,
+                int(length_match.group(1)),
+                int(length_match.group(2)),
+                object_by_id,
+            )
+        else:
+            length = int(length_match.group(1))
+        data_end = data_start + length
+        if data_end > len(pdf):
+            raise MonitorError(
+                "pdf_malformed", "PDF stream /Length exceeds the document size"
+            )
+        # /Length must land exactly on "endstream" (optionally preceded by
+        # its own end-of-line marker). A mismatch means the declared length
+        # cannot be trusted, and scanning ahead for the next literal
+        # "endstream" bytes instead would reintroduce the exact
+        # false-boundary risk this /Length-based parse exists to avoid.
+        if not re.match(rb"\r?\n?endstream\b", pdf[data_end : data_end + 16]):
+            raise MonitorError(
+                "pdf_malformed",
+                "PDF stream /Length does not align with endstream",
+            )
+        stream = pdf[data_start:data_end]
         filters = _stream_filters(dictionary)
         if filters == [b"/FlateDecode"]:
             stream = _bounded_decompress(stream, limit - total)

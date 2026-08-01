@@ -172,6 +172,7 @@ def normalize_content(
     *,
     content_type: str = "",
     charset: str = "",
+    base_url: str = "",
     include_selector: str = "",
     exclude_selectors: Iterable[str] = (),
     strict_selectors: bool = True,
@@ -214,6 +215,7 @@ def normalize_content(
     elif sniffed == "html":
         text = normalize_html(
             _decode_text(body, charset),
+            base_url=base_url,
             include_selector=include_selector,
             exclude_selectors=exclude_selectors,
             strict_selectors=strict_selectors,

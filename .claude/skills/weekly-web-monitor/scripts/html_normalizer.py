@@ -6,8 +6,10 @@ import re
 import unicodedata
 from collections.abc import Iterable, Iterator
 from html.parser import HTMLParser
+from urllib.parse import urljoin
 
 from errors import MonitorError
+from network_policy import canonicalize_url
 
 VOID_TAGS = frozenset(
     {
@@ -116,6 +118,21 @@ NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*")
 # stack usage is roughly 2x MAX_DEPTH.
 MAX_NODES = 50_000
 MAX_DEPTH = 200
+
+# Bounds on link-destination annotations (see _link_destination): a
+# link-heavy page must not be able to inflate the normalized text/hash
+# input without limit just because every anchor gets a canonical-URL
+# suffix appended.
+MAX_LINK_ANNOTATIONS = 500
+MAX_LINK_URL_CHARS = 300
+
+
+class _LinkContext:
+    __slots__ = ("base_url", "remaining")
+
+    def __init__(self, base_url: str, remaining: int) -> None:
+        self.base_url = base_url
+        self.remaining = remaining
 
 
 class Node:
@@ -330,7 +347,28 @@ def _is_noise(node: Node) -> bool:
     return bool(HEADER_NOISE_TOKEN_RE.search(tokens)) and not _has_content_ancestor(node)
 
 
-def _text_content(node: Node, excluded: set[Node]) -> str:
+def _link_destination(node: Node, attr: str, ctx: _LinkContext) -> str:
+    # Canonicalize (and, via canonicalize_url, reject credential-bearing)
+    # destination URLs so a same-text link/form-target change (e.g.
+    # /apply-v1 -> /apply-v2) is not silently absorbed into an identical
+    # normalized text/hash. Resolution requires a base URL and a bounded
+    # remaining budget (see MAX_LINK_ANNOTATIONS); anything unresolvable,
+    # in-page (#fragment), or policy-denied is simply omitted rather than
+    # raising, since one bad link must not fail normalization of the page.
+    if ctx.remaining <= 0 or not ctx.base_url:
+        return ""
+    value = node.attrs.get(attr, "").strip()
+    if not value or value.startswith("#"):
+        return ""
+    try:
+        canonical, _ = canonicalize_url(urljoin(ctx.base_url, value))
+    except MonitorError:
+        return ""
+    ctx.remaining -= 1
+    return canonical[:MAX_LINK_URL_CHARS]
+
+
+def _text_content(node: Node, excluded: set[Node], ctx: _LinkContext) -> str:
     if node in excluded or _is_noise(node):
         return ""
     pieces: list[str] = []
@@ -340,7 +378,12 @@ def _text_content(node: Node, excluded: set[Node]) -> str:
         elif child.tag == "br":
             pieces.append("\n")
         else:
-            pieces.append(_text_content(child, excluded))
+            text = _text_content(child, excluded, ctx)
+            if child.tag == "a" and child not in excluded and not _is_noise(child):
+                destination = _link_destination(child, "href", ctx)
+                if destination:
+                    text = f"{text} [{destination}]".strip()
+            pieces.append(text)
     return " ".join(pieces)
 
 
@@ -350,11 +393,11 @@ def _clean_line(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _table_lines(table: Node, excluded: set[Node]) -> list[str]:
+def _table_lines(table: Node, excluded: set[Node], ctx: _LinkContext) -> list[str]:
     lines: list[str] = []
     for row in (node for node in iter_nodes(table) if node.tag == "tr"):
         cells = [
-            _clean_line(_text_content(child, excluded))
+            _clean_line(_text_content(child, excluded, ctx))
             for child in row.children
             if isinstance(child, Node) and child.tag in {"td", "th"}
         ]
@@ -364,22 +407,22 @@ def _table_lines(table: Node, excluded: set[Node]) -> list[str]:
     return lines
 
 
-def _extract_lines(root: Node, excluded: set[Node]) -> list[str]:
+def _extract_lines(root: Node, excluded: set[Node], ctx: _LinkContext) -> list[str]:
     lines: list[str] = []
 
     def visit(node: Node) -> None:
         if node in excluded or _is_noise(node):
             return
         if node.tag == "table":
-            lines.extend(_table_lines(node, excluded))
+            lines.extend(_table_lines(node, excluded, ctx))
             return
         if node.tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
-            text = _clean_line(_text_content(node, excluded))
+            text = _clean_line(_text_content(node, excluded, ctx))
             if text:
                 lines.append(f"{'#' * int(node.tag[1])} {text}")
             return
         if node.tag == "li":
-            text = _clean_line(_text_content(node, excluded))
+            text = _clean_line(_text_content(node, excluded, ctx))
             if text:
                 lines.append(f"- {text}")
             return
@@ -393,17 +436,25 @@ def _extract_lines(root: Node, excluded: set[Node]) -> list[str]:
             "pre",
             "summary",
         }:
-            text = _clean_line(_text_content(node, excluded))
+            text = _clean_line(_text_content(node, excluded, ctx))
             if text:
                 lines.append(text)
             return
+        if node.tag == "form":
+            # A form's own text content (buttons/labels, handled by the
+            # generic recursion below) can stay identical while its submit
+            # destination changes; represent that destination as its own
+            # line rather than silently dropping the change.
+            destination = _link_destination(node, "action", ctx)
+            if destination:
+                lines.append(f"[form action: {destination}]")
         child_nodes = [child for child in node.children if isinstance(child, Node)]
         has_block_child = any(child.tag in BLOCK_TAGS for child in child_nodes)
         direct_text = _clean_line(
             " ".join(child for child in node.children if isinstance(child, str))
         )
         if direct_text and not has_block_child:
-            full_text = _clean_line(_text_content(node, excluded))
+            full_text = _clean_line(_text_content(node, excluded, ctx))
             if full_text:
                 lines.append(full_text)
                 return
@@ -424,6 +475,7 @@ def _extract_lines(root: Node, excluded: set[Node]) -> list[str]:
 def normalize_html(
     html: str,
     *,
+    base_url: str = "",
     include_selector: str = "",
     exclude_selectors: Iterable[str] = (),
     strict_selectors: bool = True,
@@ -455,12 +507,13 @@ def normalize_html(
             )
         excluded.update(matches)
 
+    ctx = _LinkContext(base_url, MAX_LINK_ANNOTATIONS)
     raw_lines: list[str] = []
     for root in roots:
-        raw_lines.extend(_extract_lines(root, excluded))
+        raw_lines.extend(_extract_lines(root, excluded, ctx))
     if not raw_lines:
         fallback = " ".join(
-            _clean_line(_text_content(root, excluded)) for root in roots
+            _clean_line(_text_content(root, excluded, ctx)) for root in roots
         ).strip()
         if fallback:
             raw_lines.append(fallback)

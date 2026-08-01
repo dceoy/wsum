@@ -118,6 +118,19 @@ class RoutineResult:
         }
 
 
+class _PartialCommitError(Exception):
+    """append_run committed but the paired replace_state call failed.
+
+    append_run dedups by run_id, so the Run row is now the durable,
+    unoverwritable record of this run_id's outcome. Routing this through
+    _finish_failure would append-run a no-op (the success row survives) but
+    still replace_state with a reverted/failure-incremented baseline behind
+    a Run that already says success. Propagate instead and leave State
+    exactly as it was; the next run re-detects any drift from the stale
+    baseline rather than silently masking it.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class _PendingMaterial:
     target: Target
@@ -289,7 +302,17 @@ class WeeklyMonitorRoutine:
             # order can advance State while the Run write never lands,
             # silently dropping the result the State change was based on.
             self.store.append_run(run)
-            self.store.replace_state(state)
+            try:
+                self.store.replace_state(state)
+            except Exception as exc:
+                # append_run already landed and dedups by run_id, so it can
+                # no longer be made to record a different outcome for this
+                # run_id. Raise rather than let a caller retry the pair and
+                # silently no-op the append while replace_state runs again.
+                raise _PartialCommitError(
+                    f"State commit failed after Run {run.run_id} was "
+                    "already persisted"
+                ) from exc
         return run
 
     def _failure_alert(
@@ -561,6 +584,7 @@ class WeeklyMonitorRoutine:
                     raw_path.read_bytes(),
                     content_type=fetched.content_type,
                     charset=fetched.charset,
+                    base_url=fetched.final_url,
                     include_selector=target.include_selector,
                     exclude_selectors=target.exclude_selectors,
                 )
@@ -713,6 +737,15 @@ class WeeklyMonitorRoutine:
                     validated["summary_ja"],
                     attempts,
                 )
+        except _PartialCommitError:
+            # The Run for this run_id already landed durably; do not let
+            # the generic Exception handler below route this through
+            # _finish_failure, which would append_run a no-op (fine) but
+            # still replace_state with a reverted, failure-incremented
+            # baseline behind a Run that already says success. Propagate
+            # so the caller records a content-free failure without any
+            # further store write.
+            raise
         except MonitorError as exc:
             return self._finish_failure(
                 run_id,

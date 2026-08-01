@@ -12,6 +12,28 @@ from feed_normalizer import normalize_feed
 from normalize import normalize_content
 
 
+def _pdf_stream(number: int, body: bytes, *, extra: bytes = b"") -> bytes:
+    # /Length must equal the exact stream body byte count (pdf_normalizer
+    # now derives the stream boundary from it instead of scanning for the
+    # next literal "endstream" bytes), so it is always computed here rather
+    # than hand-counted per fixture.
+    dict_entries = b"/Length " + str(len(body)).encode()
+    if extra:
+        dict_entries += b" " + extra
+    return (
+        f"{number} 0 obj\n".encode()
+        + b"<< "
+        + dict_entries
+        + b" >>\nstream\n"
+        + body
+        + b"\nendstream\nendobj\n"
+    )
+
+
+def _pdf(*objects: bytes) -> bytes:
+    return b"%PDF-1.4\n" + b"".join(objects) + b"%%EOF"
+
+
 class NormalizationTests(unittest.TestCase):
     def test_formatting_noise_produces_same_hash(self) -> None:
         first = b"""
@@ -198,6 +220,70 @@ class NormalizationTests(unittest.TestCase):
             for value in values
         }
         self.assertEqual(4, len(hashes))
+
+    def test_link_destination_change_is_not_silently_missed(self) -> None:
+        # Same visible link text, changed href: without a destination
+        # annotation this produces identical normalized text/hash and the
+        # routine never diffs or notifies on an application/pricing/
+        # checkout link change.
+        before = normalize_content(
+            b'<main><p><a href="/apply-v1">Apply</a></p></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<main><p><a href="/apply-v2">Apply</a></p></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        self.assertIn("https://example.com/apply-v1", before.text)
+        self.assertIn("https://example.com/apply-v2", after.text)
+
+    def test_form_action_change_is_not_silently_missed(self) -> None:
+        before = normalize_content(
+            b'<main><form action="/checkout-v1"><button>Buy</button></form></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<main><form action="/checkout-v2"><button>Buy</button></form></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_credential_bearing_link_destination_is_omitted_not_raised(self) -> None:
+        # canonicalize_url denies embedded credentials and credential-like
+        # query parameters; a link carrying either must not fail
+        # normalization of the whole page, and the credential must not end
+        # up in the normalized text.
+        result = normalize_content(
+            (
+                b'<main><p><a href="https://user:pass@example.com/x">Link</a></p>'
+                b'<p><a href="https://example.com/x?token=secret">Other</a></p>'
+                b"</main>"
+            ),
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotIn("user:pass", result.text)
+        self.assertNotIn("secret", result.text)
+
+    def test_in_page_and_relative_links_without_base_url_are_not_annotated(
+        self,
+    ) -> None:
+        same_fragment_only = normalize_content(
+            b'<main><p><a href="#section">Jump</a></p></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotIn("example.com", same_fragment_only.text)
+        no_base = normalize_content(
+            b'<main><p><a href="/apply-v1">Apply</a></p></main>',
+            content_type="text/html",
+        )
+        self.assertNotIn("/apply-v1", no_base.text)
 
     def test_standalone_deadline_date_is_preserved_not_erased(self) -> None:
         # A date/time-only line is stripped as routine-timestamp noise, but
@@ -414,20 +500,14 @@ class NormalizationTests(unittest.TestCase):
             normalize_content(deep, content_type="text/html")
 
     def test_text_pdf_and_pdf_failures(self) -> None:
-        pdf = (
-            b"%PDF-1.4\n1 0 obj\n<< /Length 38 >>\nstream\n"
-            b"BT (Hello PDF) Tj ET\nendstream\nendobj\n%%EOF"
-        )
+        pdf = _pdf(_pdf_stream(1, b"BT (Hello PDF) Tj ET"))
         result = normalize_content(pdf, content_type="application/pdf")
         self.assertEqual("pdf", result.kind)
         self.assertIn("Hello PDF", result.text)
         encrypted = b"%PDF-1.4\n1 0 obj << /Encrypt 2 0 R >> endobj\n%%EOF"
         with self.assertRaisesRegex(MonitorError, "encrypted"):
             normalize_content(encrypted, content_type="application/pdf")
-        image_only = (
-            b"%PDF-1.4\n1 0 obj << /Subtype /Image >>\n"
-            b"stream\nabc\nendstream\nendobj\n%%EOF"
-        )
+        image_only = _pdf(_pdf_stream(1, b"abc", extra=b"/Subtype /Image"))
         with self.assertRaisesRegex(MonitorError, "image-only"):
             normalize_content(image_only, content_type="application/pdf")
 
@@ -436,20 +516,15 @@ class NormalizationTests(unittest.TestCase):
         # runs (e.g. a font/CMap-encoded value between literal label text).
         # Only extracting the literal runs would keep the normalized hash
         # stable even when the hex-encoded content changes.
-        mixed = (
-            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
-            b"BT [(Hello ) <576f726c64>] TJ ET\nendstream\nendobj\n%%EOF"
-        )
+        mixed = _pdf(_pdf_stream(1, b"BT [(Hello ) <576f726c64>] TJ ET"))
         result = normalize_content(mixed, content_type="application/pdf")
         self.assertIn("Hello World", result.text)
         before = normalize_content(
-            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
-            b"BT [(Total: ) <30303030>] TJ ET\nendstream\nendobj\n%%EOF",
+            _pdf(_pdf_stream(1, b"BT [(Total: ) <30303030>] TJ ET")),
             content_type="application/pdf",
         )
         after = normalize_content(
-            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
-            b"BT [(Total: ) <39393939>] TJ ET\nendstream\nendobj\n%%EOF",
+            _pdf(_pdf_stream(1, b"BT [(Total: ) <39393939>] TJ ET")),
             content_type="application/pdf",
         )
         self.assertIn("Total: 0000", before.text)
@@ -463,13 +538,11 @@ class NormalizationTests(unittest.TestCase):
         # silently drops content shown only via ' or ", so an edit confined
         # to that content would leave the normalized hash unchanged.
         before = normalize_content(
-            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
-            b"BT (Header) Tj (Old status) ' ET\nendstream\nendobj\n%%EOF",
+            _pdf(_pdf_stream(1, b"BT (Header) Tj (Old status) ' ET")),
             content_type="application/pdf",
         )
         after = normalize_content(
-            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
-            b"BT (Header) Tj (New status) ' ET\nendstream\nendobj\n%%EOF",
+            _pdf(_pdf_stream(1, b"BT (Header) Tj (New status) ' ET")),
             content_type="application/pdf",
         )
         self.assertIn("Old status", before.text)
@@ -477,8 +550,7 @@ class NormalizationTests(unittest.TestCase):
         self.assertNotEqual(before.normalized_hash, after.normalized_hash)
 
         double_quote = normalize_content(
-            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
-            b'BT (Header) Tj 0 0 (Quoted status) " ET\nendstream\nendobj\n%%EOF',
+            _pdf(_pdf_stream(1, b'BT (Header) Tj 0 0 (Quoted status) " ET')),
             content_type="application/pdf",
         )
         self.assertIn("Quoted status", double_quote.text)
@@ -492,13 +564,11 @@ class NormalizationTests(unittest.TestCase):
         # or the block is truncated before the real Tj call and that text is
         # silently dropped from the hash.
         before = normalize_content(
-            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
-            b"BT (status ET old) Tj ET\nendstream\nendobj\n%%EOF",
+            _pdf(_pdf_stream(1, b"BT (status ET old) Tj ET")),
             content_type="application/pdf",
         )
         after = normalize_content(
-            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
-            b"BT (status ET new) Tj ET\nendstream\nendobj\n%%EOF",
+            _pdf(_pdf_stream(1, b"BT (status ET new) Tj ET")),
             content_type="application/pdf",
         )
         self.assertIn("status ET old", before.text)
@@ -513,13 +583,11 @@ class NormalizationTests(unittest.TestCase):
         # without excluding name tokens truncates the block at that "ET",
         # dropping the real Tj call that follows.
         before = normalize_content(
-            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
-            b"BT /ETMarker 12 Tf (Old status) Tj ET\nendstream\nendobj\n%%EOF",
+            _pdf(_pdf_stream(1, b"BT /ETMarker 12 Tf (Old status) Tj ET")),
             content_type="application/pdf",
         )
         after = normalize_content(
-            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
-            b"BT /ETMarker 12 Tf (New status) Tj ET\nendstream\nendobj\n%%EOF",
+            _pdf(_pdf_stream(1, b"BT /ETMarker 12 Tf (New status) Tj ET")),
             content_type="application/pdf",
         )
         self.assertIn("Old status", before.text)
@@ -533,23 +601,65 @@ class NormalizationTests(unittest.TestCase):
         # that follows and silently dropping the whole operand instead of
         # extracting "Old (status)".
         before = normalize_content(
-            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
-            b"BT (Stable) Tj ET BT (Old (status)) Tj ET\nendstream\nendobj\n%%EOF",
+            _pdf(_pdf_stream(1, b"BT (Stable) Tj ET BT (Old (status)) Tj ET")),
             content_type="application/pdf",
         )
         after = normalize_content(
-            b"%PDF-1.4\n1 0 obj\n<< /Length 60 >>\nstream\n"
-            b"BT (Stable) Tj ET BT (New (status)) Tj ET\nendstream\nendobj\n%%EOF",
+            _pdf(_pdf_stream(1, b"BT (Stable) Tj ET BT (New (status)) Tj ET")),
             content_type="application/pdf",
         )
         self.assertIn("Old (status)", before.text)
         self.assertIn("New (status)", after.text)
         self.assertNotEqual(before.normalized_hash, after.normalized_hash)
 
+    def test_pdf_endstream_inside_a_string_operand_does_not_truncate_the_stream(
+        self,
+    ) -> None:
+        # A parser that locates the stream body by scanning for the first
+        # newline-delimited "endstream" bytes (rather than honoring the
+        # dictionary's /Length) truncates here: this literal string operand
+        # legally contains "\nendstream" as raw content, and everything
+        # after it -- including a later, otherwise-stable Tj whose own text
+        # changes -- would be silently dropped from the normalized hash.
+        def stream(edit: bytes) -> bytes:
+            return (
+                b"BT (marker\nendstream inside a string) Tj ET "
+                b"BT (Stable) Tj ET BT (" + edit + b") Tj ET"
+            )
+
+        before = normalize_content(
+            _pdf(_pdf_stream(1, stream(b"Old edit"))),
+            content_type="application/pdf",
+        )
+        after = normalize_content(
+            _pdf(_pdf_stream(1, stream(b"New edit"))),
+            content_type="application/pdf",
+        )
+        self.assertIn("Stable", before.text)
+        self.assertIn("Old edit", before.text)
+        self.assertIn("New edit", after.text)
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
     def test_pdf_unterminated_string_fails_closed(self) -> None:
-        pdf = (
-            b"%PDF-1.4\n1 0 obj\n<< /Length 30 >>\nstream\n"
-            b"BT (unterminated Tj ET\nendstream\nendobj\n%%EOF"
+        pdf = _pdf(_pdf_stream(1, b"BT (unterminated Tj ET"))
+        with self.assertRaisesRegex(MonitorError, "pdf_malformed|malformed"):
+            normalize_content(pdf, content_type="application/pdf")
+
+    def test_pdf_indirect_length_reference_is_resolved(self) -> None:
+        # /Length can be an indirect reference ("N G R") to a separate
+        # object holding the bare integer, not just a direct integer.
+        body = b"BT (Indirect length) Tj ET"
+        pdf = _pdf(
+            b"1 0 obj\n<< /Length 2 0 R >>\nstream\n" + body + b"\nendstream\nendobj\n",
+            f"2 0 obj\n{len(body)}\nendobj\n".encode(),
+        )
+        result = normalize_content(pdf, content_type="application/pdf")
+        self.assertIn("Indirect length", result.text)
+
+    def test_pdf_unresolvable_indirect_length_fails_closed(self) -> None:
+        body = b"BT (Indirect length) Tj ET"
+        pdf = _pdf(
+            b"1 0 obj\n<< /Length 3 0 R >>\nstream\n" + body + b"\nendstream\nendobj\n"
         )
         with self.assertRaisesRegex(MonitorError, "pdf_malformed|malformed"):
             normalize_content(pdf, content_type="application/pdf")
@@ -562,17 +672,17 @@ class NormalizationTests(unittest.TestCase):
         # unfiltered stream is scanned, a change confined to a filtered
         # stream would leave the normalized hash unchanged, so such filters
         # must be rejected rather than silently skipped.
-        before = (
-            b"%PDF-1.4\n1 0 obj\n<< /Length 20 >>\nstream\n"
-            b"BT (Stable label) Tj ET\nendstream\nendobj\n"
-            b"2 0 obj\n<< /Filter /ASCIIHexDecode /Length 20 >>\nstream\n"
-            b"28546f74616c3a20303030302947\nendstream\nendobj\n%%EOF"
+        before = _pdf(
+            _pdf_stream(1, b"BT (Stable label) Tj ET"),
+            _pdf_stream(
+                2, b"28546f74616c3a20303030302947", extra=b"/Filter /ASCIIHexDecode"
+            ),
         )
-        after = (
-            b"%PDF-1.4\n1 0 obj\n<< /Length 20 >>\nstream\n"
-            b"BT (Stable label) Tj ET\nendstream\nendobj\n"
-            b"2 0 obj\n<< /Filter /ASCIIHexDecode /Length 20 >>\nstream\n"
-            b"28546f74616c3a20393939392947\nendstream\nendobj\n%%EOF"
+        after = _pdf(
+            _pdf_stream(1, b"BT (Stable label) Tj ET"),
+            _pdf_stream(
+                2, b"28546f74616c3a20393939392947", extra=b"/Filter /ASCIIHexDecode"
+            ),
         )
         with self.assertRaisesRegex(MonitorError, "filter"):
             normalize_content(before, content_type="application/pdf")
@@ -588,10 +698,12 @@ class NormalizationTests(unittest.TestCase):
         # silently treat the still-encoded bytes as plain content instead of
         # rejecting the unsupported filter.
         padding = b"x" * 1_200
-        pdf = (
-            b"%PDF-1.4\n1 0 obj\n<< /Filter /ASCIIHexDecode /Length 20 "
-            b"/Extra (" + padding + b") >>\nstream\n"
-            b"28546f74616c3a20303030302947\nendstream\nendobj\n%%EOF"
+        pdf = _pdf(
+            _pdf_stream(
+                1,
+                b"28546f74616c3a20303030302947",
+                extra=b"/Filter /ASCIIHexDecode /Extra (" + padding + b")",
+            )
         )
         with self.assertRaisesRegex(MonitorError, "filter"):
             normalize_content(pdf, content_type="application/pdf")
@@ -602,13 +714,7 @@ class NormalizationTests(unittest.TestCase):
         # could otherwise be accepted as valid text instead of rejected.
         compressed = zlib.compress(b"BT (Hello Flate PDF) Tj ET")
         truncated = compressed[:-4]
-        pdf = (
-            b"%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode /Length "
-            + str(len(truncated)).encode()
-            + b" >>\nstream\n"
-            + truncated
-            + b"\nendstream\nendobj\n%%EOF"
-        )
+        pdf = _pdf(_pdf_stream(1, truncated, extra=b"/Filter /FlateDecode"))
         with self.assertRaisesRegex(MonitorError, "truncated|malformed"):
             normalize_content(pdf, content_type="application/pdf")
 

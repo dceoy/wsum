@@ -275,6 +275,50 @@ class RoutineTests(unittest.TestCase):
         routine.run(run_id="run-1")
         self.assertEqual(["append_run", "replace_state"], calls)
 
+    def test_partial_commit_does_not_revert_state_behind_a_committed_run(
+        self,
+    ) -> None:
+        # append_run for a success outcome lands, then the paired
+        # replace_state raises. append_run dedups by run_id, so a naive
+        # routing through _finish_failure would append_run a no-op (the
+        # success row survives) but still replace_state with a reverted,
+        # failure-incremented baseline behind a Run that already says
+        # success. State must be left exactly as it was instead.
+        self.run_cycle(response(1000), "run-1")
+        baseline_state = self.store.states["one"]
+
+        class PartialCommitStore(MemoryOperationalStore):
+            def __init__(self, targets, states, runs) -> None:
+                super().__init__(targets)
+                self.states = states
+                self.runs = runs
+                self.replace_state_calls = 0
+
+            def replace_state(self, state) -> None:
+                self.replace_state_calls += 1
+                if self.replace_state_calls == 1:
+                    raise MonitorError(
+                        "state_write_failed", "simulated transient failure"
+                    )
+                super().replace_state(state)
+
+        store = PartialCommitStore(
+            [self.target], dict(self.store.states), dict(self.store.runs)
+        )
+        routine = WeeklyMonitorRoutine(
+            store=store,
+            snapshots=self.snapshots,
+            summary_client=EvidenceSummaryClient(),
+            slack=self.slack,
+            fetcher=FixtureFetcher({"one": response(1000)}),
+            config=RoutineConfig(max_concurrency=2, retry=RetryConfig()),
+            sleeper=lambda _: None,
+        )
+        result = routine.run(run_id="run-2")
+        self.assertEqual(1, result.metrics.failed)
+        self.assertEqual("unchanged", store.runs["run-2:one"].result)
+        self.assertEqual(baseline_state, store.states["one"])
+
     def test_one_target_failure_does_not_abort_other_targets(self) -> None:
         targets = [make_target("good"), make_target("bad")]
         store = MemoryOperationalStore(targets)
