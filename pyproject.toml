@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Deterministic connector-backed weekly website update monitoring"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-dependencies = []
+dependencies = ["pypdf>=6,<7"]
 
 [tool.ruff]
 line-length = 88

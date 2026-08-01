@@ -1,4 +1,4 @@
-"""Bounded text extraction for simple text-based PDF content streams."""
+"""Bounded, font-aware text extraction for text-based PDFs."""
 
 from __future__ import annotations
 
@@ -6,8 +6,11 @@ import bisect
 import re
 import unicodedata
 import zlib
+from io import BytesIO
 
 from errors import MonitorError
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 
 # Locates only the "stream" keyword + its required end-of-line marker (CRLF
 # or LF, never a bare CR -- see PDF spec 7.3.8.1). The stream's actual end
@@ -380,12 +383,42 @@ def _stream_data(pdf: bytes, limit: int) -> list[bytes]:
     return streams
 
 
+def _extract_font_aware_text(
+    pdf: bytes, *, max_pages: int, max_extracted_chars: int
+) -> list[str]:
+    """Extract text with the PDF's active font encodings and CMaps."""
+    try:
+        reader = PdfReader(BytesIO(pdf), strict=True)
+        if reader.is_encrypted:
+            raise MonitorError("pdf_encrypted", "encrypted PDFs are not supported")
+        if len(reader.pages) > max_pages:
+            raise MonitorError("pdf_page_limit", "PDF page count exceeds the limit")
+
+        fragments: list[str] = []
+        extracted_chars = 0
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            extracted_chars += len(page_text)
+            if extracted_chars > max_extracted_chars:
+                raise MonitorError(
+                    "pdf_extracted_too_large",
+                    "PDF extracted text exceeds the size limit",
+                )
+            fragments.extend(page_text.splitlines())
+        return fragments
+    except MonitorError:
+        raise
+    except (PdfReadError, KeyError, TypeError, ValueError, RecursionError) as exc:
+        raise MonitorError("pdf_malformed", "PDF could not be parsed safely") from exc
+
+
 def extract_pdf_text(
     pdf: bytes,
     *,
     max_input_bytes: int = 10_000_000,
     max_decompressed_bytes: int = 20_000_000,
     max_objects: int = 20_000,
+    max_pages: int = 1_000,
 ) -> tuple[str, dict[str, str]]:
     if len(pdf) > max_input_bytes:
         raise MonitorError("response_too_large", "PDF exceeds the input size limit")
@@ -393,38 +426,38 @@ def extract_pdf_text(
         raise MonitorError("pdf_malformed", "document has no PDF signature")
     if b"/Encrypt" in pdf:
         raise MonitorError("pdf_encrypted", "encrypted PDFs are not supported")
-    if (
-        b"/ToUnicode" in pdf
-        or b"/Differences" in pdf
-        or b"/Encoding" in pdf
-        or b"/BaseFont" in pdf
-        or b"/Type0" in pdf
-        or b"/ObjStm" in pdf
-    ):
-        # Text-showing operators carry character codes, not text -- codes
-        # are only text once resolved through the active font's /Encoding
-        # (any named encoding such as /WinAnsiEncoding or /MacRomanEncoding,
-        # not only a /Differences remap) and any /ToUnicode CMap. Composite
-        # (/Type0) fonts always route codes through a CMap too. A simple font
-        # may omit /Encoding and instead use the built-in encoding selected by
-        # /BaseFont, so the absence of the three mapping markers above is not
-        # proof that character codes are byte-identity-safe. Compressed object
-        # streams (/ObjStm) can hide any of these declarations from this raw
-        # marker scan entirely, since font dictionaries stored there never
-        # appear as literal bytes in the file. This extractor decodes raw
-        # string bytes directly (UTF-16BE/Latin-1) without resolving the active
-        # font. Reject rather than silently hash the wrong text.
-        raise MonitorError(
-            "pdf_unsupported_encoding",
-            "PDF uses font encodings that require CMap resolution",
-        )
     if len(re.findall(rb"\bobj\b", pdf)) > max_objects:
         raise MonitorError("pdf_object_limit", "PDF object count exceeds the limit")
 
-    fragments: list[str] = []
-    for stream in _stream_data(pdf, max_decompressed_bytes):
-        for block in _text_blocks(stream):
-            fragments.extend(_text_fragments(block))
+    # Validate every stream and bound its aggregate decoded size before the
+    # font-aware parser sees it. This preserves the existing fail-closed
+    # filter policy and prevents compressed streams from bypassing the
+    # decompression budget inside the general PDF reader.
+    streams = _stream_data(pdf, max_decompressed_bytes)
+    uses_fonts = any(
+        marker in pdf
+        for marker in (
+            b"/Font",
+            b"/BaseFont",
+            b"/Encoding",
+            b"/ToUnicode",
+            b"/Type0",
+            b"/ObjStm",
+        )
+    )
+    if uses_fonts:
+        fragments = _extract_font_aware_text(
+            pdf,
+            max_pages=max_pages,
+            max_extracted_chars=max_decompressed_bytes,
+        )
+    else:
+        # Retain the bounded lexer for deliberately simple, font-less PDF
+        # content streams used by lightweight producers and fixtures.
+        fragments = []
+        for stream in streams:
+            for block in _text_blocks(stream):
+                fragments.extend(_text_fragments(block))
     lines = [
         re.sub(r"\s+", " ", unicodedata.normalize("NFKC", fragment)).strip()
         for fragment in fragments

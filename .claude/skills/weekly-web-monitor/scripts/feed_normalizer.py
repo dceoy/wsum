@@ -63,18 +63,37 @@ def _all_text(element: ET.Element, *names: str) -> str:
 
 def _entry_link(element: ET.Element) -> str:
     for child in _children(element, "link"):
-        href = child.attrib.get("href", "")
-        value = href or "".join(child.itertext()).strip()
-        if value:
-            parsed = urlsplit(value)
-            if parsed.scheme in {"http", "https"} and parsed.hostname:
-                try:
-                    return validate_http_url(value, "feed entry link")
-                except MonitorError as exc:
-                    raise MonitorError(
-                        "feed_unsafe_link",
-                        "feed entry contains an unsafe link",
-                    ) from exc
+        href = child.attrib.get("href")
+        if href is not None:
+            # Atom defines an omitted rel as "alternate". Other relations
+            # such as self and enclosure identify feed/API or media
+            # resources rather than the entry's article destination.
+            relation = child.attrib.get("rel", "alternate").strip().lower()
+            if relation != "alternate":
+                continue
+            value = href.strip()
+        else:
+            # RSS uses the element text rather than an href attribute.
+            value = "".join(child.itertext()).strip()
+        if not value:
+            continue
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            # Relative IRIs (including those made absolute by xml:base) need
+            # base-URI inheritance that this bounded normalizer does not
+            # implement. Reject them explicitly instead of silently omitting
+            # a destination whose later changes would then be invisible.
+            raise MonitorError(
+                "feed_relative_link",
+                "feed entry link must be an absolute HTTP(S) URL",
+            )
+        try:
+            return validate_http_url(value, "feed entry link")
+        except MonitorError as exc:
+            raise MonitorError(
+                "feed_unsafe_link",
+                "feed entry contains an unsafe link",
+            ) from exc
     return ""
 
 
