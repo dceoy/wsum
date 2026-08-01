@@ -190,9 +190,19 @@ class OutboxTests(unittest.TestCase):
             calls.append((group, message))
             return "sent:1"
 
-        sent = dispatch_record(record, sender, now="2026-01-01T00:01:00Z")
+        sent = dispatch_record(
+            record,
+            sender,
+            persist_transition=lambda _: None,
+            now="2026-01-01T00:01:00Z",
+        )
         self.assertEqual("sent", sent.status)
-        duplicate = dispatch_record(sent, sender, now="2026-01-01T00:02:00Z")
+        duplicate = dispatch_record(
+            sent,
+            sender,
+            persist_transition=lambda _: None,
+            now="2026-01-01T00:02:00Z",
+        )
         self.assertEqual("sent", duplicate.status)
         self.assertEqual(1, len(calls))
 
@@ -209,6 +219,7 @@ class OutboxTests(unittest.TestCase):
                 now="2026-01-01T00:00:00Z",
             ),
             failed_sender,
+            persist_transition=lambda _: None,
             now="2026-01-01T00:01:00Z",
         )
         self.assertEqual("retry", retried.status)
@@ -220,6 +231,36 @@ class OutboxTests(unittest.TestCase):
                 "default",
                 "https://hooks.slack.com/services/T/B/secret",
             )
+
+    def test_dispatch_requires_and_commits_sending_before_delivery(self) -> None:
+        record = enqueue_record(
+            "f" * 64,
+            "one",
+            "default",
+            "message",
+            now="2026-01-01T00:00:00Z",
+        )
+        calls: list[str] = []
+
+        def sender(group: str, message: str) -> str:
+            del group, message
+            calls.append("send")
+            return "sent:1"
+
+        with self.assertRaises(TypeError):
+            dispatch_record(record, sender)  # type: ignore[call-arg]
+        self.assertEqual([], calls)
+
+        def failed_persistence(_: object) -> None:
+            raise RuntimeError("store unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "store unavailable"):
+            dispatch_record(
+                record,
+                sender,
+                persist_transition=failed_persistence,
+            )
+        self.assertEqual([], calls)
 
     def test_ambiguous_failure_remains_sending_after_persist_transition(self) -> None:
         record = enqueue_record(
@@ -262,7 +303,9 @@ class OutboxTests(unittest.TestCase):
             record.created_at,
             record.updated_at,
         )
-        result = dispatch_record(poison, lambda *_: "sent")
+        result = dispatch_record(
+            poison, lambda *_: "sent", persist_transition=lambda _: None
+        )
         self.assertEqual("poison", result.status)
         sending = type(record)(
             record.event_id,
@@ -273,7 +316,12 @@ class OutboxTests(unittest.TestCase):
             record.created_at,
             record.updated_at,
         )
-        self.assertIs(sending, dispatch_record(sending, lambda *_: "sent"))
+        self.assertIs(
+            sending,
+            dispatch_record(
+                sending, lambda *_: "sent", persist_transition=lambda _: None
+            ),
+        )
 
 
 class ReplayAndAuditTests(unittest.TestCase):

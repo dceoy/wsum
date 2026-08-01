@@ -47,6 +47,16 @@ class MemoryOperationalStore:
     def upsert_notification(self, notification: NotificationRecord) -> None:
         self.notifications[notification.event_id] = notification
 
+    def upsert_notifications_atomically(
+        self, notifications: Sequence[NotificationRecord]
+    ) -> None:
+        updates = {item.event_id: item for item in notifications}
+        if len(updates) != len(notifications):
+            raise MonitorError(
+                "notification_invalid", "notification batch contains duplicate IDs"
+            )
+        self.notifications = {**self.notifications, **updates}
+
     def append_audit(self, record: AuditRecord) -> None:
         self.audit.append(record)
 

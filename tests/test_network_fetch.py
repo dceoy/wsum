@@ -848,6 +848,28 @@ class FetchTests(unittest.TestCase):
         self.assertTrue(raised.exception.retryable)
         self.assertLess(elapsed, 10.0)
 
+    def test_repeated_dns_timeouts_keep_resolver_workers_bounded(self) -> None:
+        release = threading.Event()
+        pool = fetch._ResolverPool(worker_count=2)
+
+        def stuck_resolver(*_: object, **__: object) -> list[tuple]:
+            release.wait()
+            return [(2, 1, 6, "", ("93.184.216.34", 443))]
+
+        bounded = fetch._bounded_resolver(
+            stuck_resolver,
+            lambda: 0.01,
+            pool=pool,
+        )
+        try:
+            for _ in range(10):
+                with self.assertRaises(TimeoutError):
+                    bounded("example.com", 443)
+            self.assertEqual(2, len(pool._workers))
+            self.assertTrue(all(worker.is_alive() for worker in pool._workers))
+        finally:
+            release.set()
+
 
 if __name__ == "__main__":
     unittest.main()

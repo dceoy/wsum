@@ -183,9 +183,9 @@ def dispatch_record(
     record: OutboxRecord,
     sender: Callable[[str, str], str],
     *,
+    persist_transition: Callable[[OutboxRecord], None],
     max_attempts: int = 5,
     now: str | None = None,
-    persist_transition: Callable[[OutboxRecord], None] | None = None,
 ) -> OutboxRecord:
     if record.status in {"sent", "sending", "poison"}:
         return record
@@ -219,8 +219,7 @@ def dispatch_record(
         record.created_at,
         timestamp,
     )
-    if persist_transition is not None:
-        persist_transition(sending)
+    persist_transition(sending)
     try:
         delivery_ref = sender(group, message)
         if not delivery_ref:

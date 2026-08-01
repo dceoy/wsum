@@ -240,6 +240,33 @@ class NormalizationTests(unittest.TestCase):
         self.assertIn("https://example.com/apply-v1", before.text)
         self.assertIn("https://example.com/apply-v2", after.text)
 
+    def test_long_link_destination_keeps_full_identity_in_digest(self) -> None:
+        common_prefix = "/" + "a" * 350
+        before = normalize_content(
+            f'<main><p><a href="{common_prefix}-old">Apply</a></p></main>'.encode(),
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            f'<main><p><a href="{common_prefix}-new">Apply</a></p></main>'.encode(),
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        self.assertIn("sha256:", before.text)
+        self.assertIn("sha256:", after.text)
+
+    def test_link_destination_budget_fails_closed(self) -> None:
+        links = "".join(
+            f'<p><a href="/item/{index}">Item</a></p>' for index in range(501)
+        )
+        with self.assertRaisesRegex(MonitorError, "too many link destinations"):
+            normalize_content(
+                f"<main>{links}</main>".encode(),
+                content_type="text/html",
+                base_url="https://example.com/page",
+            )
+
     def test_form_action_change_is_not_silently_missed(self) -> None:
         before = normalize_content(
             b'<main><form action="/checkout-v1"><button>Buy</button></form></main>',

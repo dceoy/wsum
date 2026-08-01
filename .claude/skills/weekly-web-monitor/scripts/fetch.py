@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import queue
 import select
 import socket
 import ssl
@@ -348,35 +349,105 @@ def _extract_charset(raw_content_type: str) -> str:
     return ""
 
 
-def _bounded_resolver(resolver: Resolver, remaining: Callable[[], float]) -> Resolver:
+class _ResolverJob:
+    __slots__ = ("args", "done", "error", "kwargs", "resolver", "result")
+
+    def __init__(
+        self, resolver: Resolver, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> None:
+        self.resolver = resolver
+        self.args = args
+        self.kwargs = kwargs
+        self.done = threading.Event()
+        self.result: Any = None
+        self.error: BaseException | None = None
+
+
+class _ResolverPool:
+    """A fixed daemon-worker pool with no unbounded pending-job queue."""
+
+    def __init__(self, worker_count: int) -> None:
+        self._worker_count = worker_count
+        self._capacity = threading.BoundedSemaphore(worker_count)
+        self._jobs: queue.SimpleQueue[_ResolverJob] = queue.SimpleQueue()
+        self._workers: list[threading.Thread] = []
+        self._start_lock = threading.Lock()
+
+    def _ensure_started(self) -> None:
+        if self._workers:
+            return
+        with self._start_lock:
+            if self._workers:
+                return
+            for index in range(self._worker_count):
+                worker = threading.Thread(
+                    target=self._run,
+                    daemon=True,
+                    name=f"weekly-web-monitor-resolver-{index}",
+                )
+                worker.start()
+                self._workers.append(worker)
+
+    def _run(self) -> None:
+        while True:
+            job = self._jobs.get()
+            try:
+                job.result = job.resolver(*job.args, **job.kwargs)
+            except BaseException as exc:  # noqa: BLE001 - returned to caller thread
+                job.error = exc
+            finally:
+                job.done.set()
+                self._capacity.release()
+
+    def resolve(
+        self,
+        resolver: Resolver,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        budget: float,
+    ) -> Any:
+        if budget <= 0:
+            raise TimeoutError("DNS resolution exceeded the fetch deadline")
+        self._ensure_started()
+        deadline = monotonic() + budget
+        if not self._capacity.acquire(timeout=budget):
+            raise TimeoutError("DNS resolution exceeded the fetch deadline")
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            self._capacity.release()
+            raise TimeoutError("DNS resolution exceeded the fetch deadline")
+        job = _ResolverJob(resolver, args, kwargs)
+        self._jobs.put(job)
+        if not job.done.wait(remaining):
+            # The fixed worker may remain occupied by an uninterruptible
+            # getaddrinfo call, but it retains the capacity slot until it exits.
+            # Later callers therefore cannot create threads or queue work without
+            # bound while the resolver is stuck.
+            raise TimeoutError("DNS resolution exceeded the fetch deadline")
+        if job.error is not None:
+            raise job.error
+        return job.result
+
+
+_RESOLVER_POOL = _ResolverPool(worker_count=4)
+
+
+def _bounded_resolver(
+    resolver: Resolver,
+    remaining: Callable[[], float],
+    *,
+    pool: _ResolverPool = _RESOLVER_POOL,
+) -> Resolver:
     """Bound a resolver call to the fetch's total deadline.
 
-    ``socket.getaddrinfo`` has no timeout parameter and cannot be
-    interrupted, so a hanging or slow DNS server would otherwise stall past
-    ``max_total_seconds``. The lookup runs on a daemon thread so a caller
-    that gives up waiting never blocks process exit on it.
+    ``socket.getaddrinfo`` has no timeout parameter and cannot be interrupted.
+    Calls run in a fixed process-wide daemon pool whose capacity stays occupied
+    until a timed-out resolver really returns, so repeated timeouts cannot create
+    an unbounded number of threads or queued jobs.
     """
 
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-        budget = remaining()
-        if budget <= 0:
-            raise TimeoutError("DNS resolution exceeded the fetch deadline")
-        outcome: dict[str, Any] = {}
-
-        def run() -> None:
-            try:
-                outcome["result"] = resolver(*args, **kwargs)
-            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller thread
-                outcome["error"] = exc
-
-        worker = threading.Thread(target=run, daemon=True)
-        worker.start()
-        worker.join(budget)
-        if worker.is_alive():
-            raise TimeoutError("DNS resolution exceeded the fetch deadline")
-        if "error" in outcome:
-            raise outcome["error"]
-        return outcome["result"]
+        return pool.resolve(resolver, args, kwargs, remaining())
 
     return wrapped
 

@@ -55,7 +55,9 @@ Check the row before delivery and update it after delivery. Never automatically
 retry `pending`, because delivery may have succeeded before the final state
 write. Read and write all six columns (`Notifications!A:F`) so a confirmed
 failure's `last_error` is not lost and reloaded rows do not default `kind` back
-to `change`.
+to `change`. Grouped delivery must persist every event in one Slack chunk through
+one all-or-nothing connector batch; never fan a delivered chunk out through
+independent per-event writes.
 
 ### Optional Outbox
 
@@ -63,7 +65,9 @@ to `change`.
 `updated_at`, `next_attempt_at`, `last_error`
 
 Allowed states are `pending`, `sending`, `sent`, `retry`, and `poison`. Persist
-`sending` before delivery. Do not auto-retry an interrupted `sending` row.
+`sending` before delivery through the dispatcher's required persistence callback;
+abort without calling the sender if that write fails. Do not auto-retry an
+interrupted `sending` row.
 Use `OutboxSheetsStore` to query/upsert rows with RAW value semantics. A queued
 event is durable enough for monitoring state to advance, but it is not counted as
 `notified` until the dispatcher records `sent`.

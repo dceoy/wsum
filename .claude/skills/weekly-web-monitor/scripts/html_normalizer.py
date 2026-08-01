@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from collections.abc import Iterable, Iterator
@@ -355,7 +356,7 @@ def _link_destination(node: Node, attr: str, ctx: _LinkContext) -> str:
     # remaining budget (see MAX_LINK_ANNOTATIONS); anything unresolvable,
     # in-page (#fragment), or policy-denied is simply omitted rather than
     # raising, since one bad link must not fail normalization of the page.
-    if ctx.remaining <= 0 or not ctx.base_url:
+    if not ctx.base_url:
         return ""
     value = node.attrs.get(attr, "").strip()
     if not value or value.startswith("#"):
@@ -364,8 +365,13 @@ def _link_destination(node: Node, attr: str, ctx: _LinkContext) -> str:
         canonical, _ = canonicalize_url(urljoin(ctx.base_url, value))
     except MonitorError:
         return ""
+    if ctx.remaining <= 0:
+        raise MonitorError(
+            "html_too_large", "HTML document has too many link destinations"
+        )
     ctx.remaining -= 1
-    return canonical[:MAX_LINK_URL_CHARS]
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"{canonical[:MAX_LINK_URL_CHARS]} [sha256:{digest}]"
 
 
 def _text_content(node: Node, excluded: set[Node], ctx: _LinkContext) -> str:

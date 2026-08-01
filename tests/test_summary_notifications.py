@@ -199,6 +199,48 @@ class NotificationTests(unittest.TestCase):
             all(outcome.status == "suppressed" for outcome in second.values())
         )
 
+    def test_grouped_delivery_persists_each_chunk_atomically(self) -> None:
+        items = [target("one", "group"), target("two", "group")]
+
+        class TrackingStore(MemoryOperationalStore):
+            def __init__(self) -> None:
+                super().__init__(items)
+                self.batches: list[list[str]] = []
+
+            def upsert_notifications_atomically(self, notifications) -> None:
+                self.batches.append([item.status for item in notifications])
+                super().upsert_notifications_atomically(notifications)
+
+        store = TrackingStore()
+        slack = MemorySlackConnector()
+        events = [
+            self._event(item, str(index) * 64) for index, item in enumerate(items, 1)
+        ]
+        outcomes = deliver_grouped(events, store=store, connector=slack)
+        self.assertEqual([["pending", "pending"], ["sent", "sent"]], store.batches)
+        self.assertTrue(all(item.status == "sent" for item in outcomes.values()))
+
+    def test_failed_sent_batch_leaves_the_whole_chunk_pending(self) -> None:
+        items = [target("one", "group"), target("two", "group")]
+
+        class FailingSentBatchStore(MemoryOperationalStore):
+            def upsert_notifications_atomically(self, notifications) -> None:
+                if notifications and notifications[0].status == "sent":
+                    raise RuntimeError("atomic batch failed")
+                super().upsert_notifications_atomically(notifications)
+
+        store = FailingSentBatchStore(items)
+        slack = MemorySlackConnector()
+        events = [
+            self._event(item, str(index) * 64) for index, item in enumerate(items, 1)
+        ]
+        outcomes = deliver_grouped(events, store=store, connector=slack)
+        self.assertEqual(1, len(slack.messages))
+        self.assertTrue(all(item.status == "pending" for item in outcomes.values()))
+        self.assertTrue(
+            all(item.status == "pending" for item in store.notifications.values())
+        )
+
     def test_partial_failure_and_retry(self) -> None:
         good = target("good", "good")
         bad = target("bad", "bad")

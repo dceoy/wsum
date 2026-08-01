@@ -318,5 +318,56 @@ class ModelsAndSheetsTests(unittest.TestCase):
         store.upsert_notification(notification)
         self.assertEqual(notification, store.get_notification("c" * 64))
 
+    def test_notification_batch_uses_one_atomic_raw_connector_call(self) -> None:
+        first = NotificationRecord("d" * 64, "one", "pending")
+        second = NotificationRecord("e" * 64, "two", "pending")
+
+        class Connector:
+            def __init__(self) -> None:
+                self.values = {
+                    "Notifications!A:F": [
+                        list(NOTIFICATION_COLUMNS),
+                        [first.event_id, "one", "pending", "", "change", ""],
+                        [second.event_id, "two", "pending", "", "change", ""],
+                    ]
+                }
+                self.batches = []
+
+            def read_values(self, spreadsheet_id: str, range_name: str):
+                del spreadsheet_id
+                return self.values[range_name]
+
+            def batch_replace_values(
+                self, spreadsheet_id, data, *, value_input_option
+            ) -> None:
+                del spreadsheet_id
+                self.batches.append((data, value_input_option))
+
+        connector = Connector()
+        store = SheetsStore(connector, "runtime-only-id")
+        store.upsert_notifications_atomically(
+            [
+                NotificationRecord(
+                    first.event_id,
+                    "one",
+                    "sent",
+                    notified_at="2026-01-01T00:00:00Z",
+                ),
+                NotificationRecord(
+                    second.event_id,
+                    "two",
+                    "sent",
+                    notified_at="2026-01-01T00:00:00Z",
+                ),
+            ]
+        )
+        self.assertEqual(1, len(connector.batches))
+        data, option = connector.batches[0]
+        self.assertEqual("RAW", option)
+        self.assertEqual(
+            ["Notifications!A2:F2", "Notifications!A3:F3"],
+            [item["range"] for item in data],
+        )
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,8 +5,11 @@
 Grant only these operations:
 
 - Sheets: read `Targets`, `State`, `Runs`, and `Notifications`; replace one `State`
-  or `Notifications` row; append `State`, `Runs`, and `Notifications` rows. Add
-  Outbox access only when that delivery mode is enabled.
+  or `Notifications` row; append `State`, `Runs`, and `Notifications` rows; and
+  atomically batch-replace all `Notifications` rows for one grouped Slack chunk.
+  The injected connector's `batch_replace_values` operation must either apply
+  every supplied range or none of them. Add Outbox access only when that delivery
+  mode is enabled.
 - Drive: find, upload, and download files only below the configured snapshot root.
   Grant delete only when retention cleanup is enabled.
 - Slack: send messages only to deployment-owned destinations mapped from

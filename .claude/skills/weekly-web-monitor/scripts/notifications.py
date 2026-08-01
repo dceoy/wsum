@@ -17,6 +17,10 @@ class NotificationStore(Protocol):
 
     def upsert_notification(self, notification: NotificationRecord) -> None: ...
 
+    def upsert_notifications_atomically(
+        self, notifications: Sequence[NotificationRecord]
+    ) -> None: ...
+
 
 class SlackConnector(Protocol):
     """Destination mapping and credentials remain inside this connector."""
@@ -149,6 +153,7 @@ def deliver_grouped(
         )
     outcomes: dict[str, DeliveryOutcome] = {}
     sendable: dict[str, list[NotificationEvent]] = {}
+    pending_records: list[NotificationRecord] = []
     for event in events:
         existing = store.get_notification(event.event_id)
         if existing and existing.status == "sent":
@@ -161,7 +166,7 @@ def deliver_grouped(
                 event.event_id, "pending", error_code="delivery_ambiguous"
             )
             continue
-        store.upsert_notification(
+        pending_records.append(
             NotificationRecord(
                 event.event_id,
                 event.target.target_id,
@@ -170,19 +175,24 @@ def deliver_grouped(
             )
         )
         sendable.setdefault(event.target.notification_group, []).append(event)
+    if pending_records:
+        store.upsert_notifications_atomically(pending_records)
 
     for group, group_events in sendable.items():
         chunks, oversized = _chunk_group(group_events, max_message_chars)
-        for event in oversized:
-            store.upsert_notification(
-                NotificationRecord(
-                    event.event_id,
-                    event.target.target_id,
-                    "failed",
-                    kind="change",
-                    last_error="notification_too_long",
-                )
+        failed_oversized = [
+            NotificationRecord(
+                event.event_id,
+                event.target.target_id,
+                "failed",
+                kind="change",
+                last_error="notification_too_long",
             )
+            for event in oversized
+        ]
+        if failed_oversized:
+            store.upsert_notifications_atomically(failed_oversized)
+        for event in oversized:
             outcomes[event.event_id] = DeliveryOutcome(
                 event.event_id, "failed", error_code="notification_too_long"
             )
@@ -197,16 +207,18 @@ def deliver_grouped(
                     )
             except ConfirmedDeliveryFailure as exc:
                 code = exc.code
-                for event in chunk:
-                    store.upsert_notification(
-                        NotificationRecord(
-                            event.event_id,
-                            event.target.target_id,
-                            "failed",
-                            kind="change",
-                            last_error=code,
-                        )
+                failed_records = [
+                    NotificationRecord(
+                        event.event_id,
+                        event.target.target_id,
+                        "failed",
+                        kind="change",
+                        last_error=code,
                     )
+                    for event in chunk
+                ]
+                store.upsert_notifications_atomically(failed_records)
+                for event in chunk:
                     outcomes[event.event_id] = DeliveryOutcome(
                         event.event_id, "failed", error_code=code
                     )
@@ -222,16 +234,32 @@ def deliver_grouped(
                     )
                 continue
             now = utc_now()
-            for event in chunk:
-                store.upsert_notification(
-                    NotificationRecord(
-                        event.event_id,
-                        event.target.target_id,
-                        "sent",
-                        notified_at=now,
-                        kind="change",
-                    )
+            sent_records = [
+                NotificationRecord(
+                    event.event_id,
+                    event.target.target_id,
+                    "sent",
+                    notified_at=now,
+                    kind="change",
                 )
+                for event in chunk
+            ]
+            try:
+                store.upsert_notifications_atomically(sent_records)
+            except Exception:
+                # Slack accepted the complete chunk, but no per-event sent state
+                # was committed. The store's atomic batch contract guarantees
+                # that every event remains pending instead of leaving a partial
+                # group that cannot be reconciled consistently.
+                for event in chunk:
+                    outcomes[event.event_id] = DeliveryOutcome(
+                        event.event_id,
+                        "pending",
+                        delivery_ref=delivery_ref,
+                        error_code="delivery_ambiguous",
+                    )
+                continue
+            for event in chunk:
                 outcomes[event.event_id] = DeliveryOutcome(
                     event.event_id, "sent", delivery_ref=delivery_ref
                 )

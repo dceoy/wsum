@@ -80,6 +80,16 @@ class SheetsConnector(Protocol):
         value_input_option: str,
     ) -> None: ...
 
+    def batch_replace_values(
+        self,
+        spreadsheet_id: str,
+        data: Sequence[Mapping[str, Any]],
+        *,
+        value_input_option: str,
+    ) -> None:
+        """Atomically replace every range in ``data`` or apply none of them."""
+        ...
+
 
 def _normalize_table(values: Sequence[Sequence[Any]], sheet: str) -> list[list[Any]]:
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
@@ -383,5 +393,35 @@ class SheetsStore:
             self._spreadsheet_id,
             payload["range"],
             payload["values"],
+            value_input_option="RAW",
+        )
+
+    def upsert_notifications_atomically(
+        self, notifications: Sequence[NotificationRecord]
+    ) -> None:
+        if not notifications:
+            return
+        event_ids = [item.event_id for item in notifications]
+        if len(event_ids) != len(set(event_ids)):
+            raise MonitorError(
+                "notification_invalid", "notification batch contains duplicate IDs"
+            )
+        existing = load_notifications(
+            self._connector.read_values(self._spreadsheet_id, "Notifications!A:F")
+        )
+        next_row = max((row for row, _ in existing.values()), default=1) + 1
+        data: list[dict[str, Any]] = []
+        for notification in notifications:
+            current = existing.get(notification.event_id)
+            if current:
+                row_number = current[0]
+            else:
+                row_number = next_row
+                next_row += 1
+            payload = upsert_notification_payload(notification, row_number)
+            data.append({"range": payload["range"], "values": payload["values"]})
+        self._connector.batch_replace_values(
+            self._spreadsheet_id,
+            data,
             value_input_option="RAW",
         )
