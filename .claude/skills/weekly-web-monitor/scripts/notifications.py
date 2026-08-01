@@ -156,7 +156,7 @@ def deliver_grouped(
     pending_records: list[NotificationRecord] = []
     for event in events:
         existing = store.get_notification(event.event_id)
-        if existing and existing.status == "sent":
+        if existing and existing.status in {"sent", "suppressed"}:
             outcomes[event.event_id] = DeliveryOutcome(event.event_id, "suppressed")
             continue
         if existing and existing.status == "pending":

@@ -376,6 +376,24 @@ def _link_destination(node: Node, attr: str, ctx: _LinkContext) -> str:
     return f"{canonical[:MAX_LINK_URL_CHARS]} [sha256:{digest}]"
 
 
+def _document_base_url(root: Node, fetched_url: str) -> str:
+    """Resolve the first declared document base against the fetched URL."""
+    if not fetched_url:
+        return ""
+    for node in iter_nodes(root):
+        if node.tag != "base" or "href" not in node.attrs:
+            continue
+        value = node.attrs.get("href", "").strip()
+        try:
+            canonical, _ = canonicalize_url(urljoin(fetched_url, value))
+        except ValueError as exc:
+            raise MonitorError(
+                "network_policy_denied", "document base URL is malformed"
+            ) from exc
+        return canonical
+    return fetched_url
+
+
 def _text_content(node: Node, excluded: set[Node], ctx: _LinkContext) -> str:
     if node in excluded or _is_noise(node):
         return ""
@@ -528,7 +546,8 @@ def normalize_html(
             )
         excluded.update(matches)
 
-    ctx = _LinkContext(base_url, MAX_LINK_ANNOTATIONS)
+    document_base_url = _document_base_url(parser.root, base_url)
+    ctx = _LinkContext(document_base_url, MAX_LINK_ANNOTATIONS)
     raw_lines: list[str] = []
     for root in roots:
         raw_lines.extend(_extract_lines(root, excluded, ctx))

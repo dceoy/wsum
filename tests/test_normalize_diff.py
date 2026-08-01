@@ -254,6 +254,41 @@ class NormalizationTests(unittest.TestCase):
         self.assertIn("https://example.com/apply-v1", before.text)
         self.assertIn("https://example.com/apply-v2", after.text)
 
+    def test_document_base_change_is_not_silently_missed(self) -> None:
+        before = normalize_content(
+            b'<base href="/v1/"><main><a href="apply">Apply</a></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<base href="/v2/"><main><a href="apply">Apply</a></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        self.assertIn("https://example.com/v1/apply", before.text)
+        self.assertIn("https://example.com/v2/apply", after.text)
+
+    def test_unsafe_document_base_fails_closed(self) -> None:
+        with self.assertRaisesRegex(MonitorError, "HTTP and HTTPS"):
+            normalize_content(
+                b'<base href="javascript:alert(1)"><main>Content</main>',
+                content_type="text/html",
+                base_url="https://example.com/page",
+            )
+
+    def test_first_declared_document_base_wins_even_when_empty(self) -> None:
+        result = normalize_content(
+            (
+                b'<base href=""><base href="/ignored/">'
+                b'<main><a href="apply">Apply</a></main>'
+            ),
+            content_type="text/html",
+            base_url="https://example.com/current/page",
+        )
+        self.assertIn("https://example.com/current/apply", result.text)
+        self.assertNotIn("https://example.com/ignored/apply", result.text)
+
     def test_long_link_destination_keeps_full_identity_in_digest(self) -> None:
         common_prefix = "/" + "a" * 350
         before = normalize_content(

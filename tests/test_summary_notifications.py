@@ -266,6 +266,25 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual("pending", outcome[event.event_id].status)
         self.assertEqual([], slack.messages)
 
+    def test_suppressed_delivery_is_preserved_and_not_retried(self) -> None:
+        item = target()
+        event = self._event(item, "e" * 64)
+        suppressed = NotificationRecord(
+            event.event_id,
+            item.target_id,
+            "suppressed",
+            last_error="operator_suppressed",
+        )
+        store = MemoryOperationalStore([item])
+        store.upsert_notification(suppressed)
+        slack = MemorySlackConnector()
+
+        outcome = deliver_grouped([event], store=store, connector=slack)
+
+        self.assertEqual("suppressed", outcome[event.event_id].status)
+        self.assertEqual(suppressed, store.notifications[event.event_id])
+        self.assertEqual([], slack.messages)
+
     def test_unknown_connector_failure_is_ambiguous(self) -> None:
         item = target()
         event = self._event(item, "d" * 64)
