@@ -261,6 +261,28 @@ class WeeklyMonitorRoutine:
     def _run_record_id(run_id: str, target: Target) -> str:
         return f"{run_id}:{target.target_id}"
 
+    @staticmethod
+    def _validate_run_id(run_id: object, targets: Sequence[Target]) -> str:
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or any(not char.isprintable() for char in run_id)
+        ):
+            raise MonitorError(
+                "invalid_record",
+                "run_id must be a non-empty string without control characters",
+            )
+        longest_target_id = max(
+            (len(target.target_id) for target in targets), default=-1
+        )
+        max_length = 200 if longest_target_id < 0 else 199 - longest_target_id
+        if len(run_id) > max_length:
+            raise MonitorError(
+                "invalid_record",
+                "run_id is too long for the enabled target IDs",
+            )
+        return run_id
+
     def _run_record(
         self,
         run_id: str,
@@ -350,7 +372,7 @@ class WeeklyMonitorRoutine:
             return
         with self._store_lock:
             existing = self.store.get_notification(event_id)
-            if existing and existing.status in {"sent", "pending"}:
+            if existing and existing.status in {"sent", "pending", "suppressed"}:
                 return
             self.store.upsert_notification(
                 NotificationRecord(
@@ -821,10 +843,15 @@ class WeeklyMonitorRoutine:
 
     def run(self, *, run_id: str | None = None) -> RoutineResult:
         started_at = utc_now()
-        active_run_id = run_id or (
-            datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(4)
-        )
         targets = self.store.load_enabled_targets()
+        candidate_run_id: object = run_id
+        if candidate_run_id is None:
+            candidate_run_id = (
+                datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+                + "-"
+                + secrets.token_hex(4)
+            )
+        active_run_id = self._validate_run_id(candidate_run_id, targets)
         config_digest = configuration_digest(
             {
                 "max_concurrency": self.config.max_concurrency,

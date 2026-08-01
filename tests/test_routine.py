@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 
 import support  # noqa: F401
@@ -15,7 +16,8 @@ from memory_adapters import (
     MemoryOperationalStore,
     MemorySlackConnector,
 )
-from models import Target
+from models import NotificationRecord, Target
+from notifications import failure_event_id
 from retry import RetryConfig
 from routine import RoutineConfig, WeeklyMonitorRoutine
 
@@ -159,6 +161,35 @@ class RoutineTests(unittest.TestCase):
         recovered, _ = self.run_cycle(response(1000), "run-4")
         self.assertEqual(1, recovered.metrics.baseline)
         self.assertEqual(0, self.store.states["one"].consecutive_failures)
+
+    def test_suppressed_failure_alert_is_preserved_and_not_retried(self) -> None:
+        transient = MonitorError("fetch_timeout", "fixture timeout", retryable=True)
+        for index in range(1, 3):
+            self.run_cycle(
+                transient,
+                f"run-{index}",
+                retry=RetryConfig(max_attempts=1),
+            )
+        now = datetime.now(UTC).isocalendar()
+        event_id = failure_event_id("one", f"{now.year}-W{now.week:02d}", threshold=3)
+        suppressed = NotificationRecord(
+            event_id,
+            "one",
+            "suppressed",
+            kind="failure",
+            last_error="operator_suppressed",
+        )
+        self.store.upsert_notification(suppressed)
+
+        result, _ = self.run_cycle(
+            transient,
+            "run-3",
+            retry=RetryConfig(max_attempts=1),
+        )
+
+        self.assertEqual(1, result.metrics.failed)
+        self.assertEqual([], self.slack.messages)
+        self.assertEqual(suppressed, self.store.notifications[event_id])
 
     def test_transient_state_read_failure_does_not_wipe_existing_baseline(
         self,
@@ -352,6 +383,36 @@ class RoutineTests(unittest.TestCase):
         self.assertEqual(1, second.metrics.baseline)
         self.assertEqual(0, second_fetcher.calls["one"])
         self.assertEqual(baseline_state, self.store.states["one"])
+
+    def test_invalid_caller_run_id_fails_before_target_side_effects(self) -> None:
+        longest = make_target("x" * 128)
+        store = MemoryOperationalStore([self.target, longest])
+        fetcher = FixtureFetcher(
+            {"one": response(1000), longest.target_id: response(1000)}
+        )
+        slack = MemorySlackConnector()
+        routine = WeeklyMonitorRoutine(
+            store=store,
+            snapshots=self.snapshots,
+            summary_client=EvidenceSummaryClient(),
+            slack=slack,
+            fetcher=fetcher,
+            audit_sink=store,
+            sleeper=lambda _: None,
+        )
+
+        invalid_run_ids = ("", "line\nbreak", "r" * 72, 123)
+        for invalid_run_id in invalid_run_ids:
+            with self.subTest(run_id=invalid_run_id):
+                with self.assertRaisesRegex(MonitorError, "run_id"):
+                    routine.run(run_id=invalid_run_id)  # type: ignore[arg-type]
+
+        self.assertEqual({}, dict(fetcher.calls))
+        self.assertEqual([], slack.messages)
+        self.assertEqual({}, store.states)
+        self.assertEqual({}, store.runs)
+        self.assertEqual({}, store.notifications)
+        self.assertEqual([], store.audit)
 
     def test_audit_sink_failure_does_not_change_primary_result(self) -> None:
         class FailingAudit:

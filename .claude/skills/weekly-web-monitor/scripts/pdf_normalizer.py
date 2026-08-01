@@ -82,7 +82,12 @@ def _scan_tokens(data: bytes) -> list[tuple[str, int, int]]:
                 )
             tokens.append(("literal_string", start, index))
             continue
-        if byte == 0x3C and (index + 1 >= length or data[index + 1] != 0x3C):
+        if byte == 0x3C and index + 1 < length and data[index + 1] == 0x3C:
+            # Skip both bytes of a dictionary opener so the second '<' is
+            # not misclassified as the start of a hex string.
+            index += 2
+            continue
+        if byte == 0x3C:
             # '<' hex string, but not the '<<' that opens a dictionary
             start = index
             index += 1
@@ -278,6 +283,69 @@ def _stream_filters(dictionary: bytes) -> list[bytes]:
     return [value]
 
 
+def _has_top_level_name_value(
+    dictionary: bytes, key: bytes, expected_value: bytes
+) -> bool:
+    """Match a direct name value in the stream's outer dictionary only."""
+    tokens = _scan_tokens(dictionary)
+    cursor = 0
+    dictionary_depth = 0
+    array_depth = 0
+    matched: bool | None = None
+    for kind, start, end in tokens:
+        while cursor < start:
+            pair = dictionary[cursor : cursor + 2]
+            if pair == b"<<":
+                dictionary_depth += 1
+                cursor += 2
+                continue
+            if pair == b">>":
+                dictionary_depth -= 1
+                cursor += 2
+                continue
+            if dictionary[cursor : cursor + 1] == b"[":
+                array_depth += 1
+            elif dictionary[cursor : cursor + 1] == b"]":
+                array_depth -= 1
+            cursor += 1
+        cursor = end
+        if kind != "name" or dictionary_depth != 1 or array_depth != 0:
+            continue
+        if dictionary[start:end] != key:
+            continue
+        if matched is not None:
+            raise MonitorError(
+                "pdf_malformed", "PDF stream dictionary repeats a classification key"
+            )
+        value_start = end
+        while value_start < len(dictionary):
+            if dictionary[value_start] in _PDF_WHITESPACE:
+                value_start += 1
+                continue
+            if dictionary[value_start] == 0x25:  # comment
+                while value_start < len(dictionary) and dictionary[value_start] not in (
+                    0x0A,
+                    0x0D,
+                ):
+                    value_start += 1
+                continue
+            break
+        value_end = value_start + len(expected_value)
+        if dictionary[value_start:value_end] != expected_value:
+            matched = False
+            continue
+        matched = value_end == len(dictionary) or (
+            dictionary[value_end] in _NAME_TERMINATORS
+        )
+    return matched is True
+
+
+def _is_image_stream(dictionary: bytes) -> bool:
+    return _has_top_level_name_value(
+        dictionary, b"/Type", b"/XObject"
+    ) and _has_top_level_name_value(dictionary, b"/Subtype", b"/Image")
+
+
 def _stream_dictionary(
     pdf: bytes, object_starts: list[int], stream_start: int
 ) -> bytes:
@@ -330,8 +398,9 @@ def _resolve_length(
     return int(match.group(1))
 
 
-def _stream_data(pdf: bytes, limit: int) -> list[bytes]:
+def _stream_data(pdf: bytes, limit: int) -> tuple[list[bytes], bool]:
     streams: list[bytes] = []
+    has_image_stream = False
     total = 0
     object_starts, object_by_id = _object_offsets(pdf)
     for match in STREAM_START_RE.finditer(pdf):
@@ -365,6 +434,13 @@ def _stream_data(pdf: bytes, limit: int) -> list[bytes]:
                 "PDF stream /Length does not align with endstream",
             )
         stream = pdf[data_start:data_end]
+        if _is_image_stream(dictionary):
+            # PdfReader's text extractor deliberately skips Image XObjects.
+            # Keep their encoded bytes under the whole-document input cap,
+            # but do not apply text/content filter policy or decompression
+            # accounting to image data that will never be interpreted as text.
+            has_image_stream = True
+            continue
         filters = _stream_filters(dictionary)
         if filters == [b"/FlateDecode"]:
             stream = _bounded_decompress(stream, limit - total)
@@ -380,7 +456,7 @@ def _stream_data(pdf: bytes, limit: int) -> list[bytes]:
                 "PDF content streams exceed the size limit",
             )
         streams.append(stream)
-    return streams
+    return streams, has_image_stream
 
 
 def _extract_font_aware_text(
@@ -429,11 +505,11 @@ def extract_pdf_text(
     if len(re.findall(rb"\bobj\b", pdf)) > max_objects:
         raise MonitorError("pdf_object_limit", "PDF object count exceeds the limit")
 
-    # Validate every stream and bound its aggregate decoded size before the
-    # font-aware parser sees it. This preserves the existing fail-closed
-    # filter policy and prevents compressed streams from bypassing the
-    # decompression budget inside the general PDF reader.
-    streams = _stream_data(pdf, max_decompressed_bytes)
+    # Validate every text/content stream and bound its aggregate decoded size
+    # before the font-aware parser sees it. Image XObjects are skipped because
+    # PdfReader's text extractor does not decode them; their encoded bytes are
+    # still covered by the whole-document input cap.
+    streams, has_image_stream = _stream_data(pdf, max_decompressed_bytes)
     uses_fonts = any(
         marker in pdf
         for marker in (
@@ -464,7 +540,7 @@ def extract_pdf_text(
     ]
     lines = [line for line in lines if line]
     if not lines:
-        if b"/Subtype /Image" in pdf:
+        if has_image_stream:
             raise MonitorError("pdf_image_only", "image-only PDFs are not supported")
         raise MonitorError("pdf_no_text", "PDF contains no extractable text")
 

@@ -606,9 +606,87 @@ class NormalizationTests(unittest.TestCase):
         encrypted = b"%PDF-1.4\n1 0 obj << /Encrypt 2 0 R >> endobj\n%%EOF"
         with self.assertRaisesRegex(MonitorError, "encrypted"):
             normalize_content(encrypted, content_type="application/pdf")
-        image_only = _pdf(_pdf_stream(1, b"abc", extra=b"/Subtype /Image"))
+        image_only = _pdf(
+            _pdf_stream(1, b"abc", extra=b"/Type /XObject /Subtype /Image")
+        )
         with self.assertRaisesRegex(MonitorError, "image-only"):
             normalize_content(image_only, content_type="application/pdf")
+
+    def test_generated_text_pdf_with_filtered_images_is_extracted(self) -> None:
+        from io import BytesIO
+
+        from pypdf import PdfWriter
+        from pypdf.generic import (
+            DecodedStreamObject,
+            DictionaryObject,
+            NameObject,
+            NumberObject,
+            StreamObject,
+        )
+
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=300, height=200)
+        font = DictionaryObject(
+            {
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NameObject("/Helvetica"),
+                NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+            }
+        )
+        resources = DictionaryObject(
+            {
+                NameObject("/Font"): DictionaryObject(
+                    {NameObject("/F1"): writer._add_object(font)}
+                )
+            }
+        )
+        xobjects = DictionaryObject()
+        for index, filter_name in enumerate(("/DCTDecode", "/JPXDecode"), start=1):
+            image = StreamObject()
+            image._data = b"bounded encoded image fixture"
+            image.update(
+                {
+                    NameObject("/Type"): NameObject("/XObject"),
+                    NameObject("/Subtype"): NameObject("/Image"),
+                    NameObject("/Width"): NumberObject(1),
+                    NameObject("/Height"): NumberObject(1),
+                    NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
+                    NameObject("/BitsPerComponent"): NumberObject(8),
+                    NameObject("/Filter"): NameObject(filter_name),
+                }
+            )
+            xobjects[NameObject(f"/Im{index}")] = writer._add_object(image)
+        resources[NameObject("/XObject")] = xobjects
+        page[NameObject("/Resources")] = resources
+        content = DecodedStreamObject()
+        content.set_data(b"BT /F1 12 Tf 36 120 Td (Text with images) Tj ET")
+        page[NameObject("/Contents")] = writer._add_object(content)
+        output = BytesIO()
+        writer.write(output)
+
+        result = normalize_content(output.getvalue(), content_type="application/pdf")
+
+        self.assertIn("Text with images", result.text)
+
+    def test_pdf_image_classification_ignores_nested_and_string_markers(
+        self,
+    ) -> None:
+        fake_image_markers = (
+            b"/Note (/Type /XObject /Subtype /Image)",
+            b"/Metadata << /Type /XObject /Subtype /Image >>",
+        )
+        for marker in fake_image_markers:
+            with self.subTest(marker=marker):
+                pdf = _pdf(
+                    _pdf_stream(
+                        1,
+                        b"28537461626c65207465787429",
+                        extra=marker + b" /Filter /ASCIIHexDecode",
+                    )
+                )
+                with self.assertRaisesRegex(MonitorError, "filter"):
+                    normalize_content(pdf, content_type="application/pdf")
 
     def test_pdf_tj_array_hex_strings_are_not_silently_dropped(self) -> None:
         # TJ arrays commonly mix literal (...) runs with hex-encoded <...>
