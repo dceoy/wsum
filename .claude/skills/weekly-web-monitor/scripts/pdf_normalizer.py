@@ -403,7 +403,8 @@ def _stream_data(pdf: bytes, limit: int) -> tuple[list[bytes], bool]:
     has_image_stream = False
     total = 0
     object_starts, object_by_id = _object_offsets(pdf)
-    for match in STREAM_START_RE.finditer(pdf):
+    cursor = 0
+    while match := STREAM_START_RE.search(pdf, cursor):
         data_start = match.end()
         dictionary = _stream_dictionary(pdf, object_starts, match.start())
         length_match = LENGTH_RE.search(dictionary)
@@ -428,11 +429,18 @@ def _stream_data(pdf: bytes, limit: int) -> tuple[list[bytes], bool]:
         # cannot be trusted, and scanning ahead for the next literal
         # "endstream" bytes instead would reintroduce the exact
         # false-boundary risk this /Length-based parse exists to avoid.
-        if not re.match(rb"\r?\n?endstream\b", pdf[data_end : data_end + 16]):
+        end_match = re.match(
+            rb"\r?\n?endstream\b", pdf[data_end : data_end + 16]
+        )
+        if end_match is None:
             raise MonitorError(
                 "pdf_malformed",
                 "PDF stream /Length does not align with endstream",
             )
+        # Search only after this validated stream boundary. Raw stream bytes
+        # can legally contain the token ``stream`` and must not be parsed as
+        # another object stream opener.
+        cursor = data_end + end_match.end()
         stream = pdf[data_start:data_end]
         if _is_image_stream(dictionary):
             # PdfReader's text extractor deliberately skips Image XObjects.

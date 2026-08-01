@@ -817,6 +817,16 @@ class NormalizationTests(unittest.TestCase):
         self.assertIn("New edit", after.text)
         self.assertNotEqual(before.normalized_hash, after.normalized_hash)
 
+    def test_pdf_stream_keyword_inside_a_stream_body_is_not_rescanned(self) -> None:
+        body = b"BT (marker\nstream\ninside a string) Tj ET"
+
+        normalized = normalize_content(
+            _pdf(_pdf_stream(1, body)),
+            content_type="application/pdf",
+        )
+
+        self.assertIn("stream", normalized.text)
+
     def test_pdf_unterminated_string_fails_closed(self) -> None:
         pdf = _pdf(_pdf_stream(1, b"BT (unterminated Tj ET"))
         with self.assertRaisesRegex(MonitorError, "pdf_malformed|malformed"):
