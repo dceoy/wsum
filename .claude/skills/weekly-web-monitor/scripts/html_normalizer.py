@@ -345,7 +345,9 @@ def _is_noise(node: Node) -> bool:
     tokens = f"{node.attrs.get('id', '')} {node.attrs.get('class', '')}"
     if NOISE_TOKEN_RE.search(tokens):
         return True
-    return bool(HEADER_NOISE_TOKEN_RE.search(tokens)) and not _has_content_ancestor(node)
+    return bool(HEADER_NOISE_TOKEN_RE.search(tokens)) and not _has_content_ancestor(
+        node
+    )
 
 
 def _link_destination(node: Node, attr: str, ctx: _LinkContext) -> str:
@@ -443,6 +445,19 @@ def _extract_lines(root: Node, excluded: set[Node], ctx: _LinkContext) -> list[s
             "summary",
         }:
             text = _clean_line(_text_content(node, excluded, ctx))
+            if text:
+                lines.append(text)
+            return
+        if node.tag == "a":
+            # Parent text extraction annotates child anchors, but a directly
+            # visited anchor (for example, an immediate child of <main> or an
+            # include_selector root) has no parent extraction step. Annotate
+            # its own destination here so a href-only change cannot disappear
+            # from the normalized representation.
+            text = _clean_line(_text_content(node, excluded, ctx))
+            destination = _link_destination(node, "href", ctx)
+            if destination:
+                text = f"{text} [{destination}]".strip()
             if text:
                 lines.append(text)
             return

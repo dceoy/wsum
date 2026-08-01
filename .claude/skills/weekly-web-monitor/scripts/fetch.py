@@ -169,11 +169,15 @@ def _do_handshake_with_deadline(sock: ssl.SSLSocket, deadline: float) -> None:
             except ssl.SSLWantReadError:
                 readable, _, _ = select.select([sock], [], [], remaining)
                 if not readable:
-                    raise TimeoutError("TLS handshake exceeded the fetch deadline")
+                    raise TimeoutError(
+                        "TLS handshake exceeded the fetch deadline"
+                    ) from None
             except ssl.SSLWantWriteError:
                 _, writable, _ = select.select([], [sock], [], remaining)
                 if not writable:
-                    raise TimeoutError("TLS handshake exceeded the fetch deadline")
+                    raise TimeoutError(
+                        "TLS handshake exceeded the fetch deadline"
+                    ) from None
     finally:
         sock.settimeout(original_timeout)
 
@@ -690,6 +694,12 @@ def fetch_url(
         except TimeoutError as exc:
             raise MonitorError(
                 "fetch_timeout", "response read exceeded its timeout", retryable=True
+            ) from exc
+        except (ssl.SSLError, OSError) as exc:
+            raise MonitorError(
+                "fetch_connection_failed",
+                "connection failed while reading the response body",
+                retryable=True,
             ) from exc
         except http.client.HTTPException as exc:
             raise MonitorError(

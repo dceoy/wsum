@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import socket
 import ssl
+import struct
 import threading
 import time
 import unittest
@@ -159,6 +160,46 @@ class _RealTruncatedServer:
                 conn.sendall(self._sent_body)
             except OSError:
                 return
+
+    def close(self) -> None:
+        self._listener.close()
+
+
+class _RealResetServer:
+    """A real HTTP peer that resets the connection during a response body."""
+
+    def __init__(self, sent_body: bytes) -> None:
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self.port = self._listener.getsockname()[1]
+        self._sent_body = sent_body
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        try:
+            conn, _ = self._listener.accept()
+        except OSError:
+            return
+        try:
+            conn.recv(65_536)
+            header = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/html\r\n"
+                f"Content-Length: {len(self._sent_body) + 1_024}\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode("ascii")
+            conn.sendall(header + self._sent_body)
+            conn.setsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_LINGER,
+                struct.pack("ii", 1, 0),
+            )
+        except OSError:
+            pass
+        finally:
+            conn.close()
 
     def close(self) -> None:
         self._listener.close()
@@ -601,6 +642,23 @@ class FetchTests(unittest.TestCase):
                     config=FetchConfig(timeout_seconds=1.0, max_total_seconds=2.0),
                 )
         self.assertEqual("malformed_response", raised.exception.code)
+        self.assertTrue(raised.exception.retryable)
+
+    def test_real_socket_body_reset_is_retryable(self) -> None:
+        server = _RealResetServer(sent_body=b"partial body")
+        self.addCleanup(server.close)
+        real_connection = http.client.HTTPConnection(
+            "127.0.0.1", server.port, timeout=1.0
+        )
+        self.addCleanup(real_connection.close)
+        with patch.object(fetch, "_open_connection", return_value=real_connection):
+            with self.assertRaises(MonitorError) as raised:
+                fetch_url(
+                    "http://example.com/",
+                    resolver=support.public_resolver,
+                    config=FetchConfig(timeout_seconds=1.0, max_total_seconds=2.0),
+                )
+        self.assertEqual("fetch_connection_failed", raised.exception.code)
         self.assertTrue(raised.exception.retryable)
 
     def test_real_socket_slow_trickle_is_stopped_by_the_total_deadline(self) -> None:

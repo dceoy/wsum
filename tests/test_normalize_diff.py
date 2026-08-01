@@ -124,13 +124,13 @@ class NormalizationTests(unittest.TestCase):
         # an <article> is the same content sub-heading as a bare <header>
         # nested there -- the class token must not re-drop it.
         before = normalize_content(
-            b"<html><body><article><header class=\"article-header\">"
+            b'<html><body><article><header class="article-header">'
             b"<h1>Old status</h1></header><p>Body text.</p></article>"
             b"</body></html>",
             content_type="text/html",
         )
         after = normalize_content(
-            b"<html><body><article><header class=\"article-header\">"
+            b'<html><body><article><header class="article-header">'
             b"<h1>New status</h1></header><p>Body text.</p></article>"
             b"</body></html>",
             content_type="text/html",
@@ -140,7 +140,7 @@ class NormalizationTests(unittest.TestCase):
         # A page-level "site-header" class remains boilerplate and is
         # still stripped.
         page_header = normalize_content(
-            b"<html><body><header class=\"site-header\">Site Nav</header>"
+            b'<html><body><header class="site-header">Site Nav</header>'
             b"<main><p>Body text.</p></main></body></html>",
             content_type="text/html",
         )
@@ -163,10 +163,8 @@ class NormalizationTests(unittest.TestCase):
     ) -> None:
         # A server-declared charset we do not allow-list (or mislabel) must
         # not turn a previously-decodable BOM'd body into a hard failure.
-        body = codecs.BOM_UTF8 + "Notice".encode()
-        result = normalize_content(
-            body, content_type="text/plain", charset="utf-16"
-        )
+        body = codecs.BOM_UTF8 + b"Notice"
+        result = normalize_content(body, content_type="text/plain", charset="utf-16")
         self.assertEqual("Notice", result.text)
 
     def test_unsupported_declared_charset_fails_closed_without_rescue(
@@ -233,6 +231,21 @@ class NormalizationTests(unittest.TestCase):
         )
         after = normalize_content(
             b'<main><p><a href="/apply-v2">Apply</a></p></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        self.assertIn("https://example.com/apply-v1", before.text)
+        self.assertIn("https://example.com/apply-v2", after.text)
+
+    def test_standalone_link_destination_change_is_not_silently_missed(self) -> None:
+        before = normalize_content(
+            b'<main><a href="/apply-v1">Apply</a></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<main><a href="/apply-v2">Apply</a></main>',
             content_type="text/html",
             base_url="https://example.com/page",
         )
@@ -342,9 +355,7 @@ class NormalizationTests(unittest.TestCase):
             b"<main>Applications are now closed<div>Details</div></main>",
             content_type="text/html",
         )
-        self.assertNotEqual(
-            open_before.normalized_hash, closed_before.normalized_hash
-        )
+        self.assertNotEqual(open_before.normalized_hash, closed_before.normalized_hash)
         self.assertIn("Applications are now closed", closed_before.text)
         self.assertIn("Details", closed_before.text)
 
@@ -356,9 +367,7 @@ class NormalizationTests(unittest.TestCase):
             b"<main><div>Details</div>Applications are now closed</main>",
             content_type="text/html",
         )
-        self.assertNotEqual(
-            open_after.normalized_hash, closed_after.normalized_hash
-        )
+        self.assertNotEqual(open_after.normalized_hash, closed_after.normalized_hash)
         self.assertIn("Applications are now closed", closed_after.text)
         self.assertIn("Details", closed_after.text)
 
@@ -790,6 +799,22 @@ class NormalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(MonitorError, "encoding"):
             normalize_content(named_encoding, content_type="application/pdf")
 
+        # A simple font can omit /Encoding and use the built-in encoding
+        # selected by /BaseFont. The same raw character code can therefore
+        # render differently under Helvetica and Symbol even though this
+        # extractor's Latin-1 decode would otherwise hash both as "A".
+        for base_font in (b"Helvetica", b"Symbol"):
+            with self.subTest(base_font=base_font):
+                built_in_encoding = (
+                    b"%PDF-1.4\n1 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /"
+                    + base_font
+                    + b" >>\nendobj\n"
+                    + _pdf_stream(2, b"BT /F1 12 Tf <41> Tj ET")
+                    + b"%%EOF"
+                )
+                with self.assertRaisesRegex(MonitorError, "encoding"):
+                    normalize_content(built_in_encoding, content_type="application/pdf")
+
         # A composite (/Type0) font always routes character codes through a
         # CMap, regardless of /Encoding/ToUnicode presence.
         composite_font = (
@@ -810,6 +835,18 @@ class NormalizationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(MonitorError, "encoding"):
             normalize_content(object_stream, content_type="application/pdf")
+
+    def test_xhtml_with_xml_declaration_is_detected_as_html(self) -> None:
+        result = normalize_content(
+            (
+                b'<?xml version="1.0" encoding="UTF-8"?>\n'
+                b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                b"<main><p>Application open</p></main></body></html>"
+            ),
+            content_type="application/xhtml+xml",
+        )
+        self.assertEqual("html", result.kind)
+        self.assertIn("Application open", result.text)
 
 
 class DiffTests(unittest.TestCase):

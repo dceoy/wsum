@@ -292,9 +292,7 @@ def _stream_dictionary(
     dictionary = pdf[object_starts[index] : stream_start]
     stripped = dictionary.strip()
     if not (stripped.startswith(b"<<") and stripped.endswith(b">>")):
-        raise MonitorError(
-            "pdf_malformed", "PDF stream dictionary could not be parsed"
-        )
+        raise MonitorError("pdf_malformed", "PDF stream dictionary could not be parsed")
     return dictionary
 
 
@@ -303,9 +301,7 @@ def _object_offsets(pdf: bytes) -> tuple[list[int], dict[tuple[int, int], int]]:
     by_id: dict[tuple[int, int], int] = {}
     for match in OBJECT_HEADER_RE.finditer(pdf):
         starts.append(match.end())
-        by_id.setdefault(
-            (int(match.group(1)), int(match.group(2))), match.end()
-        )
+        by_id.setdefault((int(match.group(1)), int(match.group(2))), match.end())
     return starts, by_id
 
 
@@ -340,9 +336,7 @@ def _stream_data(pdf: bytes, limit: int) -> list[bytes]:
         dictionary = _stream_dictionary(pdf, object_starts, match.start())
         length_match = LENGTH_RE.search(dictionary)
         if length_match is None:
-            raise MonitorError(
-                "pdf_malformed", "PDF stream dictionary has no /Length"
-            )
+            raise MonitorError("pdf_malformed", "PDF stream dictionary has no /Length")
         if length_match.group(2) is not None:
             length = _resolve_length(
                 pdf,
@@ -403,6 +397,7 @@ def extract_pdf_text(
         b"/ToUnicode" in pdf
         or b"/Differences" in pdf
         or b"/Encoding" in pdf
+        or b"/BaseFont" in pdf
         or b"/Type0" in pdf
         or b"/ObjStm" in pdf
     ):
@@ -410,15 +405,15 @@ def extract_pdf_text(
         # are only text once resolved through the active font's /Encoding
         # (any named encoding such as /WinAnsiEncoding or /MacRomanEncoding,
         # not only a /Differences remap) and any /ToUnicode CMap. Composite
-        # (/Type0) fonts always route codes through a CMap too. Compressed
-        # object streams (/ObjStm) can hide any of these declarations from
-        # this raw marker scan entirely, since font dictionaries stored
-        # there never appear as literal bytes in the file. This extractor
-        # decodes raw string bytes directly (UTF-16BE/Latin-1) without
-        # resolving any of that, so an active encoding that isn't provably
-        # byte-identity-safe can change what a viewer renders while every
-        # code byte -- and this extractor's hash -- stays identical. Reject
-        # rather than silently hash the wrong text.
+        # (/Type0) fonts always route codes through a CMap too. A simple font
+        # may omit /Encoding and instead use the built-in encoding selected by
+        # /BaseFont, so the absence of the three mapping markers above is not
+        # proof that character codes are byte-identity-safe. Compressed object
+        # streams (/ObjStm) can hide any of these declarations from this raw
+        # marker scan entirely, since font dictionaries stored there never
+        # appear as literal bytes in the file. This extractor decodes raw
+        # string bytes directly (UTF-16BE/Latin-1) without resolving the active
+        # font. Reject rather than silently hash the wrong text.
         raise MonitorError(
             "pdf_unsupported_encoding",
             "PDF uses font encodings that require CMap resolution",

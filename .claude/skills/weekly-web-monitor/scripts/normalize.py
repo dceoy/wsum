@@ -48,7 +48,11 @@ def sniff_content_kind(body: bytes) -> str:
         return "pdf"
     if re.search(rb"<(?:\w+:)?(?:rss|feed|rdf)\b", lowered):
         return "feed"
-    if lowered.startswith(b"<?xml"):
+    xml_declaration = re.match(rb"<\?xml\b[^>]*\?>", lowered)
+    if xml_declaration is not None:
+        after_declaration = lowered[xml_declaration.end() :].lstrip()
+        if re.match(rb"<(?:!doctype\s+html|(?:\w+:)?html)\b", after_declaration):
+            return "html"
         return "xml"
     if re.search(
         rb"<(?:!doctype\s+html|html|head|body|main|article|section|div|h[1-6]|p|table)\b",
@@ -130,9 +134,7 @@ def _decode_text(body: bytes, charset: str = "") -> str:
         return _decode_strict(body, "utf-16")
     match = CHARSET_RE.search(body[:4_096])
     if match is None and declared_unsupported:
-        raise MonitorError(
-            "unsupported_charset", "document charset is unsupported"
-        )
+        raise MonitorError("unsupported_charset", "document charset is unsupported")
     encoding = match.group(1).decode("ascii") if match else "utf-8"
     try:
         codec = codecs.lookup(encoding)
