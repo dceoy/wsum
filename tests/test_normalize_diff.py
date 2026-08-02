@@ -275,6 +275,36 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertNotIn("Site Nav", page_header.text)
 
+    def test_share_price_business_content_is_not_dropped_as_noise(self) -> None:
+        # NOISE_TOKEN_RE used to treat any class/id token containing "share"
+        # as boilerplate, so a business widget like class="share-price"
+        # (and BEM-style compounds such as "product-share-price") was
+        # dropped wholesale -- a value-only change then left the normalized
+        # text and hash unchanged.
+        before = normalize_content(
+            b'<html><body><main><div class="share-price">100</div>'
+            b'<div class="product-share-price">100</div>'
+            b"</main></body></html>",
+            content_type="text/html",
+        )
+        after = normalize_content(
+            b'<html><body><main><div class="share-price">105</div>'
+            b'<div class="product-share-price">105</div>'
+            b"</main></body></html>",
+            content_type="text/html",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        self.assertIn("105", after.text)
+        # A genuine social-share widget remains boilerplate and is still
+        # stripped.
+        share_widget = normalize_content(
+            b'<html><body><main><p>Body text.</p>'
+            b'<div class="social-share">Share this</div>'
+            b"</main></body></html>",
+            content_type="text/html",
+        )
+        self.assertNotIn("Share this", share_widget.text)
+
     def test_http_charset_is_used_before_bom_or_body_sniffing(self) -> None:
         body = "価格改定のお知らせ".encode("shift_jis")
         # Without the declared charset, the shift_jis bytes are not valid
@@ -695,6 +725,93 @@ class NormalizationTests(unittest.TestCase):
         self.assertIn("Stable teaser", first)
         self.assertIn("Original full article body", first)
         self.assertNotEqual(first, second)
+
+    def test_feed_content_destination_only_change_is_not_silently_missed(
+        self,
+    ) -> None:
+        # The feed HTML cleaner used to record only text nodes, so a common
+        # RSS body like <a href="...">Apply</a> normalized to "Apply"
+        # regardless of the href -- a stable guid/title/link plus a
+        # destination-only href change left the entry hash unchanged.
+        def render(href: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
+            <channel>
+              <item>
+                <guid>job-1</guid>
+                <title>Job posting</title>
+                <link>https://example.com/job-1</link>
+                <description>&lt;a href="{href}"&gt;Apply&lt;/a&gt;</description>
+                <content:encoded>
+                  &lt;a href="{href}"&gt;Apply&lt;/a&gt;
+                </content:encoded>
+              </item>
+            </channel></rss>""".encode()
+            text, _ = normalize_feed(xml)
+            return text
+
+        before = render("https://example.com/apply-v1")
+        after = render("https://example.com/apply-v2")
+        self.assertNotEqual(before, after)
+        self.assertIn("Apply [https://example.com/apply-v1", before)
+
+    def test_atom_xhtml_content_destination_only_change_is_not_missed(
+        self,
+    ) -> None:
+        # Atom permits inline markup as real XML children (<content
+        # type="xhtml"><div><a href="...">...</a></div></content>), not
+        # just HTML escaped into text -- ElementTree's itertext() drops
+        # attributes, so a real <a> element's href needs its own structural
+        # walk rather than relying on the escaped-text HTML parser.
+        def render(href: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <feed xmlns="http://www.w3.org/2005/Atom">
+              <entry>
+                <id>1</id><title>Post</title>
+                <content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">
+                <a href="{href}">Apply</a></div></content>
+              </entry>
+            </feed>""".encode()
+            text, _ = normalize_feed(xml)
+            return text
+
+        before = render("https://example.com/apply-v1")
+        after = render("https://example.com/apply-v2")
+        self.assertNotEqual(before, after)
+        self.assertIn("Apply [https://example.com/apply-v1", before)
+
+    def test_content_link_budget_covers_an_ordinary_large_feed(self) -> None:
+        # The link-destination annotation budget is shared across the whole
+        # feed (the feed is normalized into one stored/hashed/diffed blob,
+        # so the aggregate output is what must stay bounded), but it must
+        # still be sized generously enough that an ordinary large feed with
+        # one link per entry, up to the default max_entries, never trips it.
+        entries = "".join(
+            f"<item><guid>{i}</guid><title>Post {i}</title>"
+            f'<description>&lt;a href="https://example.com/{i}"&gt;'
+            "Link&lt;/a&gt;</description></item>"
+            for i in range(1_000)
+        )
+        xml = f"<rss><channel>{entries}</channel></rss>".encode()
+        text, metadata = normalize_feed(xml)
+        self.assertEqual("1000", metadata["entry_count"])
+        self.assertIn("https://example.com/0", text)
+        self.assertIn("https://example.com/999", text)
+
+    def test_content_link_budget_fails_closed_when_exhausted(self) -> None:
+        # A feed with far more embedded link destinations than any
+        # legitimate feed would carry must fail closed instead of producing
+        # unbounded normalized output.
+        links = "".join(
+            f'&lt;a href="https://example.com/{i}"&gt;Link{i}&lt;/a&gt; '
+            for i in range(6_000)
+        )
+        xml = (
+            "<rss><channel><item><guid>1</guid><title>Post</title>"
+            f"<description>{links}</description></item></channel></rss>"
+        ).encode()
+        with self.assertRaisesRegex(MonitorError, "feed_too_large"):
+            normalize_feed(xml)
 
     def test_atom_prefers_alternate_link_over_self(self) -> None:
         def render(destination: str) -> str:

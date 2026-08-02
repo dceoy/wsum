@@ -7,13 +7,29 @@ import re
 import unicodedata
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from errors import MonitorError
 from models import validate_http_url
 from network_policy import canonicalize_url
 
 MAX_STABLE_ID_CHARS = 1_000
+
+# Bound on link-destination annotations embedded in feed content fields
+# (see ``_content_link_destination``), shared across the whole feed rather
+# than per entry: the feed is normalized into a single stored/hashed/diffed
+# blob, so the aggregate annotation output is what must stay bounded, not
+# just any one entry's contribution. Sized above the default max_entries
+# (1,000) so an ordinary feed with one link per entry never trips it.
+MAX_CONTENT_LINK_ANNOTATIONS = 5_000
+MAX_CONTENT_LINK_URL_CHARS = 300
+
+
+class _ContentLinkBudget:
+    __slots__ = ("remaining",)
+
+    def __init__(self, remaining: int) -> None:
+        self.remaining = remaining
 
 
 def _local_name(tag: str) -> str:
@@ -40,6 +56,121 @@ def _clean(value: str) -> str:
     ).strip()
 
 
+def _content_link_destination(
+    href: str, base_url: str, budget: _ContentLinkBudget
+) -> str:
+    # A destination-only change inside embedded HTML (e.g. an <a href> in a
+    # <description>/<content:encoded> body) must not be silently absorbed
+    # into an identical normalized text/hash just because the anchor's
+    # visible text is unchanged. Mirrors html_normalizer._link_destination:
+    # resolve against the entry's own validated link when available, reject
+    # credential-bearing destinations via canonicalize_url, and omit (rather
+    # than fail closed on) destinations that cannot be resolved to an
+    # absolute HTTP(S) URL, same as when no base is available there.
+    value = href.strip()
+    if not value or value.startswith("#"):
+        return ""
+    resolved = urljoin(base_url, value) if base_url else value
+    try:
+        canonical, _ = canonicalize_url(resolved)
+    except MonitorError:
+        try:
+            scheme = urlsplit(resolved).scheme.lower()
+        except ValueError:
+            scheme = resolved.partition(":")[0].lower()
+        if scheme not in {"http", "https"}:
+            return ""
+        raise
+    if budget.remaining <= 0:
+        raise MonitorError(
+            "feed_too_large", "feed entry has too many link destinations"
+        )
+    budget.remaining -= 1
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"{canonical[:MAX_CONTENT_LINK_URL_CHARS]} [sha256:{digest}]"
+
+
+class _ContentTextParser(HTMLParser):
+    """Like ``_TextParser`` but also annotates anchor destinations.
+
+    RSS/Atom description/content fields commonly embed HTML as escaped
+    text; ``_TextParser`` strips that markup down to visible text only, so
+    a change confined to an <a href> (e.g. a link target bumped from
+    ``/apply-v1`` to ``/apply-v2``) with unchanged link text would
+    otherwise vanish from the normalized representation.
+    """
+
+    def __init__(self, base_url: str, budget: _ContentLinkBudget) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._base_url = base_url
+        self._budget = budget
+        self._anchor_hrefs: list[str | None] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() == "a":
+            href = next(
+                (value for name, value in attrs if name.lower() == "href"), None
+            )
+            self._anchor_hrefs.append(href)
+
+    def handle_startendtag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag.lower() == "a":
+            self._close_anchor()
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "a" and self._anchor_hrefs:
+            self._close_anchor()
+
+    def _close_anchor(self) -> None:
+        href = self._anchor_hrefs.pop()
+        if not href:
+            return
+        destination = _content_link_destination(href, self._base_url, self._budget)
+        if destination:
+            self.parts.append(f"[{destination}]")
+
+    def handle_data(self, data: str) -> None:
+        if data:
+            self.parts.append(data)
+
+
+def _clean_with_links(value: str, base_url: str, budget: _ContentLinkBudget) -> str:
+    parser = _ContentTextParser(base_url, budget)
+    parser.feed(value)
+    parser.close()
+    return re.sub(
+        r"\s+",
+        " ",
+        unicodedata.normalize("NFKC", " ".join(parser.parts)),
+    ).strip()
+
+
+def _element_link_destinations(
+    element: ET.Element, base_url: str, budget: _ContentLinkBudget
+) -> list[str]:
+    # Atom permits inline markup as real XML children (<content
+    # type="xhtml"><div>...<a href="...">...</a></div></content>), not just
+    # HTML escaped into text. ``child.itertext()`` used above only sees text
+    # nodes and drops attributes, so a real <a> element's href would
+    # otherwise never reach ``_ContentTextParser`` at all. Walk the actual
+    # element tree for any real anchor elements to cover that case too.
+    destinations: list[str] = []
+    for node in element.iter():
+        if node is element or _local_name(node.tag) != "a":
+            continue
+        href = node.attrib.get("href")
+        if href is None:
+            continue
+        destination = _content_link_destination(href, base_url, budget)
+        if destination:
+            destinations.append(destination)
+    return destinations
+
+
 def _children(element: ET.Element, *names: str) -> list[ET.Element]:
     allowed = set(names)
     return [child for child in element if _local_name(child.tag) in allowed]
@@ -53,14 +184,20 @@ def _first_text(element: ET.Element, *names: str) -> str:
     return ""
 
 
-def _all_text(element: ET.Element, *names: str) -> str:
+def _all_text_with_links(
+    element: ET.Element, base_url: str, budget: _ContentLinkBudget, *names: str
+) -> str:
     seen: list[str] = []
     for child in _children(element, *names):
         value = "".join(child.itertext())
-        if value.strip():
-            cleaned = _clean(value)
-            if cleaned not in seen:
-                seen.append(cleaned)
+        cleaned = _clean_with_links(value, base_url, budget) if value.strip() else ""
+        structural = [
+            f"[{destination}]"
+            for destination in _element_link_destinations(child, base_url, budget)
+        ]
+        combined = " ".join(part for part in (cleaned, *structural) if part)
+        if combined and combined not in seen:
+            seen.append(combined)
     return " ".join(seen)
 
 
@@ -197,6 +334,7 @@ def normalize_feed(
     if not entries:
         raise MonitorError("empty_extraction", "feed contains no entries")
 
+    link_budget = _ContentLinkBudget(MAX_CONTENT_LINK_ANNOTATIONS)
     normalized_entries: list[tuple[str, tuple[str, ...]]] = []
     for entry in entries:
         title = _first_text(entry, "title")
@@ -204,7 +342,9 @@ def normalize_feed(
         stable_id = _first_text(entry, "guid", "id") or link
         published = _first_text(entry, "pubdate", "published")
         updated = _first_text(entry, "updated")
-        content = _all_text(entry, "description", "summary", "content", "encoded")
+        content = _all_text_with_links(
+            entry, link, link_budget, "description", "summary", "content", "encoded"
+        )
         content_sources = (
             _external_content_sources(entry) if feed_kind == "atom" else ()
         )

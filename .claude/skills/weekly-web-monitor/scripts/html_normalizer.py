@@ -78,7 +78,7 @@ BLOCK_TAGS = frozenset(
 )
 NOISE_TOKEN_RE = re.compile(
     r"(?:^|[-_])(?:ad|ads|advert|banner|breadcrumb|cookie|footer|"
-    r"menu|modal|nav|newsletter|popup|promo|share|sidebar|social|tracking)(?:$|[-_])",
+    r"menu|modal|nav|newsletter|popup|promo|sidebar|social|tracking)(?:$|[-_])",
     re.IGNORECASE,
 )
 # Checked separately from ``NOISE_TOKEN_RE`` so it can honor the same
@@ -86,6 +86,25 @@ NOISE_TOKEN_RE = re.compile(
 # like ``article-header`` on a heading nested in ``article``/``section``/
 # ``main`` is a content sub-heading, not page chrome.
 HEADER_NOISE_TOKEN_RE = re.compile(r"(?:^|[-_])header(?:$|[-_])", re.IGNORECASE)
+# ``share`` alone is not a safe generic noise token: business content such
+# as a ``share-price`` widget uses the same word as a social-share button.
+# Only treat it as boilerplate when paired with an explicit social-sharing
+# qualifier (e.g. ``social-share``, ``share-widget``) or a known share
+# plugin name, so a bare business compound like ``share-price`` survives.
+_SHARE_QUALIFIER = (
+    r"(?:social|this|button|buttons|btn|icon|icons|widget|widgets|bar|"
+    r"tool|tools|link|links|box)"
+)
+# ``tokens`` below joins the id and class attributes with a plain space, so
+# a class value at the very start of that joined string is bounded by a
+# space rather than by ``^`` or ``[-_]`` -- the boundary classes here must
+# include ``\s`` or a leading token like ``share-widget`` would silently
+# fail to match.
+SHARE_NOISE_TOKEN_RE = re.compile(
+    rf"(?:^|[-_\s])(?:{_SHARE_QUALIFIER}[-_]share|share[-_]{_SHARE_QUALIFIER}|"
+    rf"sharethis|addthis|addtoany)(?:$|[-_\s])",
+    re.IGNORECASE,
+)
 TIMESTAMP_ONLY_RE = re.compile(
     r"^(?:last\s+)?(?:updated|modified|published)\s*[:：]?\s*"
     r"(?:\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?"
@@ -343,7 +362,7 @@ def _is_noise(node: Node) -> bool:
     }:
         return True
     tokens = f"{node.attrs.get('id', '')} {node.attrs.get('class', '')}"
-    if NOISE_TOKEN_RE.search(tokens):
+    if NOISE_TOKEN_RE.search(tokens) or SHARE_NOISE_TOKEN_RE.search(tokens):
         return True
     return bool(HEADER_NOISE_TOKEN_RE.search(tokens)) and not _has_content_ancestor(
         node
