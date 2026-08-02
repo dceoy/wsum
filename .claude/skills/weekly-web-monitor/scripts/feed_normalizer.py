@@ -63,10 +63,11 @@ def _content_link_destination(
     # <description>/<content:encoded> body) must not be silently absorbed
     # into an identical normalized text/hash just because the anchor's
     # visible text is unchanged. Mirrors html_normalizer._link_destination:
-    # resolve against the entry's own validated link when available, reject
-    # credential-bearing destinations via canonicalize_url, and omit (rather
-    # than fail closed on) destinations that cannot be resolved to an
-    # absolute HTTP(S) URL, same as when no base is available there.
+    # resolve against the entry's (or feed's) validated link when available
+    # and reject credential-bearing destinations via canonicalize_url.
+    # Non-web schemes (mailto:, tel:, ...) are omitted, but a relative href
+    # with no base to resolve against fails closed instead of silently
+    # discarding what may be an http(s) destination update.
     value = href.strip()
     if not value or value.startswith("#"):
         return ""
@@ -78,6 +79,11 @@ def _content_link_destination(
             scheme = urlsplit(resolved).scheme.lower()
         except ValueError:
             scheme = resolved.partition(":")[0].lower()
+        if not base_url and not scheme:
+            raise MonitorError(
+                "feed_content_relative_link",
+                "feed entry content link has no base URL to resolve against",
+            ) from None
         if scheme not in {"http", "https"}:
             return ""
         raise
@@ -247,6 +253,19 @@ def _entry_link(element: ET.Element) -> str:
     return ""
 
 
+def _feed_base_link(container: ET.Element) -> str:
+    # A fallback base for entries that omit their own <link>: the feed/
+    # channel's own alternate link is the "applicable inherited feed base"
+    # for resolving relative content links (see _content_link_destination).
+    # An invalid channel-level link should not fail the whole feed when
+    # individual entries carry their own valid links, so treat it as "no
+    # fallback available" rather than propagating the error here.
+    try:
+        return _entry_link(container)
+    except MonitorError:
+        return ""
+
+
 def _external_content_sources(element: ET.Element) -> tuple[str, ...]:
     sources: list[str] = []
     for child in _children(element, "content"):
@@ -324,9 +343,12 @@ def normalize_feed(
             element for element in root.iter() if _local_name(element.tag) == "item"
         ]
         feed_kind = "rss"
+        channels = _children(root, "channel")
+        feed_link = _feed_base_link(channels[0]) if channels else ""
     elif root_name == "feed":
         entries = [element for element in root if _local_name(element.tag) == "entry"]
         feed_kind = "atom"
+        feed_link = _feed_base_link(root)
     else:
         raise MonitorError("feed_unsupported", "XML document is not RSS or Atom")
     if len(entries) > max_entries:
@@ -343,7 +365,13 @@ def normalize_feed(
         published = _first_text(entry, "pubdate", "published")
         updated = _first_text(entry, "updated")
         content = _all_text_with_links(
-            entry, link, link_budget, "description", "summary", "content", "encoded"
+            entry,
+            link or feed_link,
+            link_budget,
+            "description",
+            "summary",
+            "content",
+            "encoded",
         )
         content_sources = (
             _external_content_sources(entry) if feed_kind == "atom" else ()

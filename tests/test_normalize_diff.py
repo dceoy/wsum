@@ -755,6 +755,52 @@ class NormalizationTests(unittest.TestCase):
         self.assertNotEqual(before, after)
         self.assertIn("Apply [https://example.com/apply-v1", before)
 
+    def test_feed_content_relative_link_without_entry_link_fails_closed(
+        self,
+    ) -> None:
+        # An item with a stable guid/title but no entry <link> used to reach
+        # _content_link_destination with an empty base URL: a relative href
+        # like /apply-v1 was silently discarded, so bumping it to /apply-v2
+        # left the entry hash unchanged and the destination update invisible.
+        def render(href: str) -> bytes:
+            return f"""<?xml version="1.0"?>
+            <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
+            <channel>
+              <item>
+                <guid>job-1</guid>
+                <title>Job posting</title>
+                <description>&lt;a href="{href}"&gt;Apply&lt;/a&gt;</description>
+              </item>
+            </channel></rss>""".encode()
+
+        with self.assertRaisesRegex(MonitorError, "feed_content_relative_link"):
+            normalize_feed(render("/apply-v1"))
+
+    def test_feed_content_relative_link_resolves_against_channel_link(
+        self,
+    ) -> None:
+        # When an item omits its own <link> but the channel declares one,
+        # relative content-link hrefs should resolve against that inherited
+        # feed-level base instead of failing closed.
+        def render(href: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
+            <channel>
+              <link>https://example.com/jobs/</link>
+              <item>
+                <guid>job-1</guid>
+                <title>Job posting</title>
+                <description>&lt;a href="{href}"&gt;Apply&lt;/a&gt;</description>
+              </item>
+            </channel></rss>""".encode()
+            text, _ = normalize_feed(xml)
+            return text
+
+        before = render("apply-v1")
+        after = render("apply-v2")
+        self.assertNotEqual(before, after)
+        self.assertIn("Apply [https://example.com/jobs/apply-v1", before)
+
     def test_atom_xhtml_content_destination_only_change_is_not_missed(
         self,
     ) -> None:
