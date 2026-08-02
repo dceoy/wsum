@@ -967,6 +967,46 @@ class NormalizationTests(unittest.TestCase):
         self.assertIn("Apply [https://example.com/v1/apply", before)
         self.assertIn("Apply [https://example.com/v2/apply", after)
 
+    def test_feed_xml_base_at_entry_and_content_scope_overrides_feed_level(
+        self,
+    ) -> None:
+        # xml:base cascades feed -> entry -> content-element scope, each
+        # overriding its parent. The feed-level test above only exercises
+        # the outermost scope; this exercises the entry-level and
+        # per-content-element overrides specifically, since a bug in either
+        # would otherwise leave a real destination change unrecorded.
+        def render(entry_base: str, content_base: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <feed xmlns="http://www.w3.org/2005/Atom"
+                  xml:base="https://example.com/feed-level/">
+              <entry xml:base="{entry_base}">
+                <id>job-1</id>
+                <title>Job posting</title>
+                <link href="https://example.com/job-1"/>
+                <summary xml:base="{content_base}">
+                  &lt;a href="apply"&gt;Apply&lt;/a&gt;
+                </summary>
+              </entry>
+            </feed>""".encode()
+            text, _ = normalize_feed(xml)
+            return text
+
+        entry_before = render("https://example.com/entry-v1/", "")
+        entry_after = render("https://example.com/entry-v2/", "")
+        self.assertNotEqual(entry_before, entry_after)
+        self.assertIn("Apply [https://example.com/entry-v1/apply", entry_before)
+
+        content_before = render(
+            "https://example.com/entry/", "https://example.com/content-v1/"
+        )
+        content_after = render(
+            "https://example.com/entry/", "https://example.com/content-v2/"
+        )
+        self.assertNotEqual(content_before, content_after)
+        self.assertIn(
+            "Apply [https://example.com/content-v1/apply", content_before
+        )
+
     def test_feed_content_link_fragment_destination_change_is_tracked(
         self,
     ) -> None:
