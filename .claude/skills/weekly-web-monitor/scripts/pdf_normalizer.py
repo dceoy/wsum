@@ -600,6 +600,12 @@ def _pdf_link_destination(uri: str) -> str:
     # HTTP(S) destinations (fail closed), omit non-web schemes (mailto:,
     # tel:, ...), and fold a non-sensitive fragment back into the identity
     # since canonicalize_url always strips it.
+    #
+    # A /URI action with no scheme at all (e.g. "/apply-v1") is a relative
+    # reference, not a non-web scheme -- this normalizer has no document
+    # base to resolve it against, so a destination-only change to a
+    # relative URI action must fail closed instead of being silently
+    # treated the same as an intentionally-ignored mailto:/tel: link.
     value = uri.strip()
     if not value:
         return ""
@@ -610,6 +616,12 @@ def _pdf_link_destination(uri: str) -> str:
             scheme = urlsplit(value).scheme.lower()
         except ValueError:
             scheme = value.partition(":")[0].lower()
+        if not scheme:
+            raise MonitorError(
+                "pdf_relative_link_action",
+                "PDF link annotation has a relative URI action with no "
+                "document base to resolve it against",
+            ) from None
         if scheme not in {"http", "https"}:
             return ""
         raise

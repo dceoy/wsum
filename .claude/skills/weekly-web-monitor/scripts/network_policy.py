@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import socket
 from collections.abc import Callable, Iterable, Sequence
@@ -161,6 +162,11 @@ def canonicalize_fragment_identity(fragment: str) -> str:
     and similar credentials can appear here too, so the same credential-name
     check used for query parameters applies and fails closed rather than
     let a credential enter a stored/hashed artifact.
+
+    The returned value is bounded to ``MAX_FRAGMENT_IDENTITY_CHARS`` for
+    display, but a fragment longer than that bound gets a SHA-256 digest of
+    its *complete* validated text appended so two fragments sharing a long
+    common prefix still produce distinct identities and hashes.
     """
     if not fragment:
         return ""
@@ -173,7 +179,12 @@ def canonicalize_fragment_identity(fragment: str) -> str:
         for name, _ in parse_qsl(fragment, keep_blank_values=True)
     ):
         raise _deny("credential-like URL fragment is forbidden")
-    return fragment[:MAX_FRAGMENT_IDENTITY_CHARS]
+    if len(fragment) <= MAX_FRAGMENT_IDENTITY_CHARS:
+        return fragment
+    digest = hashlib.sha256(fragment.encode("utf-8")).hexdigest()
+    suffix = f" [sha256:{digest}]"
+    prefix_limit = MAX_FRAGMENT_IDENTITY_CHARS - len(suffix)
+    return fragment[:prefix_limit] + suffix
 
 
 def _addresses_from_resolution(

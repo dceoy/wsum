@@ -605,6 +605,24 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertNotEqual(before.normalized_hash, after.normalized_hash)
 
+    def test_long_fragment_identity_distinguishes_divergent_tails(self) -> None:
+        # canonicalize_fragment_identity truncates the *display* value to
+        # MAX_FRAGMENT_IDENTITY_CHARS (200), but must still hash the
+        # complete fragment -- otherwise two fragments sharing a 200-char
+        # common prefix would collide even though their tails differ.
+        prefix = "step-" * 50  # 250 chars, longer than the 200-char bound
+        before = normalize_content(
+            f'<main><a href="/apply#{prefix}AAA">Apply</a></main>'.encode(),
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            f'<main><a href="/apply#{prefix}BBB">Apply</a></main>'.encode(),
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
     def test_credential_bearing_link_fragment_fails_closed(self) -> None:
         # OAuth implicit-flow tokens (and similar credentials) can appear in
         # a URL fragment, so a fragment must fail closed exactly like a
@@ -939,6 +957,30 @@ class NormalizationTests(unittest.TestCase):
             normalize_feed(xml)
         self.assertNotIn("secret123", str(captured.exception))
 
+    def test_feed_content_unterminated_anchor_href_is_not_dropped(self) -> None:
+        # HTMLParser.close() does not synthesize missing </a> events, so a
+        # malformed embedded anchor with no closing tag (common in feed
+        # content) used to leave its href stuck unflushed: a destination-only
+        # change to it left the entry's normalized text/hash unchanged.
+        def render(href: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
+            <channel>
+              <link>https://example.com/jobs/</link>
+              <item>
+                <guid>job-1</guid>
+                <title>Job posting</title>
+                <description>&lt;a href="{href}"&gt;Apply</description>
+              </item>
+            </channel></rss>""".encode()
+            text, _ = normalize_feed(xml)
+            return text
+
+        before = render("https://example.com/apply-v1")
+        after = render("https://example.com/apply-v2")
+        self.assertIn("apply-v1", before)
+        self.assertNotEqual(before, after)
+
     def test_atom_xhtml_content_destination_only_change_is_not_missed(
         self,
     ) -> None:
@@ -1031,6 +1073,26 @@ class NormalizationTests(unittest.TestCase):
         before = render("https://EXAMPLE.com:443/external/v1")
         after = render("https://example.com/external/v2")
         self.assertIn("CONTENT_SRC https://example.com/external/v1", before)
+        self.assertNotEqual(before, after)
+
+    def test_atom_content_source_fragment_change_is_tracked(self) -> None:
+        # canonicalize_url always strips the fragment, so a content src
+        # differing only by fragment (e.g. "#v1" -> "#v2") must not collapse
+        # into the same stored CONTENT_SRC identity/hash.
+        def render(source: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <feed xmlns="http://www.w3.org/2005/Atom">
+              <entry>
+                <id>tag:example,1</id><title>Post</title>
+                <content src="{source}"/>
+              </entry>
+            </feed>""".encode()
+            text, _ = normalize_feed(xml)
+            return text
+
+        before = render("https://example.com/doc#v1")
+        after = render("https://example.com/doc#v2")
+        self.assertIn("CONTENT_SRC https://example.com/doc#v1", before)
         self.assertNotEqual(before, after)
 
     def test_atom_relative_external_content_source_is_rejected(self) -> None:
@@ -1428,6 +1490,16 @@ class NormalizationTests(unittest.TestCase):
         result = normalize_content(pdf, content_type="application/pdf")
         self.assertIn("Apply", result.text)
         self.assertNotIn("jobs@example.com", result.text)
+
+    def test_pdf_relative_link_action_fails_closed(self) -> None:
+        # A /URI action with no scheme (e.g. "/apply-v1") is a relative
+        # reference, not a non-web scheme like mailto:/tel: -- this
+        # normalizer has no document base to resolve it against, so it must
+        # fail closed instead of being silently omitted like a destination
+        # change would otherwise go undetected.
+        pdf = _text_pdf_with_link(b"(Apply) Tj", uri="/apply-v1")
+        with self.assertRaisesRegex(MonitorError, "pdf_relative_link_action"):
+            normalize_content(pdf, content_type="application/pdf")
 
     def test_pdf_indirect_length_reference_is_resolved(self) -> None:
         # /Length can be an indirect reference ("N G R") to a separate

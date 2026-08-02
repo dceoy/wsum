@@ -141,7 +141,9 @@ class _ContentTextParser(HTMLParser):
             self._close_anchor()
 
     def _close_anchor(self) -> None:
-        href = self._anchor_hrefs.pop()
+        self._emit_anchor(self._anchor_hrefs.pop())
+
+    def _emit_anchor(self, href: str | None) -> None:
         if not href:
             return
         destination = _content_link_destination(href, self._base_url, self._budget)
@@ -151,6 +153,17 @@ class _ContentTextParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if data:
             self.parts.append(data)
+
+    def close(self) -> None:
+        # HTMLParser.close() does not synthesize missing end-tag events, so
+        # a malformed anchor with no closing </a> (common in embedded feed
+        # HTML, e.g. "<a href="/apply-v1">Apply") would otherwise leave its
+        # href stuck in _anchor_hrefs and never reach _content_link_destination.
+        # Flush any still-open anchors in document order instead of silently
+        # dropping their destinations.
+        super().close()
+        while self._anchor_hrefs:
+            self._emit_anchor(self._anchor_hrefs.pop(0))
 
 
 def _clean_with_links(value: str, base_url: str, budget: _ContentLinkBudget) -> str:
@@ -304,8 +317,14 @@ def _external_content_sources(element: ET.Element) -> tuple[str, ...]:
                 "feed_unsafe_content_source",
                 "feed entry contains an unsafe external content source",
             ) from exc
-        if canonical not in sources:
-            sources.append(canonical)
+        # canonicalize_url always strips the fragment, so a content src
+        # differing only by fragment (e.g. "#v1" -> "#v2") must not collapse
+        # to the same stored identity. Same fragment-identity handling as
+        # the embedded content-link destinations above.
+        fragment = canonicalize_fragment_identity(parsed.fragment)
+        identity = f"{canonical}#{fragment}" if fragment else canonical
+        if identity not in sources:
+            sources.append(identity)
     return tuple(sources)
 
 
