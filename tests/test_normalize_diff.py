@@ -14,6 +14,7 @@ from diff import DiffConfig, compare_content
 from errors import MonitorError
 from feed_normalizer import normalize_feed
 from normalize import normalize_content
+from pdf_normalizer import _stream_filters, extract_pdf_text
 from pypdf import PdfWriter
 from pypdf.generic import (
     DecodedStreamObject,
@@ -44,6 +45,44 @@ def _pdf_stream(number: int, body: bytes, *, extra: bytes = b"") -> bytes:
 
 def _pdf(*objects: bytes) -> bytes:
     return b"%PDF-1.4\n" + b"".join(objects) + b"%%EOF"
+
+
+def _escaped_filter_text_pdf(text: bytes) -> bytes:
+    """Build a valid one-page PDF whose Flate filter key uses a name escape."""
+    compressed = zlib.compress(b"BT /F1 12 Tf (" + text + b") Tj ET")
+    objects = (
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] "
+            b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+        ),
+        (
+            b"<< /Length "
+            + str(len(compressed)).encode()
+            + b" /Fil#74er /FlateDecode >>\nstream\n"
+            + compressed
+            + b"\nendstream"
+        ),
+        (
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+            b"/Encoding /WinAnsiEncoding >>"
+        ),
+    )
+    parts = [b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"]
+    offsets: list[int] = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(sum(len(part) for part in parts))
+        parts.append(f"{number} 0 obj\n".encode() + body + b"\nendobj\n")
+    xref_offset = sum(len(part) for part in parts)
+    parts.append(b"xref\n0 6\n0000000000 65535 f \n")
+    parts.extend(f"{offset:010d} 00000 n \n".encode() for offset in offsets)
+    parts.append(
+        b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n"
+        + str(xref_offset).encode()
+        + b"\n%%EOF\n"
+    )
+    return b"".join(parts)
 
 
 class _IndirectLengthStreamObject(StreamObject):
@@ -1112,6 +1151,50 @@ class NormalizationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(MonitorError, "filter"):
             normalize_content(pdf, content_type="application/pdf")
+
+    def test_pdf_escaped_filter_key_cannot_bypass_decompression_bound(self) -> None:
+        # A valid #xx name escape makes /Fil#74er semantically equivalent to
+        # /Filter. It must be decoded before pypdf can inflate the stream.
+        pdf = _escaped_filter_text_pdf(b"x" * 2_048)
+
+        with self.assertRaises(MonitorError) as raised:
+            extract_pdf_text(
+                pdf,
+                max_input_bytes=len(pdf),
+                max_decompressed_bytes=100,
+            )
+
+        self.assertEqual("pdf_decompressed_too_large", raised.exception.code)
+
+    def test_pdf_duplicate_filter_keys_fail_closed(self) -> None:
+        compressed = zlib.compress(b"BT (bounded) Tj ET")
+        pdf = _pdf(
+            _pdf_stream(
+                1,
+                compressed,
+                extra=b"/Filter /FlateDecode /Fil#74er /FlateDecode",
+            )
+        )
+
+        with self.assertRaises(MonitorError) as raised:
+            extract_pdf_text(pdf, max_input_bytes=len(pdf))
+
+        self.assertEqual("pdf_malformed", raised.exception.code)
+
+    def test_pdf_filter_name_value_is_not_misclassified_as_a_key(self) -> None:
+        self.assertEqual(
+            [],
+            _stream_filters(b"<< /Length 1 /Marker /Filter >>"),
+        )
+
+    def test_pdf_stream_dictionary_nesting_is_bounded(self) -> None:
+        dictionary = b"<< /Length 1 /Metadata " + b"[" * 101 + b"/Value" + b"]" * 101
+        dictionary += b" >>"
+
+        with self.assertRaises(MonitorError) as raised:
+            _stream_filters(dictionary)
+
+        self.assertEqual("pdf_malformed", raised.exception.code)
 
     def test_pdf_truncated_flate_stream_fails_closed(self) -> None:
         # zlib.decompressobj() commonly returns partial output for truncated

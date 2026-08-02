@@ -24,13 +24,12 @@ from errors import MonitorError
 STREAM_START_RE = re.compile(rb"(?<!end)stream(?:\r\n|\n)")
 OBJECT_HEADER_RE = re.compile(rb"(\d+)\s+(\d+)\s+obj\b")
 LENGTH_RE = re.compile(rb"/Length\s+(\d+)(?:\s+(\d+)\s+R\b)?")
-FILTER_RE = re.compile(rb"/Filter\s*(/[A-Za-z0-9]+|\[[^\]]*\])")
-FILTER_NAME_RE = re.compile(rb"/[A-Za-z0-9]+")
 METADATA_RE = re.compile(rb"/(Title|Author|Subject)\s*\((?:\\.|[^\\()])*\)")
 
 _PDF_WHITESPACE = frozenset(b" \t\r\n\f\x00")
 _PDF_DELIMITERS = frozenset(b"()<>[]{}/%")
 _NAME_TERMINATORS = _PDF_WHITESPACE | _PDF_DELIMITERS
+MAX_PDF_DICTIONARY_NESTING = 100
 
 
 def _scan_tokens(data: bytes) -> list[tuple[str, int, int]]:
@@ -185,14 +184,201 @@ def _bounded_decompress(value: bytes, limit: int) -> bytes:
     return result
 
 
+def _decode_name(name: bytes) -> bytes:
+    """Decode valid PDF name escapes in one lexical name token."""
+    if not name.startswith(b"/"):
+        raise MonitorError("pdf_malformed", "PDF name token has no slash prefix")
+    decoded = bytearray(b"/")
+    position = 1
+    while position < len(name):
+        if name[position] != ord("#"):
+            decoded.append(name[position])
+            position += 1
+            continue
+        if position + 2 >= len(name) or any(
+            byte not in b"0123456789abcdefABCDEF"
+            for byte in name[position + 1 : position + 3]
+        ):
+            # pypdf preserves malformed name escapes literally, so do the
+            # same instead of introducing a parser differential.
+            decoded.append(name[position])
+            position += 1
+            continue
+        decoded.append(int(name[position + 1 : position + 3], 16))
+        position += 3
+    return bytes(decoded)
+
+
+def _skip_whitespace_and_comments(data: bytes, position: int) -> int:
+    while position < len(data):
+        if data[position] in _PDF_WHITESPACE:
+            position += 1
+            continue
+        if data[position] == ord("%"):
+            while position < len(data) and data[position] not in (ord("\r"), ord("\n")):
+                position += 1
+            continue
+        break
+    return position
+
+
+def _read_name(data: bytes, position: int) -> tuple[bytes, int]:
+    if position >= len(data) or data[position] != ord("/"):
+        raise MonitorError("pdf_malformed", "PDF dictionary expects a name")
+    end = position + 1
+    while end < len(data) and data[end] not in _NAME_TERMINATORS:
+        end += 1
+    return _decode_name(data[position:end]), end
+
+
+def _skip_literal_string(data: bytes, position: int) -> int:
+    depth = 1
+    position += 1
+    while position < len(data):
+        current = data[position]
+        if current == ord("\\"):
+            position += 2
+            continue
+        if current == ord("("):
+            depth += 1
+        elif current == ord(")"):
+            depth -= 1
+            if depth == 0:
+                return position + 1
+        position += 1
+    raise MonitorError("pdf_malformed", "PDF dictionary has an unterminated string")
+
+
+def _skip_hex_string(data: bytes, position: int) -> int:
+    position += 1
+    while position < len(data) and data[position] != ord(">"):
+        position += 1
+    if position >= len(data):
+        raise MonitorError(
+            "pdf_malformed", "PDF dictionary has an unterminated hex string"
+        )
+    return position + 1
+
+
+def _read_bare_token(data: bytes, position: int) -> tuple[bytes, int]:
+    end = position
+    while end < len(data) and data[end] not in _NAME_TERMINATORS:
+        end += 1
+    if end == position:
+        raise MonitorError("pdf_malformed", "PDF dictionary has an invalid value")
+    return data[position:end], end
+
+
+def _skip_pdf_object(data: bytes, position: int, nesting: int = 0) -> int:
+    """Skip one direct PDF object, including an indirect integer reference."""
+    position = _skip_whitespace_and_comments(data, position)
+    if position >= len(data):
+        raise MonitorError("pdf_malformed", "PDF dictionary has a missing value")
+    if data[position : position + 2] == b"<<":
+        return _skip_pdf_dictionary(data, position, nesting + 1)
+    if data[position] == ord("["):
+        return _skip_pdf_array(data, position, nesting + 1)
+    if data[position] == ord("("):
+        return _skip_literal_string(data, position)
+    if data[position] == ord("<"):
+        return _skip_hex_string(data, position)
+    if data[position] == ord("/"):
+        _, end = _read_name(data, position)
+        return end
+    if data[position] in _PDF_DELIMITERS:
+        raise MonitorError("pdf_malformed", "PDF dictionary has an invalid value")
+
+    first, end = _read_bare_token(data, position)
+    if not first.isdigit():
+        return end
+    middle = _skip_whitespace_and_comments(data, end)
+    if middle >= len(data) or data[middle] in _PDF_DELIMITERS:
+        return end
+    second, second_end = _read_bare_token(data, middle)
+    if not second.isdigit():
+        return end
+    suffix = _skip_whitespace_and_comments(data, second_end)
+    if data[suffix : suffix + 1] != b"R":
+        return end
+    reference_end = suffix + 1
+    if reference_end < len(data) and data[reference_end] not in _NAME_TERMINATORS:
+        return end
+    return reference_end
+
+
+def _skip_pdf_array(data: bytes, position: int, nesting: int) -> int:
+    if nesting > MAX_PDF_DICTIONARY_NESTING:
+        raise MonitorError("pdf_malformed", "PDF dictionary nesting is too deep")
+    position += 1
+    while True:
+        position = _skip_whitespace_and_comments(data, position)
+        if position >= len(data):
+            raise MonitorError(
+                "pdf_malformed", "PDF dictionary has an unterminated array"
+            )
+        if data[position] == ord("]"):
+            return position + 1
+        position = _skip_pdf_object(data, position, nesting)
+
+
+def _skip_pdf_dictionary(data: bytes, position: int, nesting: int) -> int:
+    if nesting > MAX_PDF_DICTIONARY_NESTING:
+        raise MonitorError("pdf_malformed", "PDF dictionary nesting is too deep")
+    position += 2
+    while True:
+        position = _skip_whitespace_and_comments(data, position)
+        if position >= len(data):
+            raise MonitorError("pdf_malformed", "PDF dictionary is unterminated")
+        if data[position : position + 2] == b">>":
+            return position + 2
+        _, position = _read_name(data, position)
+        position = _skip_pdf_object(data, position, nesting)
+
+
+def _filter_value(dictionary: bytes, position: int) -> tuple[list[bytes], int]:
+    """Parse the direct name or name array allowed for a /Filter value."""
+    position = _skip_whitespace_and_comments(dictionary, position)
+    if position >= len(dictionary):
+        raise MonitorError("pdf_malformed", "PDF stream dictionary has no filter value")
+    if dictionary[position] == ord("/"):
+        name, end = _read_name(dictionary, position)
+        return [name], end
+    if dictionary[position] != ord("["):
+        raise MonitorError("pdf_malformed", "PDF filter value is not a name or array")
+
+    filters: list[bytes] = []
+    position += 1
+    while True:
+        position = _skip_whitespace_and_comments(dictionary, position)
+        if position >= len(dictionary):
+            raise MonitorError("pdf_malformed", "PDF filter array is unterminated")
+        if dictionary[position] == ord("]"):
+            return filters, position + 1
+        name, position = _read_name(dictionary, position)
+        filters.append(name)
+
+
 def _stream_filters(dictionary: bytes) -> list[bytes]:
-    match = FILTER_RE.search(dictionary)
-    if match is None:
-        return []
-    value = match.group(1)
-    if value.startswith(b"["):
-        return FILTER_NAME_RE.findall(value)
-    return [value]
+    position = _skip_whitespace_and_comments(dictionary, 0)
+    if dictionary[position : position + 2] != b"<<":
+        raise MonitorError("pdf_malformed", "PDF stream dictionary could not be parsed")
+    position += 2
+    filters: list[bytes] | None = None
+    while True:
+        position = _skip_whitespace_and_comments(dictionary, position)
+        if position >= len(dictionary):
+            raise MonitorError("pdf_malformed", "PDF stream dictionary is unterminated")
+        if dictionary[position : position + 2] == b">>":
+            return filters or []
+        name, position = _read_name(dictionary, position)
+        if name == b"/Filter":
+            if filters is not None:
+                raise MonitorError(
+                    "pdf_malformed", "PDF stream dictionary repeats /Filter"
+                )
+            filters, position = _filter_value(dictionary, position)
+            continue
+        position = _skip_pdf_object(dictionary, position)
 
 
 def _has_top_level_name_value(
