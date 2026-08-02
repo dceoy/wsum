@@ -36,6 +36,26 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1].lower()
 
 
+_XML_BASE_ATTR = "{http://www.w3.org/XML/1998/namespace}base"
+
+
+def _xml_base_scope(element: ET.Element, parent_base: str) -> str:
+    """Resolve the base URI in effect at ``element`` against its xml:base.
+
+    XML Base lets ``xml:base`` be set on the feed root, the channel/feed
+    container, an entry, or an individual content element to override the
+    base URI used for resolving relative references in that scope,
+    independent of any <link>. Only a present xml:base changes the
+    inherited base, so a feed with no xml:base anywhere resolves exactly as
+    it did before this attribute was recognized (``link``/the feed's own
+    alternate link stays the sole base).
+    """
+    value = element.attrib.get(_XML_BASE_ATTR, "").strip()
+    if not value:
+        return parent_base
+    return urljoin(parent_base, value) if parent_base else value
+
+
 class _TextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -217,11 +237,18 @@ def _all_text_with_links(
 ) -> str:
     seen: list[str] = []
     for child in _children(element, *names):
+        # A <description>/<content:encoded>/... child can carry its own
+        # xml:base distinct from its entry's, so the effective base must be
+        # recomputed per child rather than reusing the entry-level base for
+        # all of them.
+        child_base = _xml_base_scope(child, base_url)
         value = "".join(child.itertext())
-        cleaned = _clean_with_links(value, base_url, budget) if value.strip() else ""
+        cleaned = (
+            _clean_with_links(value, child_base, budget) if value.strip() else ""
+        )
         structural = [
             f"[{destination}]"
-            for destination in _element_link_destinations(child, base_url, budget)
+            for destination in _element_link_destinations(child, child_base, budget)
         ]
         combined = " ".join(part for part in (cleaned, *structural) if part)
         if combined and combined not in seen:
@@ -366,6 +393,7 @@ def normalize_feed(
     if root is None:
         raise MonitorError("feed_malformed", "feed XML has no root element")
     root_name = _local_name(root.tag)
+    channels: list[ET.Element] = []
     if root_name in {"rss", "rdf"}:
         entries = [
             element for element in root.iter() if _local_name(element.tag) == "item"
@@ -392,9 +420,17 @@ def normalize_feed(
         stable_id = _first_text(entry, "guid", "id") or link
         published = _first_text(entry, "pubdate", "published")
         updated = _first_text(entry, "updated")
+        # xml:base on the feed root, channel/feed container, or entry
+        # overrides the base URI used to resolve relative content links,
+        # independent of <link> (see _xml_base_scope). Absent any xml:base
+        # this reduces to exactly `link or feed_link`, the prior behavior.
+        entry_base = _xml_base_scope(root, link or feed_link)
+        if root_name in {"rss", "rdf"} and channels:
+            entry_base = _xml_base_scope(channels[0], entry_base)
+        entry_base = _xml_base_scope(entry, entry_base)
         content = _all_text_with_links(
             entry,
-            link or feed_link,
+            entry_base,
             link_budget,
             "description",
             "summary",

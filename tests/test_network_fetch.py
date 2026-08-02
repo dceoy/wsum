@@ -13,7 +13,11 @@ import fetch
 import support
 from errors import MonitorError
 from fetch import FetchConfig, fetch_url
-from network_policy import BrowserNetworkGuard, resolve_public_url
+from network_policy import (
+    BrowserNetworkGuard,
+    is_sensitive_query_name,
+    resolve_public_url,
+)
 
 
 class FakeResponse:
@@ -382,6 +386,45 @@ class NetworkPolicyTests(unittest.TestCase):
 
         with self.assertRaisesRegex(MonitorError, "non-public|changed"):
             resolve_public_url("https://example.com", resolver=resolver)
+
+    def test_detects_separator_and_prefix_variants_of_credential_params(
+        self,
+    ) -> None:
+        # These previously slipped past the detector: separator variants of
+        # an already-listed name (access-token vs access_token), and common
+        # credential params the exact-name/suffix lists did not cover at
+        # all (x-api-key, client_secret, auth_token, subscription-key).
+        for name in (
+            "x-api-key",
+            "X-API-KEY",
+            "api-key",
+            "api_key",
+            "client_secret",
+            "client-secret",
+            "auth_token",
+            "auth-token",
+            "access-token",
+            "subscription-key",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(is_sensitive_query_name(name))
+
+    def test_benign_key_and_token_named_params_are_not_flagged(self) -> None:
+        # A blanket "-key"/"-token" suffix would catch these too, but none
+        # of them are credentials; over-flagging permanently rejects a
+        # legitimate monitoring target (validate_http_url has no redact
+        # path, only reject).
+        for name in (
+            "sort_key",
+            "partition_key",
+            "cache_key",
+            "public_key",
+            "page_token",
+            "next_token",
+            "continuation_token",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(is_sensitive_query_name(name))
 
     def test_browser_guard_requires_explicit_hosts(self) -> None:
         guard = BrowserNetworkGuard(

@@ -240,6 +240,30 @@ class NormalizationTests(unittest.TestCase):
         self.assertNotEqual(
             normalized_before.normalized_hash, normalized_after.normalized_hash
         )
+
+    def test_form_wrapping_main_preserves_the_main_content(self) -> None:
+        # The noise check used to look only at ancestors, so a page-level
+        # <form> wrapping <main> (not the other way around) marked the form
+        # -- and everything inside it, including <main> -- as noise and
+        # dropped the whole subtree. A change inside such a wrapped <main>
+        # must still change the normalized hash.
+        before = b"""
+        <html><body>
+        <form><main><p>Applications are open until 2026-08-31</p></main></form>
+        </body></html>
+        """
+        after = b"""
+        <html><body>
+        <form><main><p>Applications are open until 2026-09-30</p></main></form>
+        </body></html>
+        """
+        normalized_before = normalize_content(before, content_type="text/html")
+        normalized_after = normalize_content(after, content_type="text/html")
+        self.assertIn("2026-08-31", normalized_before.text)
+        self.assertIn("2026-09-30", normalized_after.text)
+        self.assertNotEqual(
+            normalized_before.normalized_hash, normalized_after.normalized_hash
+        )
         bom_feed = (
             b"\xef\xbb\xbf<!--synthetic--><rss><channel>"
             b"<item><guid>1</guid><title>One</title></item>"
@@ -916,6 +940,32 @@ class NormalizationTests(unittest.TestCase):
         after = render("apply-v2")
         self.assertNotEqual(before, after)
         self.assertIn("Apply [https://example.com/jobs/apply-v1", before)
+
+    def test_feed_xml_base_only_change_is_not_silently_missed(self) -> None:
+        # xml:base overrides the base URI used to resolve relative content
+        # links independent of <link> (XML Base). Here the entry's own
+        # <link> and the relative href both stay identical across renders;
+        # only the feed-level xml:base changes. Ignoring it would resolve
+        # "apply" against the unchanged entry link both times and miss that
+        # the real destination moved from /v1/ to /v2/.
+        def render(base: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <feed xmlns="http://www.w3.org/2005/Atom" xml:base="{base}">
+              <entry>
+                <id>job-1</id>
+                <title>Job posting</title>
+                <link href="https://example.com/job-1"/>
+                <summary>&lt;a href="apply"&gt;Apply&lt;/a&gt;</summary>
+              </entry>
+            </feed>""".encode()
+            text, _ = normalize_feed(xml)
+            return text
+
+        before = render("https://example.com/v1/")
+        after = render("https://example.com/v2/")
+        self.assertNotEqual(before, after)
+        self.assertIn("Apply [https://example.com/v1/apply", before)
+        self.assertIn("Apply [https://example.com/v2/apply", after)
 
     def test_feed_content_link_fragment_destination_change_is_tracked(
         self,

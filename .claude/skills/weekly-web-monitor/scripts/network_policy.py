@@ -23,10 +23,11 @@ Resolver = Callable[..., Sequence[tuple]]
 
 _SENSITIVE_QUERY_NAMES = frozenset(
     {
-        "access_token",
-        "api_key",
+        "access-token",
+        "api-key",
         "apikey",
         "auth",
+        "auth-token",
         "authorization",
         "awsaccesskeyid",
         "credential",
@@ -34,11 +35,14 @@ _SENSITIVE_QUERY_NAMES = frozenset(
         "secret",
         "sig",
         "signature",
+        "subscription-key",
         "token",
+        "x-api-key",
     }
 )
 _SENSITIVE_QUERY_SUFFIXES = (
     "credential",
+    "secret",
     "signature",
     "security-token",
     "session-token",
@@ -51,12 +55,16 @@ def is_sensitive_query_name(name: str) -> bool:
     Provider signed-URL schemes namespace their credential/signature params
     under a prefix (``X-Amz-Credential``, ``X-Amz-Signature``,
     ``X-Goog-Signature``, ...) that an exact-name check misses entirely, so
-    those are matched by suffix instead of by exact name.
+    those are matched by suffix instead of by exact name. Separators are
+    normalized to ``-`` before both checks so ``client_secret``,
+    ``client-secret``, and a hypothetical ``client secret`` are all treated
+    as the same name instead of only the underscore/hyphen form the set
+    happens to spell out.
     """
-    normalized = name.strip().lower()
+    normalized = name.strip().lower().replace("_", "-")
     if normalized in _SENSITIVE_QUERY_NAMES:
         return True
-    return normalized.replace("_", "-").endswith(_SENSITIVE_QUERY_SUFFIXES)
+    return normalized.endswith(_SENSITIVE_QUERY_SUFFIXES)
 
 
 @dataclass(frozen=True, slots=True)

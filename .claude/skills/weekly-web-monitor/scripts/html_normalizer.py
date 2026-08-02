@@ -360,10 +360,20 @@ def _has_content_ancestor(node: Node) -> bool:
     return False
 
 
+def _has_content_descendant(node: Node) -> bool:
+    return any(child.tag in CONTENT_SECTIONING_TAGS for child in iter_nodes(node))
+
+
 def _is_noise(node: Node) -> bool:
     if node.tag in NOISE_TAGS:
         return True
-    if node.tag in {"header", "form"} and not _has_content_ancestor(node):
+    if node.tag == "header" and not _has_content_ancestor(node):
+        return True
+    if (
+        node.tag == "form"
+        and not _has_content_ancestor(node)
+        and not _has_content_descendant(node)
+    ):
         return True
     if "hidden" in node.attrs or node.attrs.get("aria-hidden", "").lower() == "true":
         return True
