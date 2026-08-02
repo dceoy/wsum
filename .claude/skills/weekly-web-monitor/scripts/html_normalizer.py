@@ -7,7 +7,7 @@ import re
 import unicodedata
 from collections.abc import Iterable, Iterator
 from html.parser import HTMLParser
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from errors import MonitorError
 from network_policy import canonicalize_url
@@ -351,28 +351,39 @@ def _is_noise(node: Node) -> bool:
 
 
 def _link_destination(node: Node, attr: str, ctx: _LinkContext) -> str:
-    # Canonicalize (and, via canonicalize_url, reject credential-bearing)
+    # Canonicalize (and, via canonicalize_url, identify credential-bearing)
     # destination URLs so a same-text link/form-target change (e.g.
     # /apply-v1 -> /apply-v2) is not silently absorbed into an identical
     # normalized text/hash. Resolution requires a base URL and a bounded
-    # remaining budget (see MAX_LINK_ANNOTATIONS); anything unresolvable,
-    # in-page (#fragment), or policy-denied is simply omitted rather than
-    # raising, since one bad link must not fail normalization of the page.
+    # remaining budget (see MAX_LINK_ANNOTATIONS). Policy-denied HTTP(S)
+    # destinations retain only a digest: this keeps their credentials out of
+    # stored normalized text while ensuring a credential-only destination
+    # change cannot collapse to the same representation.
     if not ctx.base_url:
         return ""
     value = node.attrs.get(attr, "").strip()
     if not value or value.startswith("#"):
         return ""
+    resolved = urljoin(ctx.base_url, value)
+    redacted = False
     try:
-        canonical, _ = canonicalize_url(urljoin(ctx.base_url, value))
+        canonical, _ = canonicalize_url(resolved)
     except MonitorError:
-        return ""
+        try:
+            scheme = urlsplit(resolved).scheme.lower()
+        except ValueError:
+            return ""
+        if scheme not in {"http", "https"}:
+            return ""
+        canonical = "[redacted destination]"
+        redacted = True
     if ctx.remaining <= 0:
         raise MonitorError(
             "html_too_large", "HTML document has too many link destinations"
         )
     ctx.remaining -= 1
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    digest_source = resolved if redacted else canonical
+    digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
     return f"{canonical[:MAX_LINK_URL_CHARS]} [sha256:{digest}]"
 
 

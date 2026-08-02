@@ -329,11 +329,12 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertNotEqual(before.normalized_hash, after.normalized_hash)
 
-    def test_credential_bearing_link_destination_is_omitted_not_raised(self) -> None:
+    def test_credential_bearing_link_destination_is_redacted_not_raised(self) -> None:
         # canonicalize_url denies embedded credentials and credential-like
         # query parameters; a link carrying either must not fail
-        # normalization of the whole page, and the credential must not end
-        # up in the normalized text.
+        # normalization of the whole page, and the credential must not end up
+        # in the normalized text. A digest preserves destination identity so
+        # credential-only changes cannot be silently missed.
         result = normalize_content(
             (
                 b'<main><p><a href="https://user:pass@example.com/x">Link</a></p>'
@@ -345,6 +346,21 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertNotIn("user:pass", result.text)
         self.assertNotIn("secret", result.text)
+        self.assertIn("[redacted destination] [sha256:", result.text)
+
+        before = normalize_content(
+            b'<main><a href="https://example.com/x?token=old">Download</a></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<main><a href="https://example.com/x?token=new">Download</a></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotIn("token=old", before.text)
+        self.assertNotIn("token=new", after.text)
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
 
     def test_in_page_and_relative_links_without_base_url_are_not_annotated(
         self,

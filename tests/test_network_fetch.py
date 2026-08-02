@@ -7,7 +7,7 @@ import struct
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import fetch
 import support
@@ -829,6 +829,39 @@ class FetchTests(unittest.TestCase):
             connection.connect()
         elapsed = time.perf_counter() - started
         self.assertLess(elapsed, 2.0)
+
+    def test_pinned_https_connection_closes_wrapped_socket_on_handshake_failure(
+        self,
+    ) -> None:
+        raw_socket = MagicMock()
+        raw_socket.getpeername.return_value = ("93.184.216.34", 443)
+        wrapped_socket = MagicMock()
+        context = MagicMock()
+        context.wrap_socket.return_value = wrapped_socket
+        connection = fetch._PinnedHTTPSConnection(
+            "example.com",
+            "93.184.216.34",
+            443,
+            timeout=5.0,
+            allowed_addresses=("93.184.216.34",),
+            context=context,
+            deadline=time.monotonic() + 5.0,
+        )
+
+        with (
+            patch.object(fetch, "_connect_pinned_socket", return_value=raw_socket),
+            patch.object(fetch, "validate_peer_address"),
+            patch.object(
+                fetch,
+                "_do_handshake_with_deadline",
+                side_effect=TimeoutError("handshake timed out"),
+            ),
+            self.assertRaises(TimeoutError),
+        ):
+            connection.connect()
+
+        wrapped_socket.close.assert_called_once_with()
+        raw_socket.close.assert_not_called()
 
     def test_server_and_rate_limit_are_retryable(self) -> None:
         for status, code in ((429, "http_rate_limited"), (503, "http_server_error")):

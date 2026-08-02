@@ -251,6 +251,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         raw_socket = _connect_pinned_socket(
             self._address, self.port, self.timeout, self.source_address, self._deadline
         )
+        wrapped: ssl.SSLSocket | None = None
         try:
             validate_peer_address(raw_socket.getpeername()[0], self._allowed_addresses)
             # ``wrap_socket`` detaches the raw fd into a brand new socket
@@ -271,7 +272,11 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
             self.sock = wrapped
             validate_peer_address(self.sock.getpeername()[0], self._allowed_addresses)
         except BaseException:
-            raw_socket.close()
+            # ``wrap_socket`` transfers ownership of the file descriptor to
+            # the returned SSLSocket. Closing the detached raw socket after
+            # that point is a no-op and leaks the wrapped descriptor when the
+            # handshake or the post-handshake peer check fails.
+            (wrapped if wrapped is not None else raw_socket).close()
             raise
 
 
