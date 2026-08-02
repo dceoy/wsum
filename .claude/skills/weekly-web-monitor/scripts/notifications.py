@@ -156,8 +156,16 @@ def deliver_grouped(
     pending_records: list[NotificationRecord] = []
     for event in events:
         existing = store.get_notification(event.event_id)
-        if existing and existing.status in {"sent", "suppressed"}:
+        if existing and existing.status == "sent":
             outcomes[event.event_id] = DeliveryOutcome(event.event_id, "suppressed")
+            continue
+        if existing and existing.status == "suppressed":
+            # An operator-suppressed record means this event was never sent
+            # and never will be, unlike the "sent" dedup case above. Tag it
+            # distinctly so callers do not count it as a delivered notification.
+            outcomes[event.event_id] = DeliveryOutcome(
+                event.event_id, "suppressed", error_code="operator_suppressed"
+            )
             continue
         if existing and existing.status == "pending":
             # A pending record may mean delivery succeeded before the final state

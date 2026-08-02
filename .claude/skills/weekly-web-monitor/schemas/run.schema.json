@@ -29,6 +29,7 @@
         "minor",
         "non_material",
         "notified",
+        "suppressed",
         "unchanged"
       ]
     },

@@ -1007,6 +1007,32 @@ class NormalizationTests(unittest.TestCase):
             "Apply [https://example.com/content-v1/apply", content_before
         )
 
+    def test_feed_root_xml_base_resolves_against_fetched_document_url(
+        self,
+    ) -> None:
+        # A relative root-level xml:base must resolve against the URL the
+        # feed was actually fetched from, not against an entry's own <link>.
+        # Here the feed bytes are byte-for-byte identical across renders;
+        # only the caller-supplied base_url (the fetched final URL) moves
+        # from /v1/ to /v2/. Falling back to the entry link instead of the
+        # fetched URL would resolve "apply" against the same address both
+        # times and silently miss that the real destination moved.
+        xml = b"""<?xml version="1.0"?>
+        <feed xmlns="http://www.w3.org/2005/Atom" xml:base="./">
+          <entry>
+            <id>job-1</id>
+            <title>Job posting</title>
+            <link href="https://example.com/job-1"/>
+            <summary>&lt;a href="apply"&gt;Apply&lt;/a&gt;</summary>
+          </entry>
+        </feed>"""
+
+        before, _ = normalize_feed(xml, base_url="https://example.com/v1/feed.xml")
+        after, _ = normalize_feed(xml, base_url="https://example.com/v2/feed.xml")
+        self.assertNotEqual(before, after)
+        self.assertIn("Apply [https://example.com/v1/apply", before)
+        self.assertIn("Apply [https://example.com/v2/apply", after)
+
     def test_feed_content_link_fragment_destination_change_is_tracked(
         self,
     ) -> None:

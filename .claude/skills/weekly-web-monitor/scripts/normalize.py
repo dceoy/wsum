@@ -211,7 +211,7 @@ def normalize_content(
     if sniffed == "pdf":
         text, metadata = extract_pdf_text(body)
     elif sniffed == "feed":
-        text, metadata = normalize_feed(body)
+        text, metadata = normalize_feed(body, base_url=base_url)
     elif sniffed == "xml":
         raise MonitorError("feed_unsupported", "XML document is not RSS or Atom")
     elif sniffed == "html":

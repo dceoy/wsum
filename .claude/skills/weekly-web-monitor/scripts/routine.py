@@ -800,6 +800,40 @@ class WeeklyMonitorRoutine:
         pending: _PendingMaterial,
         outcome: DeliveryOutcome,
     ) -> RunRecord:
+        operator_suppressed = (
+            outcome.status == "suppressed"
+            and outcome.error_code == "operator_suppressed"
+        )
+        if operator_suppressed:
+            # Unlike the "sent"/dedup "suppressed" cases below, this event was
+            # never delivered and never will be: keep it out of the notified
+            # result and delivered-notification audit outcome so operators and
+            # calculate_metrics do not mistake it for a confirmed send.
+            attempts = (
+                *pending.attempts,
+                Attempt(len(pending.attempts) + 1, "notification_suppressed"),
+            )
+            run = self._run_record(
+                run_id,
+                pending.target,
+                "suppressed",
+                pending.change_score,
+                pending.summary_ja,
+                "",
+                pending.started_at,
+                attempts,
+            )
+            self._audit(
+                "change_notification",
+                target_id=pending.target.target_id,
+                outcome="skipped",
+                run_id=run_id,
+                metadata={
+                    "event_id": pending.event.event_id,
+                    "delivery_state": outcome.status,
+                },
+            )
+            return self._persist_success(pending.next_state, run)
         if outcome.status in {"sent", "suppressed", "queued"}:
             queued = outcome.status == "queued"
             attempts = (

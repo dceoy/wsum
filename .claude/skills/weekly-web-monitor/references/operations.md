@@ -18,10 +18,14 @@ For the initial approximately 10-target pilot:
 ## Health checks
 
 After each run, inspect counts for checked, unchanged, baseline, minor, material,
-notified, and failed. The checked count must equal enabled targets. Verify every
-target has one terminal run ID, temporary workspaces no longer exist, no
-`pending`/`sending` delivery is automatically retried, and state references a
-loadable snapshot after successful non-304 processing.
+notified, and failed. The checked count must equal enabled targets. A run result
+of `suppressed` means a material change was detected and the baseline advanced,
+but an operator-suppressed Notifications record blocked delivery; it is excluded
+from both `material` and `notified` so a backlog of undelivered material changes
+does not silently register as delivered. Verify every target has one terminal
+run ID, temporary workspaces no longer exist, no `pending`/`sending` delivery is
+automatically retried, and state references a loadable snapshot after successful
+non-304 processing.
 
 Weekly checks should also verify connector authorization, available Drive capacity,
 stale selectors, retention backlog, poison Outbox rows, and browser-mode target

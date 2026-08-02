@@ -358,6 +358,7 @@ def _external_content_sources(element: ET.Element) -> tuple[str, ...]:
 def normalize_feed(
     xml: bytes,
     *,
+    base_url: str = "",
     max_entries: int = 1_000,
     max_input_bytes: int = 10_000_000,
     max_elements: int = 20_000,
@@ -422,9 +423,11 @@ def normalize_feed(
         updated = _first_text(entry, "updated")
         # xml:base on the feed root, channel/feed container, or entry
         # overrides the base URI used to resolve relative content links,
-        # independent of <link> (see _xml_base_scope). Absent any xml:base
-        # this reduces to exactly `link or feed_link`, the prior behavior.
-        entry_base = _xml_base_scope(root, link or feed_link)
+        # independent of <link> (see _xml_base_scope). The document's own
+        # fetched URL is the base a root-level xml:base resolves against;
+        # only when the caller has no fetched URL to offer does this fall
+        # back to `link or feed_link`, the prior behavior.
+        entry_base = _xml_base_scope(root, base_url or link or feed_link)
         if root_name in {"rss", "rdf"} and channels:
             entry_base = _xml_base_scope(channels[0], entry_base)
         entry_base = _xml_base_scope(entry, entry_base)

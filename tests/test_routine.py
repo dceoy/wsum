@@ -17,7 +17,8 @@ from memory_adapters import (
     MemorySlackConnector,
 )
 from models import NotificationRecord, Target
-from notifications import failure_event_id
+from normalize import normalize_content
+from notifications import change_event_id, failure_event_id
 from retry import RetryConfig
 from routine import RoutineConfig, WeeklyMonitorRoutine
 
@@ -133,6 +134,44 @@ class RoutineTests(unittest.TestCase):
             self.assertTrue(
                 all(not Path(workspace).exists() for workspace in fetcher.workspaces)
             )
+
+    def test_operator_suppressed_change_advances_baseline_without_notified_result(
+        self,
+    ) -> None:
+        # An operator-suppressed NotificationRecord means this event was
+        # never sent and never will be, unlike the "sent" dedup case that
+        # legitimately reuses the same "suppressed" delivery outcome status.
+        # Conflating the two used to report a material change as "notified"
+        # even though deliver_grouped never called Slack for it.
+        self.run_cycle(response(1000), "run-1")
+        fixture = response(1200)
+        normalized = normalize_content(
+            fixture.body,
+            content_type=fixture.content_type,
+            base_url=self.target.url,
+            include_selector=self.target.include_selector,
+            exclude_selectors=self.target.exclude_selectors,
+        )
+        event_id = change_event_id(self.target.target_id, normalized.normalized_hash)
+        self.store.upsert_notification(
+            NotificationRecord(
+                event_id,
+                self.target.target_id,
+                "suppressed",
+                kind="change",
+                last_error="operator_suppressed",
+            )
+        )
+
+        result, _ = self.run_cycle(fixture, "run-2")
+
+        self.assertEqual([], self.slack.messages)
+        self.assertEqual(0, result.metrics.notified)
+        self.assertEqual(0, result.metrics.failed)
+        self.assertEqual("suppressed", self.store.runs["run-2:one"].result)
+        self.assertEqual(
+            normalized.normalized_hash, self.store.states["one"].normalized_hash
+        )
 
     def test_failed_notification_preserves_baseline_and_retries_safely(self) -> None:
         self.run_cycle(response(1000), "run-1")

@@ -23,6 +23,7 @@ RUN_RESULTS = frozenset(
         "minor",
         "non_material",
         "notified",
+        "suppressed",
         "unchanged",
     }
 )
