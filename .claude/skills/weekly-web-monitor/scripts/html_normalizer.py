@@ -351,39 +351,35 @@ def _is_noise(node: Node) -> bool:
 
 
 def _link_destination(node: Node, attr: str, ctx: _LinkContext) -> str:
-    # Canonicalize (and, via canonicalize_url, identify credential-bearing)
+    # Canonicalize (and, via canonicalize_url, reject credential-bearing)
     # destination URLs so a same-text link/form-target change (e.g.
     # /apply-v1 -> /apply-v2) is not silently absorbed into an identical
     # normalized text/hash. Resolution requires a base URL and a bounded
     # remaining budget (see MAX_LINK_ANNOTATIONS). Policy-denied HTTP(S)
-    # destinations retain only a digest: this keeps their credentials out of
-    # stored normalized text while ensuring a credential-only destination
-    # change cannot collapse to the same representation.
+    # destinations fail closed so credentials cannot enter stored artifacts,
+    # even as offline-testable unsalted digests. Non-web schemes are omitted.
     if not ctx.base_url:
         return ""
     value = node.attrs.get(attr, "").strip()
     if not value or value.startswith("#"):
         return ""
     resolved = urljoin(ctx.base_url, value)
-    redacted = False
     try:
         canonical, _ = canonicalize_url(resolved)
     except MonitorError:
         try:
             scheme = urlsplit(resolved).scheme.lower()
         except ValueError:
-            return ""
+            scheme = resolved.partition(":")[0].lower()
         if scheme not in {"http", "https"}:
             return ""
-        canonical = "[redacted destination]"
-        redacted = True
+        raise
     if ctx.remaining <= 0:
         raise MonitorError(
             "html_too_large", "HTML document has too many link destinations"
         )
     ctx.remaining -= 1
-    digest_source = resolved if redacted else canonical
-    digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return f"{canonical[:MAX_LINK_URL_CHARS]} [sha256:{digest}]"
 
 
