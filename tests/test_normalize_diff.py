@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import base64
+import builtins
 import codecs
 import time
 import unittest
 import zlib
+from io import BytesIO
+from unittest.mock import patch
 
 import support  # noqa: F401
 from diff import DiffConfig, compare_content
 from errors import MonitorError
 from feed_normalizer import normalize_feed
 from normalize import normalize_content
+from pypdf import PdfWriter
+from pypdf.generic import (
+    DecodedStreamObject,
+    DictionaryObject,
+    NameObject,
+    NumberObject,
+    StreamObject,
+)
 
 
 def _pdf_stream(number: int, body: bytes, *, extra: bytes = b"") -> bytes:
@@ -33,6 +44,84 @@ def _pdf_stream(number: int, body: bytes, *, extra: bytes = b"") -> bytes:
 
 def _pdf(*objects: bytes) -> bytes:
     return b"%PDF-1.4\n" + b"".join(objects) + b"%%EOF"
+
+
+class _IndirectLengthStreamObject(StreamObject):
+    """A writer stream whose /Length remains an indirect reference."""
+
+    def write_to_stream(self, stream: BytesIO, encryption_key: object = None) -> None:
+        del encryption_key
+        DictionaryObject.write_to_stream(self, stream)
+        stream.write(b"\nstream\n")
+        stream.write(self._data)
+        stream.write(b"\nendstream")
+
+
+def _text_pdf(content: bytes, *, indirect_length: bool = False) -> bytes:
+    """Build a valid, one-page PDF containing the supplied text operators."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=200)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+            NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {
+            NameObject("/Font"): DictionaryObject(
+                {NameObject("/F1"): writer._add_object(font)}
+            )
+        }
+    )
+    stream_data = b"BT /F1 12 Tf " + content + b" ET"
+    if indirect_length:
+        stream = _IndirectLengthStreamObject()
+        stream._data = stream_data
+        stream[NameObject("/Length")] = writer._add_object(
+            NumberObject(len(stream_data))
+        )
+    else:
+        stream = DecodedStreamObject()
+        stream.set_data(stream_data)
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+def _image_only_pdf() -> bytes:
+    """Build a valid page that contains only an image XObject."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=200)
+    image = StreamObject()
+    image._data = b"bounded encoded image fixture"
+    image.update(
+        {
+            NameObject("/Type"): NameObject("/XObject"),
+            NameObject("/Subtype"): NameObject("/Image"),
+            NameObject("/Width"): NumberObject(1),
+            NameObject("/Height"): NumberObject(1),
+            NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
+            NameObject("/BitsPerComponent"): NumberObject(8),
+            NameObject("/Filter"): NameObject("/DCTDecode"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {
+            NameObject("/XObject"): DictionaryObject(
+                {NameObject("/Im1"): writer._add_object(image)}
+            )
+        }
+    )
+    content = DecodedStreamObject()
+    content.set_data(b"q 1 0 0 1 0 0 cm /Im1 Do Q")
+    page[NameObject("/Contents")] = writer._add_object(content)
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
 
 
 class NormalizationTests(unittest.TestCase):
@@ -491,6 +580,49 @@ class NormalizationTests(unittest.TestCase):
             any(section.anchor.startswith("ENTRY 2") for section in feed_diff.sections)
         )
 
+    def test_long_feed_entry_ids_keep_full_identity_with_bounded_output(self) -> None:
+        # A bare ``stable_id[:1_000]`` makes IDs that differ only after that
+        # boundary indistinguishable. Both RSS GUIDs and Atom IDs are entry
+        # anchors, so preserve the full identity in a digest while retaining
+        # the existing output-size bound.
+        common_prefix = "a" * 1_000
+
+        def render(entry_id: str, feed_kind: str) -> bytes:
+            if feed_kind == "rss":
+                return (
+                    "<rss><channel><item><guid>"
+                    f"{entry_id}</guid><title>Post</title>"
+                    "</item></channel></rss>"
+                ).encode()
+            return (
+                '<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>'
+                f"{entry_id}</id><title>Post</title>"
+                "</entry></feed>"
+            ).encode()
+
+        for feed_kind, content_type in (
+            ("rss", "application/rss+xml"),
+            ("atom", "application/atom+xml"),
+        ):
+            with self.subTest(feed_kind=feed_kind):
+                before = normalize_content(
+                    render(f"{common_prefix}-old", feed_kind),
+                    content_type=content_type,
+                )
+                after = normalize_content(
+                    render(f"{common_prefix}-new", feed_kind),
+                    content_type=content_type,
+                )
+                before_entry_id = before.text.splitlines()[0].removeprefix("ENTRY ")
+                after_entry_id = after.text.splitlines()[0].removeprefix("ENTRY ")
+
+                self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+                self.assertNotEqual(before_entry_id, after_entry_id)
+                self.assertLessEqual(len(before_entry_id), 1_000)
+                self.assertLessEqual(len(after_entry_id), 1_000)
+                self.assertIn("[sha256:", before_entry_id)
+                self.assertIn("[sha256:", after_entry_id)
+
     def test_rss_content_encoded_body_is_captured(self) -> None:
         xml = b"""<?xml version="1.0"?>
         <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
@@ -634,31 +766,48 @@ class NormalizationTests(unittest.TestCase):
             normalize_content(deep, content_type="text/html")
 
     def test_text_pdf_and_pdf_failures(self) -> None:
-        pdf = _pdf(_pdf_stream(1, b"BT (Hello PDF) Tj ET"))
+        pdf = _text_pdf(b"(Hello PDF) Tj")
         result = normalize_content(pdf, content_type="application/pdf")
         self.assertEqual("pdf", result.kind)
         self.assertIn("Hello PDF", result.text)
         encrypted = b"%PDF-1.4\n1 0 obj << /Encrypt 2 0 R >> endobj\n%%EOF"
         with self.assertRaisesRegex(MonitorError, "encrypted"):
             normalize_content(encrypted, content_type="application/pdf")
-        image_only = _pdf(
-            _pdf_stream(1, b"abc", extra=b"/Type /XObject /Subtype /Image")
-        )
+        image_only = _image_only_pdf()
         with self.assertRaisesRegex(MonitorError, "image-only"):
             normalize_content(image_only, content_type="application/pdf")
 
+    def test_pdf_parser_is_lazy_and_reports_a_missing_capability(self) -> None:
+        # HTML-only callers must not need pypdf just because normalize.py
+        # imports the PDF normalizer. A PDF request should instead return a
+        # stable, actionable error when the optional runtime capability is
+        # absent.
+        pdf = _text_pdf(b"(Parser capability) Tj")
+        original_import = builtins.__import__
+
+        def reject_pypdf(
+            name: str,
+            globals: object = None,
+            locals: object = None,
+            fromlist: object = (),
+            level: int = 0,
+        ) -> object:
+            if name == "pypdf" or name.startswith("pypdf."):
+                raise ModuleNotFoundError(
+                    f"No module named {name!r}", name=name
+                )
+            return original_import(name, globals, locals, fromlist, level)
+
+        with patch("builtins.__import__", new=reject_pypdf):
+            html = normalize_content(
+                b"<html><body><main>HTML remains available</main></body></html>",
+                content_type="text/html",
+            )
+            self.assertIn("HTML remains available", html.text)
+            with self.assertRaisesRegex(MonitorError, "pdf_parser_unavailable"):
+                normalize_content(pdf, content_type="application/pdf")
+
     def test_generated_text_pdf_with_filtered_images_is_extracted(self) -> None:
-        from io import BytesIO
-
-        from pypdf import PdfWriter
-        from pypdf.generic import (
-            DecodedStreamObject,
-            DictionaryObject,
-            NameObject,
-            NumberObject,
-            StreamObject,
-        )
-
         writer = PdfWriter()
         page = writer.add_blank_page(width=300, height=200)
         font = DictionaryObject(
@@ -728,15 +877,15 @@ class NormalizationTests(unittest.TestCase):
         # runs (e.g. a font/CMap-encoded value between literal label text).
         # Only extracting the literal runs would keep the normalized hash
         # stable even when the hex-encoded content changes.
-        mixed = _pdf(_pdf_stream(1, b"BT [(Hello ) <576f726c64>] TJ ET"))
+        mixed = _text_pdf(b"[(Hello ) <576f726c64>] TJ")
         result = normalize_content(mixed, content_type="application/pdf")
         self.assertIn("Hello World", result.text)
         before = normalize_content(
-            _pdf(_pdf_stream(1, b"BT [(Total: ) <30303030>] TJ ET")),
+            _text_pdf(b"[(Total: ) <30303030>] TJ"),
             content_type="application/pdf",
         )
         after = normalize_content(
-            _pdf(_pdf_stream(1, b"BT [(Total: ) <39393939>] TJ ET")),
+            _text_pdf(b"[(Total: ) <39393939>] TJ"),
             content_type="application/pdf",
         )
         self.assertIn("Total: 0000", before.text)
@@ -750,11 +899,11 @@ class NormalizationTests(unittest.TestCase):
         # silently drops content shown only via ' or ", so an edit confined
         # to that content would leave the normalized hash unchanged.
         before = normalize_content(
-            _pdf(_pdf_stream(1, b"BT (Header) Tj (Old status) ' ET")),
+            _text_pdf(b"(Header) Tj (Old status) '"),
             content_type="application/pdf",
         )
         after = normalize_content(
-            _pdf(_pdf_stream(1, b"BT (Header) Tj (New status) ' ET")),
+            _text_pdf(b"(Header) Tj (New status) '"),
             content_type="application/pdf",
         )
         self.assertIn("Old status", before.text)
@@ -762,7 +911,7 @@ class NormalizationTests(unittest.TestCase):
         self.assertNotEqual(before.normalized_hash, after.normalized_hash)
 
         double_quote = normalize_content(
-            _pdf(_pdf_stream(1, b'BT (Header) Tj 0 0 (Quoted status) " ET')),
+            _text_pdf(b'(Header) Tj 0 0 (Quoted status) "'),
             content_type="application/pdf",
         )
         self.assertIn("Quoted status", double_quote.text)
@@ -770,17 +919,15 @@ class NormalizationTests(unittest.TestCase):
     def test_pdf_et_inside_a_string_operand_does_not_truncate_the_text_block(
         self,
     ) -> None:
-        # TEXT_BLOCK_RE locates a block by the first "ET" bytes after "BT".
         # A literal string operand that happens to contain "ET" (e.g. inside
-        # "status ET old") must not be mistaken for the end-text operator,
-        # or the block is truncated before the real Tj call and that text is
-        # silently dropped from the hash.
+        # "status ET old") must remain text rather than being mistaken for
+        # the end-text operator and silently dropped from the hash.
         before = normalize_content(
-            _pdf(_pdf_stream(1, b"BT (status ET old) Tj ET")),
+            _text_pdf(b"(status ET old) Tj"),
             content_type="application/pdf",
         )
         after = normalize_content(
-            _pdf(_pdf_stream(1, b"BT (status ET new) Tj ET")),
+            _text_pdf(b"(status ET new) Tj"),
             content_type="application/pdf",
         )
         self.assertIn("status ET old", before.text)
@@ -790,16 +937,15 @@ class NormalizationTests(unittest.TestCase):
     def test_pdf_et_inside_a_name_token_does_not_truncate_the_text_block(
         self,
     ) -> None:
-        # A name operand like "/ETMarker" contains the literal bytes "ET"
-        # outside of any string. Recognizing "BT"/"ET" by raw byte match
-        # without excluding name tokens truncates the block at that "ET",
-        # dropping the real Tj call that follows.
+        # A marked-content tag like "/ETMarker" contains the literal bytes
+        # "ET" outside of any string. It must not cause the real Tj call
+        # that follows to be silently dropped.
         before = normalize_content(
-            _pdf(_pdf_stream(1, b"BT /ETMarker 12 Tf (Old status) Tj ET")),
+            _text_pdf(b"/ETMarker BMC (Old status) Tj EMC"),
             content_type="application/pdf",
         )
         after = normalize_content(
-            _pdf(_pdf_stream(1, b"BT /ETMarker 12 Tf (New status) Tj ET")),
+            _text_pdf(b"/ETMarker BMC (New status) Tj EMC"),
             content_type="application/pdf",
         )
         self.assertIn("Old status", before.text)
@@ -813,11 +959,11 @@ class NormalizationTests(unittest.TestCase):
         # that follows and silently dropping the whole operand instead of
         # extracting "Old (status)".
         before = normalize_content(
-            _pdf(_pdf_stream(1, b"BT (Stable) Tj ET BT (Old (status)) Tj ET")),
+            _text_pdf(b"(Stable) Tj (Old (status)) Tj"),
             content_type="application/pdf",
         )
         after = normalize_content(
-            _pdf(_pdf_stream(1, b"BT (Stable) Tj ET BT (New (status)) Tj ET")),
+            _text_pdf(b"(Stable) Tj (New (status)) Tj"),
             content_type="application/pdf",
         )
         self.assertIn("Old (status)", before.text)
@@ -835,16 +981,16 @@ class NormalizationTests(unittest.TestCase):
         # changes -- would be silently dropped from the normalized hash.
         def stream(edit: bytes) -> bytes:
             return (
-                b"BT (marker\nendstream inside a string) Tj ET "
-                b"BT (Stable) Tj ET BT (" + edit + b") Tj ET"
+                b"(marker\nendstream inside a string) Tj "
+                b"(Stable) Tj (" + edit + b") Tj"
             )
 
         before = normalize_content(
-            _pdf(_pdf_stream(1, stream(b"Old edit"))),
+            _text_pdf(stream(b"Old edit")),
             content_type="application/pdf",
         )
         after = normalize_content(
-            _pdf(_pdf_stream(1, stream(b"New edit"))),
+            _text_pdf(stream(b"New edit")),
             content_type="application/pdf",
         )
         self.assertIn("Stable", before.text)
@@ -853,10 +999,10 @@ class NormalizationTests(unittest.TestCase):
         self.assertNotEqual(before.normalized_hash, after.normalized_hash)
 
     def test_pdf_stream_keyword_inside_a_stream_body_is_not_rescanned(self) -> None:
-        body = b"BT (marker\nstream\ninside a string) Tj ET"
+        body = b"(marker\nstream\ninside a string) Tj"
 
         normalized = normalize_content(
-            _pdf(_pdf_stream(1, body)),
+            _text_pdf(body),
             content_type="application/pdf",
         )
 
@@ -911,11 +1057,7 @@ class NormalizationTests(unittest.TestCase):
     def test_pdf_indirect_length_reference_is_resolved(self) -> None:
         # /Length can be an indirect reference ("N G R") to a separate
         # object holding the bare integer, not just a direct integer.
-        body = b"BT (Indirect length) Tj ET"
-        pdf = _pdf(
-            b"1 0 obj\n<< /Length 2 0 R >>\nstream\n" + body + b"\nendstream\nendobj\n",
-            f"2 0 obj\n{len(body)}\nendobj\n".encode(),
-        )
+        pdf = _text_pdf(b"(Indirect length) Tj", indirect_length=True)
         result = normalize_content(pdf, content_type="application/pdf")
         self.assertIn("Indirect length", result.text)
 
@@ -1018,6 +1160,20 @@ class NormalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(MonitorError, "malformed"):
             normalize_content(named_encoding, content_type="application/pdf")
 
+        # A PDF name may encode letters with #xx escapes. The prior raw-byte
+        # gate did not recognize these names and could route this font-backed
+        # stream to a Latin-1 operand decoder; every accepted PDF now uses
+        # the font-aware parser instead.
+        escaped_font_names = (
+            b"%PDF-1.4\n1 0 obj\n"
+            b"<< /Type /F#6fnt /Subtype /Type1 /Base#46ont /Symbol >>\n"
+            b"endobj\n"
+            + _pdf_stream(2, b"BT /F1 12 Tf <41> Tj ET")
+            + b"%%EOF"
+        )
+        with self.assertRaisesRegex(MonitorError, "malformed"):
+            normalize_content(escaped_font_names, content_type="application/pdf")
+
         # A simple font can omit /Encoding and use its built-in encoding.
         for base_font in (b"Helvetica", b"Symbol"):
             with self.subTest(base_font=base_font):
@@ -1041,9 +1197,9 @@ class NormalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(MonitorError, "malformed"):
             normalize_content(composite_font, content_type="application/pdf")
 
-        # A compressed object stream can hide a font/Encoding dictionary
-        # from this raw marker scan entirely, so its mere presence must
-        # also be rejected rather than assumed safe.
+        # A compressed object stream can hide a font/Encoding dictionary,
+        # so a raw fallback would not be safe even if no obvious font name
+        # were present in the top-level bytes.
         object_stream = (
             b"%PDF-1.4\n1 0 obj\n<< /Type /ObjStm /N 1 >>\nendobj\n"
             b"2 0 obj\n<< /Length 20 >>\nstream\n"

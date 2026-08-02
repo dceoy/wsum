@@ -9,8 +9,6 @@ import zlib
 from io import BytesIO
 
 from errors import MonitorError
-from pypdf import PdfReader
-from pypdf.errors import PdfReadError
 
 # Locates only the "stream" keyword + its required end-of-line marker (CRLF
 # or LF, never a bare CR -- see PDF spec 7.3.8.1). The stream's actual end
@@ -28,8 +26,6 @@ OBJECT_HEADER_RE = re.compile(rb"(\d+)\s+(\d+)\s+obj\b")
 LENGTH_RE = re.compile(rb"/Length\s+(\d+)(?:\s+(\d+)\s+R\b)?")
 FILTER_RE = re.compile(rb"/Filter\s*(/[A-Za-z0-9]+|\[[^\]]*\])")
 FILTER_NAME_RE = re.compile(rb"/[A-Za-z0-9]+")
-TEXT_BLOCK_RE = re.compile(rb"BT(.*?)ET", re.DOTALL)
-TJ_ARRAY_RE = re.compile(rb"\[(.*?)\]\s*TJ", re.DOTALL)
 METADATA_RE = re.compile(rb"/(Title|Author|Subject)\s*\((?:\\.|[^\\()])*\)")
 
 _PDF_WHITESPACE = frozenset(b" \t\r\n\f\x00")
@@ -111,77 +107,6 @@ def _scan_tokens(data: bytes) -> list[tuple[str, int, int]]:
     return tokens
 
 
-def _mask_strings_and_comments(stream: bytes) -> bytes:
-    # Replace comment/string/name regions with same-length, content-free
-    # placeholder bytes so operator matching (BT/ET, TJ array brackets) on
-    # the masked copy only ever sees bytes that are real operators, while
-    # callers still slice the *original* bytes at the located offsets to
-    # decode the real operand content.
-    masked = bytearray(stream)
-    for _, start, end in _scan_tokens(stream):
-        masked[start:end] = b"." * (end - start)
-    return bytes(masked)
-
-
-def _string_spans(data: bytes) -> list[tuple[int, int]]:
-    return [
-        (start, end)
-        for kind, start, end in _scan_tokens(data)
-        if kind in ("literal_string", "hex_string")
-    ]
-
-
-def _decode_operand(data: bytes, start: int, end: int) -> str:
-    value = data[start:end]
-    if value.startswith(b"("):
-        return _decode_literal(value)
-    return _decode_hex(value)
-
-
-def _text_blocks(stream: bytes) -> list[bytes]:
-    masked = _mask_strings_and_comments(stream)
-    return [
-        stream[match.start(1) : match.end(1)]
-        for match in TEXT_BLOCK_RE.finditer(masked)
-    ]
-
-
-def _text_fragments(block: bytes) -> list[str]:
-    masked_block = _mask_strings_and_comments(block)
-    spans = _string_spans(block)
-    consumed: set[int] = set()
-    fragments: list[str] = []
-
-    for array_match in TJ_ARRAY_RE.finditer(masked_block):
-        array_start, array_end = array_match.span(1)
-        array_spans = [
-            (start, end) for start, end in spans if array_start <= start < array_end
-        ]
-        consumed.update(start for start, _ in array_spans)
-        text = "".join(
-            _decode_operand(block, start, end) for start, end in array_spans
-        ).strip()
-        if text:
-            fragments.append(text)
-
-    length = len(masked_block)
-    for start, end in spans:
-        if start in consumed:
-            continue
-        position = end
-        while position < length and masked_block[position] in _PDF_WHITESPACE:
-            position += 1
-        is_show_text_operator = masked_block[position : position + 2] == b"Tj" or (
-            masked_block[position : position + 1] in (b"'", b'"')
-        )
-        if not is_show_text_operator:
-            continue
-        text = _decode_operand(block, start, end).strip()
-        if text:
-            fragments.append(text)
-    return fragments
-
-
 def _decode_literal(value: bytes) -> str:
     if value.startswith(b"(") and value.endswith(b")"):
         value = value[1:-1]
@@ -234,19 +159,6 @@ def _decode_literal(value: bytes) -> str:
         except UnicodeDecodeError:
             continue
     return output.decode("latin-1", errors="replace")
-
-
-def _decode_hex(value: bytes) -> str:
-    compact = re.sub(rb"\s+", b"", value.strip()[1:-1])
-    if len(compact) % 2:
-        compact += b"0"
-    try:
-        raw = bytes.fromhex(compact.decode("ascii"))
-    except (UnicodeDecodeError, ValueError):
-        return ""
-    if raw.startswith(b"\xfe\xff"):
-        return raw[2:].decode("utf-16-be", errors="replace")
-    return raw.decode("latin-1", errors="replace")
 
 
 def _bounded_decompress(value: bytes, limit: int) -> bytes:
@@ -398,8 +310,8 @@ def _resolve_length(
     return int(match.group(1))
 
 
-def _stream_data(pdf: bytes, limit: int) -> tuple[list[bytes], bool]:
-    streams: list[bytes] = []
+def _validate_streams(pdf: bytes, limit: int) -> bool:
+    """Bound every non-image stream before passing the PDF to pypdf."""
     has_image_stream = False
     total = 0
     object_starts, object_by_id = _object_offsets(pdf)
@@ -463,14 +375,27 @@ def _stream_data(pdf: bytes, limit: int) -> tuple[list[bytes], bool]:
                 "pdf_decompressed_too_large",
                 "PDF content streams exceed the size limit",
             )
-        streams.append(stream)
-    return streams, has_image_stream
+    return has_image_stream
+
+
+def _load_pdf_reader() -> tuple[object, type[Exception]]:
+    """Load the optional parser only when a PDF actually needs normalization."""
+    try:
+        from pypdf import PdfReader
+        from pypdf.errors import PdfReadError
+    except ImportError as exc:
+        raise MonitorError(
+            "pdf_parser_unavailable",
+            "PDF normalization requires the optional pypdf package",
+        ) from exc
+    return PdfReader, PdfReadError
 
 
 def _extract_font_aware_text(
     pdf: bytes, *, max_pages: int, max_extracted_chars: int
 ) -> list[str]:
     """Extract text with the PDF's active font encodings and CMaps."""
+    PdfReader, PdfReadError = _load_pdf_reader()
     try:
         reader = PdfReader(BytesIO(pdf), strict=True)
         if reader.is_encrypted:
@@ -514,34 +439,16 @@ def extract_pdf_text(
         raise MonitorError("pdf_object_limit", "PDF object count exceeds the limit")
 
     # Validate every text/content stream and bound its aggregate decoded size
-    # before the font-aware parser sees it. Image XObjects are skipped because
-    # PdfReader's text extractor does not decode them; their encoded bytes are
-    # still covered by the whole-document input cap.
-    streams, has_image_stream = _stream_data(pdf, max_decompressed_bytes)
-    uses_fonts = any(
-        marker in pdf
-        for marker in (
-            b"/Font",
-            b"/BaseFont",
-            b"/Encoding",
-            b"/ToUnicode",
-            b"/Type0",
-            b"/ObjStm",
-        )
+    # before pypdf sees it. Image XObjects are skipped because pypdf's text
+    # extractor does not decode them; their encoded bytes are still covered by
+    # the whole-document input cap. Every accepted PDF then uses pypdf so
+    # active fonts, inherited resources, and CMaps determine its text.
+    has_image_stream = _validate_streams(pdf, max_decompressed_bytes)
+    fragments = _extract_font_aware_text(
+        pdf,
+        max_pages=max_pages,
+        max_extracted_chars=max_decompressed_bytes,
     )
-    if uses_fonts:
-        fragments = _extract_font_aware_text(
-            pdf,
-            max_pages=max_pages,
-            max_extracted_chars=max_decompressed_bytes,
-        )
-    else:
-        # Retain the bounded lexer for deliberately simple, font-less PDF
-        # content streams used by lightweight producers and fixtures.
-        fragments = []
-        for stream in streams:
-            for block in _text_blocks(stream):
-                fragments.extend(_text_fragments(block))
     lines = [
         re.sub(r"\s+", " ", unicodedata.normalize("NFKC", fragment)).strip()
         for fragment in fragments

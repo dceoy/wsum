@@ -13,6 +13,8 @@ from errors import MonitorError
 from models import validate_http_url
 from network_policy import canonicalize_url
 
+MAX_STABLE_ID_CHARS = 1_000
+
 
 def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1].lower()
@@ -60,6 +62,16 @@ def _all_text(element: ET.Element, *names: str) -> str:
             if cleaned not in seen:
                 seen.append(cleaned)
     return " ".join(seen)
+
+
+def _bounded_stable_id(value: str) -> str:
+    """Keep a bounded feed-entry key without losing long-ID identity."""
+    if len(value) <= MAX_STABLE_ID_CHARS:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    suffix = f" [sha256:{digest}]"
+    prefix_limit = MAX_STABLE_ID_CHARS - len(suffix)
+    return value[:prefix_limit] + suffix
 
 
 def _entry_link(element: ET.Element) -> str:
@@ -201,7 +213,7 @@ def normalize_feed(
             stable_id = hashlib.sha256(
                 f"{title}\n{published}\n{content}\n{source_identity}".encode()
             ).hexdigest()
-        stable_id = stable_id[:1_000]
+        stable_id = _bounded_stable_id(stable_id)
         fields = (
             f"ENTRY {stable_id}",
             f"TITLE {title}" if title else "",

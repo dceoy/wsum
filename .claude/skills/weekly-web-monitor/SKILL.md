@@ -124,6 +124,12 @@ Outbox row `sent`.
 
 ## Deterministic commands
 
+PDF normalization and the complete test suite require the `pypdf` parser:
+
+```bash
+python3 -m pip install 'pypdf>=6,<7'
+```
+
 Run a complete connector-free fixture:
 
 ```bash
