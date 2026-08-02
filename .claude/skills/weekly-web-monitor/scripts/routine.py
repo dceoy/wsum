@@ -499,7 +499,7 @@ class WeeklyMonitorRoutine:
             try:
                 previous_state = self._state(target)
                 state_loaded = True
-            except Exception:
+            except Exception:  # noqa: S110 - the second load is best-effort
                 pass
         failed_state = replace(
             previous_state,
@@ -532,13 +532,16 @@ class WeeklyMonitorRoutine:
             started_at,
             combined,
         )
+        failure_state_committed = False
         try:
             if state_loaded:
                 self._persist_success(failed_state, run)
+                failure_state_committed = True
             else:
                 self._append_run(run)
         finally:
-            self._failure_alert(target, failed_state, error.code, run_id)
+            if failure_state_committed:
+                self._failure_alert(target, failed_state, error.code, run_id)
             self._audit(
                 "target_execution",
                 target_id=target.target_id,

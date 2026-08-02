@@ -542,6 +542,39 @@ class NormalizationTests(unittest.TestCase):
         self.assertNotIn("https://example.com/feed/entry/1", before)
         self.assertNotEqual(before, after)
 
+    def test_atom_external_content_source_is_canonicalized_and_captured(self) -> None:
+        def render(source: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <feed xmlns="http://www.w3.org/2005/Atom">
+              <entry>
+                <id>tag:example,1</id><title>Post</title>
+                <content src="{source}"/>
+              </entry>
+            </feed>""".encode()
+            text, _ = normalize_feed(xml)
+            return text
+
+        before = render("https://EXAMPLE.com:443/external/v1")
+        after = render("https://example.com/external/v2")
+        self.assertIn("CONTENT_SRC https://example.com/external/v1", before)
+        self.assertNotEqual(before, after)
+
+    def test_atom_relative_external_content_source_is_rejected(self) -> None:
+        relative = b"""<feed xmlns="http://www.w3.org/2005/Atom"
+            xml:base="https://example.com/">
+          <entry><id>tag:example,1</id><content src="external/v1"/></entry>
+        </feed>"""
+        with self.assertRaisesRegex(MonitorError, "absolute HTTP"):
+            normalize_feed(relative)
+
+        credential_source = b"""<feed xmlns="http://www.w3.org/2005/Atom">
+          <entry><id>tag:example,1</id>
+            <content src="https://example.com/external?token=secret"/>
+          </entry>
+        </feed>"""
+        with self.assertRaisesRegex(MonitorError, "unsafe external content"):
+            normalize_feed(credential_source)
+
     def test_feed_relative_entry_link_is_explicitly_rejected(self) -> None:
         relative = b"""<feed xmlns="http://www.w3.org/2005/Atom"
             xml:base="https://example.com/">

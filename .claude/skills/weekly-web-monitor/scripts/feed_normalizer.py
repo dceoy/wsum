@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from errors import MonitorError
 from models import validate_http_url
+from network_policy import canonicalize_url
 
 
 def _local_name(tag: str) -> str:
@@ -97,6 +98,40 @@ def _entry_link(element: ET.Element) -> str:
     return ""
 
 
+def _external_content_sources(element: ET.Element) -> tuple[str, ...]:
+    sources: list[str] = []
+    for child in _children(element, "content"):
+        source = child.attrib.get("src")
+        if source is None:
+            continue
+        value = source.strip()
+        try:
+            parsed = urlsplit(value)
+        except ValueError as exc:
+            raise MonitorError(
+                "feed_unsafe_content_source",
+                "feed entry contains an unsafe external content source",
+            ) from exc
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            # Atom permits xml:base inheritance, but this bounded normalizer
+            # does not implement base-URI inheritance. Reject relative
+            # sources instead of silently omitting their identity.
+            raise MonitorError(
+                "feed_relative_content_source",
+                "Atom content src must be an absolute HTTP(S) URL",
+            )
+        try:
+            canonical, _ = canonicalize_url(value)
+        except MonitorError as exc:
+            raise MonitorError(
+                "feed_unsafe_content_source",
+                "feed entry contains an unsafe external content source",
+            ) from exc
+        if canonical not in sources:
+            sources.append(canonical)
+    return tuple(sources)
+
+
 def normalize_feed(
     xml: bytes,
     *,
@@ -158,9 +193,13 @@ def normalize_feed(
         published = _first_text(entry, "pubdate", "published")
         updated = _first_text(entry, "updated")
         content = _all_text(entry, "description", "summary", "content", "encoded")
+        content_sources = (
+            _external_content_sources(entry) if feed_kind == "atom" else ()
+        )
         if not stable_id:
+            source_identity = "\n".join(content_sources)
             stable_id = hashlib.sha256(
-                f"{title}\n{published}\n{content}".encode()
+                f"{title}\n{published}\n{content}\n{source_identity}".encode()
             ).hexdigest()
         stable_id = stable_id[:1_000]
         fields = (
@@ -170,6 +209,7 @@ def normalize_feed(
             f"PUBLISHED {published}" if published else "",
             f"UPDATED {updated}" if updated else "",
             f"CONTENT {content}" if content else "",
+            *(f"CONTENT_SRC {source}" for source in content_sources),
         )
         normalized_entries.append(
             (stable_id, tuple(field for field in fields if field))

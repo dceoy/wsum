@@ -350,6 +350,46 @@ class RoutineTests(unittest.TestCase):
         self.assertEqual("unchanged", store.runs["run-2:one"].result)
         self.assertEqual(baseline_state, store.states["one"])
 
+    def test_failure_alert_waits_for_durable_failure_state(self) -> None:
+        transient = MonitorError("fetch_timeout", "fixture timeout", retryable=True)
+        for index in range(1, 3):
+            self.run_cycle(
+                transient,
+                f"run-{index}",
+                retry=RetryConfig(max_attempts=1),
+            )
+        self.assertEqual(2, self.store.states["one"].consecutive_failures)
+
+        class FailingStateStore(MemoryOperationalStore):
+            def replace_state(self, state) -> None:
+                del state
+                raise MonitorError("state_write_failed", "simulated write failure")
+
+        store = FailingStateStore([self.target])
+        store.states = dict(self.store.states)
+        store.runs = dict(self.store.runs)
+        slack = MemorySlackConnector()
+        routine = WeeklyMonitorRoutine(
+            store=store,
+            snapshots=self.snapshots,
+            summary_client=EvidenceSummaryClient(),
+            slack=slack,
+            fetcher=FixtureFetcher({"one": transient}),
+            config=RoutineConfig(
+                max_concurrency=2,
+                retry=RetryConfig(max_attempts=1),
+                failure_alert_threshold=3,
+            ),
+            sleeper=lambda _: None,
+        )
+
+        result = routine.run(run_id="run-3")
+
+        self.assertEqual(1, result.metrics.failed)
+        self.assertEqual(2, store.states["one"].consecutive_failures)
+        self.assertEqual([], slack.messages)
+        self.assertEqual({}, store.notifications)
+
     def test_one_target_failure_does_not_abort_other_targets(self) -> None:
         targets = [make_target("good"), make_target("bad")]
         store = MemoryOperationalStore(targets)
