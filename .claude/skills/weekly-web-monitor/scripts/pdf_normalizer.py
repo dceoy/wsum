@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import bisect
+import hashlib
 import re
 import unicodedata
 import zlib
 from io import BytesIO
+from urllib.parse import urlsplit
 
 from errors import MonitorError
+from network_policy import canonicalize_fragment_identity, canonicalize_url
 
 # Locates only the "stream" keyword + its required end-of-line marker (CRLF
 # or LF, never a bare CR -- see PDF spec 7.3.8.1). The stream's actual end
@@ -564,6 +567,82 @@ def _validate_streams(pdf: bytes, limit: int) -> bool:
     return has_image_stream
 
 
+# Bound both the number of link annotations examined per document and the
+# length of the URL text embedded in the normalized output. Mirrors
+# html_normalizer.MAX_LINK_ANNOTATIONS/MAX_LINK_URL_CHARS: page.extract_text()
+# only reads the visible content stream and omits /Annots URI actions, so
+# two PDFs with the same visible label but a changed clickable destination
+# (e.g. an "Apply" link retargeted to a different URL) would otherwise
+# normalize identically. The cap applies to every annotation node walked,
+# not just ones that resolve to an emitted destination, so a page with a
+# huge /Annots array cannot force unbounded work before a Link/URI
+# annotation is ever found.
+MAX_PDF_LINK_ANNOTATIONS = 500
+MAX_PDF_LINK_URL_CHARS = 300
+
+
+class _PdfLinkBudget:
+    __slots__ = ("remaining",)
+
+    def __init__(self, remaining: int) -> None:
+        self.remaining = remaining
+
+
+def _resolve_pdf_object(value: object) -> object:
+    get_object = getattr(value, "get_object", None)
+    return get_object() if callable(get_object) else value
+
+
+def _pdf_link_destination(uri: str) -> str:
+    # Same credential/SSRF policy and fragment-identity handling as
+    # html_normalizer._link_destination and
+    # feed_normalizer._content_link_destination: reject credential-bearing
+    # HTTP(S) destinations (fail closed), omit non-web schemes (mailto:,
+    # tel:, ...), and fold a non-sensitive fragment back into the identity
+    # since canonicalize_url always strips it.
+    value = uri.strip()
+    if not value:
+        return ""
+    try:
+        canonical, _ = canonicalize_url(value)
+    except MonitorError:
+        try:
+            scheme = urlsplit(value).scheme.lower()
+        except ValueError:
+            scheme = value.partition(":")[0].lower()
+        if scheme not in {"http", "https"}:
+            return ""
+        raise
+    fragment = canonicalize_fragment_identity(urlsplit(value).fragment)
+    identity = f"{canonical}#{fragment}" if fragment else canonical
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"{identity[:MAX_PDF_LINK_URL_CHARS]} [sha256:{digest}]"
+
+
+def _page_link_destinations(page: object, budget: _PdfLinkBudget) -> list[str]:
+    annotations = getattr(page, "annotations", None)
+    if not annotations:
+        return []
+    lines: list[str] = []
+    for annotation in annotations:
+        if budget.remaining <= 0:
+            raise MonitorError("pdf_link_limit", "PDF has too many link annotations")
+        budget.remaining -= 1
+        obj = _resolve_pdf_object(annotation)
+        if not isinstance(obj, dict) or obj.get("/Subtype") != "/Link":
+            continue
+        action = _resolve_pdf_object(obj.get("/A"))
+        if not isinstance(action, dict) or action.get("/S") != "/URI":
+            continue
+        uri = _resolve_pdf_object(action.get("/URI"))
+        if not isinstance(uri, str):
+            continue
+        destination = _pdf_link_destination(uri)
+        if destination:
+            lines.append(f"[link: {destination}]")
+    return lines
+
+
 def _load_pdf_reader() -> tuple[object, type[Exception]]:
     """Load the optional parser only when a PDF actually needs normalization."""
     try:
@@ -591,6 +670,7 @@ def _extract_font_aware_text(
 
         fragments: list[str] = []
         extracted_chars = 0
+        link_budget = _PdfLinkBudget(MAX_PDF_LINK_ANNOTATIONS)
         for page in reader.pages:
             page_text = page.extract_text() or ""
             extracted_chars += len(page_text)
@@ -600,6 +680,7 @@ def _extract_font_aware_text(
                     "PDF extracted text exceeds the size limit",
                 )
             fragments.extend(page_text.splitlines())
+            fragments.extend(_page_link_destinations(page, link_budget))
         return fragments
     except MonitorError:
         raise

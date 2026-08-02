@@ -10,7 +10,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
 from errors import MonitorError
-from network_policy import canonicalize_url
+from network_policy import canonicalize_fragment_identity, canonicalize_url
 
 VOID_TAGS = frozenset(
     {
@@ -78,7 +78,7 @@ BLOCK_TAGS = frozenset(
 )
 NOISE_TOKEN_RE = re.compile(
     r"(?:^|[-_])(?:ad|ads|advert|banner|breadcrumb|cookie|footer|"
-    r"menu|modal|nav|newsletter|popup|promo|sidebar|social|tracking)(?:$|[-_])",
+    r"menu|modal|nav|newsletter|popup|sidebar|social|tracking)(?:$|[-_])",
     re.IGNORECASE,
 )
 # Checked separately from ``NOISE_TOKEN_RE`` so it can honor the same
@@ -103,6 +103,20 @@ _SHARE_QUALIFIER = (
 SHARE_NOISE_TOKEN_RE = re.compile(
     rf"(?:^|[-_\s])(?:{_SHARE_QUALIFIER}[-_]share|share[-_]{_SHARE_QUALIFIER}|"
     rf"sharethis|addthis|addtoany)(?:$|[-_\s])",
+    re.IGNORECASE,
+)
+# ``promo`` alone is not a safe generic noise token: business content such
+# as a ``promo-code`` field or a ``product-promo-price`` widget uses the
+# same word as a marketing chrome banner/popup. Only treat it as boilerplate
+# when paired with an explicit chrome/widget qualifier, so a bare business
+# compound like ``promo-code`` survives.
+_PROMO_QUALIFIER = (
+    r"(?:banner|bar|modal|overlay|popup|strip|widget|widgets|top|site|"
+    r"header|footer)"
+)
+PROMO_NOISE_TOKEN_RE = re.compile(
+    rf"(?:^|[-_\s])(?:{_PROMO_QUALIFIER}[-_]promo|promo[-_]{_PROMO_QUALIFIER})"
+    rf"(?:$|[-_\s])",
     re.IGNORECASE,
 )
 TIMESTAMP_ONLY_RE = re.compile(
@@ -362,7 +376,11 @@ def _is_noise(node: Node) -> bool:
     }:
         return True
     tokens = f"{node.attrs.get('id', '')} {node.attrs.get('class', '')}"
-    if NOISE_TOKEN_RE.search(tokens) or SHARE_NOISE_TOKEN_RE.search(tokens):
+    if (
+        NOISE_TOKEN_RE.search(tokens)
+        or SHARE_NOISE_TOKEN_RE.search(tokens)
+        or PROMO_NOISE_TOKEN_RE.search(tokens)
+    ):
         return True
     return bool(HEADER_NOISE_TOKEN_RE.search(tokens)) and not _has_content_ancestor(
         node
@@ -377,10 +395,18 @@ def _link_destination(node: Node, attr: str, ctx: _LinkContext) -> str:
     # remaining budget (see MAX_LINK_ANNOTATIONS). Policy-denied HTTP(S)
     # destinations fail closed so credentials cannot enter stored artifacts,
     # even as offline-testable unsalted digests. Non-web schemes are omitted.
+    #
+    # canonicalize_url always strips the fragment (it is never sent to the
+    # server), so a fragment-only href (e.g. "#open") or a fragment-only
+    # destination change (e.g. "/apply#step1" -> "/apply#step2") would
+    # otherwise normalize identically to the unchanged page. The fragment
+    # is folded back into the identity/hash separately via
+    # canonicalize_fragment_identity, which also fails closed on
+    # credential-like fragments (e.g. OAuth implicit-flow "#access_token=").
     if not ctx.base_url:
         return ""
     value = node.attrs.get(attr, "").strip()
-    if not value or value.startswith("#"):
+    if not value:
         return ""
     resolved = urljoin(ctx.base_url, value)
     try:
@@ -398,8 +424,10 @@ def _link_destination(node: Node, attr: str, ctx: _LinkContext) -> str:
             "html_too_large", "HTML document has too many link destinations"
         )
     ctx.remaining -= 1
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return f"{canonical[:MAX_LINK_URL_CHARS]} [sha256:{digest}]"
+    fragment = canonicalize_fragment_identity(urlsplit(resolved).fragment)
+    identity = f"{canonical}#{fragment}" if fragment else canonical
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"{identity[:MAX_LINK_URL_CHARS]} [sha256:{digest}]"
 
 
 def _document_base_url(root: Node, fetched_url: str) -> str:

@@ -148,6 +148,34 @@ def canonicalize_url(value: str) -> tuple[str, SplitResult]:
     return canonical, urlsplit(canonical)
 
 
+MAX_FRAGMENT_IDENTITY_CHARS = 200
+
+
+def canonicalize_fragment_identity(fragment: str) -> str:
+    """Bound and validate a URL fragment for use in stored link identity.
+
+    ``canonicalize_url`` always strips the fragment because it is never
+    sent to the server, so callers that need a same-page destination change
+    (``#step1`` -> ``#step2``) to remain visible in normalized output must
+    track it separately. OAuth implicit-flow tokens (``#access_token=...``)
+    and similar credentials can appear here too, so the same credential-name
+    check used for query parameters applies and fails closed rather than
+    let a credential enter a stored/hashed artifact.
+    """
+    if not fragment:
+        return ""
+    if len(fragment) > 4_096 or any(
+        ord(char) < 32 or ord(char) == 127 for char in fragment
+    ):
+        raise _deny("URL fragment is malformed")
+    if any(
+        is_sensitive_query_name(name)
+        for name, _ in parse_qsl(fragment, keep_blank_values=True)
+    ):
+        raise _deny("credential-like URL fragment is forbidden")
+    return fragment[:MAX_FRAGMENT_IDENTITY_CHARS]
+
+
 def _addresses_from_resolution(
     host: str, port: int, resolver: Resolver
 ) -> tuple[str, ...]:

@@ -11,7 +11,7 @@ from urllib.parse import urljoin, urlsplit
 
 from errors import MonitorError
 from models import validate_http_url
-from network_policy import canonicalize_url
+from network_policy import canonicalize_fragment_identity, canonicalize_url
 
 MAX_STABLE_ID_CHARS = 1_000
 
@@ -68,8 +68,15 @@ def _content_link_destination(
     # Non-web schemes (mailto:, tel:, ...) are omitted, but a relative href
     # with no base to resolve against fails closed instead of silently
     # discarding what may be an http(s) destination update.
+    #
+    # canonicalize_url always strips the fragment, so a fragment-only href
+    # (e.g. "#open") or a fragment-only destination change (e.g.
+    # "/apply#step1" -> "/apply#step2") would otherwise normalize
+    # identically to the unchanged content. The fragment is folded back
+    # into the identity/hash via canonicalize_fragment_identity, which also
+    # fails closed on credential-like fragments.
     value = href.strip()
-    if not value or value.startswith("#"):
+    if not value:
         return ""
     resolved = urljoin(base_url, value) if base_url else value
     try:
@@ -92,8 +99,10 @@ def _content_link_destination(
             "feed_too_large", "feed entry has too many link destinations"
         )
     budget.remaining -= 1
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return f"{canonical[:MAX_CONTENT_LINK_URL_CHARS]} [sha256:{digest}]"
+    fragment = canonicalize_fragment_identity(urlsplit(resolved).fragment)
+    identity = f"{canonical}#{fragment}" if fragment else canonical
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"{identity[:MAX_CONTENT_LINK_URL_CHARS]} [sha256:{digest}]"
 
 
 class _ContentTextParser(HTMLParser):

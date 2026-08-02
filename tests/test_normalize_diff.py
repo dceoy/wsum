@@ -16,11 +16,13 @@ from feed_normalizer import normalize_feed
 from normalize import normalize_content
 from pdf_normalizer import _stream_filters, extract_pdf_text
 from pypdf import PdfWriter
+from pypdf.annotations import Link
 from pypdf.generic import (
     DecodedStreamObject,
     DictionaryObject,
     NameObject,
     NumberObject,
+    RectangleObject,
     StreamObject,
 )
 
@@ -126,6 +128,36 @@ def _text_pdf(content: bytes, *, indirect_length: bool = False) -> bytes:
         stream = DecodedStreamObject()
         stream.set_data(stream_data)
     page[NameObject("/Contents")] = writer._add_object(stream)
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+def _text_pdf_with_link(content: bytes, *, uri: str) -> bytes:
+    """Build a valid, one-page text PDF with a link annotation on the page."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=200)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+            NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {
+            NameObject("/Font"): DictionaryObject(
+                {NameObject("/F1"): writer._add_object(font)}
+            )
+        }
+    )
+    stream_data = b"BT /F1 12 Tf " + content + b" ET"
+    stream = DecodedStreamObject()
+    stream.set_data(stream_data)
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    link = Link(rect=RectangleObject((0, 0, 50, 50)), url=uri)
+    writer.add_annotation(page_number=0, annotation=link)
     output = BytesIO()
     writer.write(output)
     return output.getvalue()
@@ -304,6 +336,39 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
         )
         self.assertNotIn("Share this", share_widget.text)
+
+    def test_promo_business_content_is_not_dropped_as_noise(self) -> None:
+        # NOISE_TOKEN_RE used to treat any class/id token containing "promo"
+        # as boilerplate, so business content such as id="promo-code" or
+        # class="product-promo-price" was dropped wholesale -- a change
+        # confined to that promotion then left the normalized text and hash
+        # unchanged.
+        before = normalize_content(
+            b'<html><body><main><div id="promo-code">SAVE20</div>'
+            b'<div class="product-promo-price">100</div>'
+            b"</main></body></html>",
+            content_type="text/html",
+        )
+        after = normalize_content(
+            b'<html><body><main><div id="promo-code">SAVE30</div>'
+            b'<div class="product-promo-price">105</div>'
+            b"</main></body></html>",
+            content_type="text/html",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        self.assertIn("SAVE30", after.text)
+        self.assertIn("105", after.text)
+        # A genuine promo widget remains boilerplate and is still stripped.
+        # "promo-widget" (unlike "promo-banner") is not independently caught
+        # by NOISE_TOKEN_RE's generic tokens, so this exercises
+        # PROMO_NOISE_TOKEN_RE specifically rather than a pre-existing rule.
+        promo_widget = normalize_content(
+            b"<html><body><main><p>Body text.</p>"
+            b'<div class="promo-widget">Save big today</div>'
+            b"</main></body></html>",
+            content_type="text/html",
+        )
+        self.assertNotIn("Save big today", promo_widget.text)
 
     def test_http_charset_is_used_before_bom_or_body_sniffing(self) -> None:
         body = "価格改定のお知らせ".encode("shift_jis")
@@ -506,20 +571,53 @@ class NormalizationTests(unittest.TestCase):
                     )
                 self.assertNotIn(secret, str(captured.exception))
 
-    def test_in_page_and_relative_links_without_base_url_are_not_annotated(
-        self,
-    ) -> None:
-        same_fragment_only = normalize_content(
-            b'<main><p><a href="#section">Jump</a></p></main>',
-            content_type="text/html",
-            base_url="https://example.com/page",
-        )
-        self.assertNotIn("example.com", same_fragment_only.text)
+    def test_relative_links_without_base_url_are_not_annotated(self) -> None:
         no_base = normalize_content(
             b'<main><p><a href="/apply-v1">Apply</a></p></main>',
             content_type="text/html",
         )
         self.assertNotIn("/apply-v1", no_base.text)
+
+    def test_fragment_only_and_fragment_destination_changes_are_tracked(
+        self,
+    ) -> None:
+        # canonicalize_url always strips the fragment (it is never sent to
+        # the server), so without separate fragment-identity tracking a
+        # fragment-only href would be silently dropped and a fragment-only
+        # destination change would normalize identically to the unchanged
+        # page.
+        same_fragment_only = normalize_content(
+            b'<main><p><a href="#section">Jump</a></p></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertIn("example.com/page#section", same_fragment_only.text)
+
+        before = normalize_content(
+            b'<main><p><a href="/apply#step1">Apply</a></p></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<main><p><a href="/apply#step2">Apply</a></p></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_credential_bearing_link_fragment_fails_closed(self) -> None:
+        # OAuth implicit-flow tokens (and similar credentials) can appear in
+        # a URL fragment, so a fragment must fail closed exactly like a
+        # credential-bearing query parameter rather than being retained or
+        # hashed into a stored artifact.
+        source = b'<main><a href="/callback#access_token=secret123">Link</a></main>'
+        with self.assertRaises(MonitorError) as captured:
+            normalize_content(
+                source,
+                content_type="text/html",
+                base_url="https://example.com/page",
+            )
+        self.assertNotIn("secret123", str(captured.exception))
 
     def test_standalone_deadline_date_is_preserved_not_erased(self) -> None:
         # A date/time-only line is stripped as routine-timestamp noise, but
@@ -800,6 +898,46 @@ class NormalizationTests(unittest.TestCase):
         after = render("apply-v2")
         self.assertNotEqual(before, after)
         self.assertIn("Apply [https://example.com/jobs/apply-v1", before)
+
+    def test_feed_content_link_fragment_destination_change_is_tracked(
+        self,
+    ) -> None:
+        # canonicalize_url always strips the fragment, so a fragment-only
+        # destination change inside feed content (e.g. an in-page anchor
+        # retargeted from one step to another) must not be silently absorbed
+        # into an identical normalized text.
+        def render(href: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
+            <channel>
+              <link>https://example.com/jobs/</link>
+              <item>
+                <guid>job-1</guid>
+                <title>Job posting</title>
+                <description>&lt;a href="{href}"&gt;Apply&lt;/a&gt;</description>
+              </item>
+            </channel></rss>""".encode()
+            text, _ = normalize_feed(xml)
+            return text
+
+        before = render("apply#step1")
+        after = render("apply#step2")
+        self.assertNotEqual(before, after)
+
+    def test_feed_content_link_credential_fragment_fails_closed(self) -> None:
+        xml = b"""<?xml version="1.0"?>
+        <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
+        <channel>
+          <link>https://example.com/jobs/</link>
+          <item>
+            <guid>job-1</guid>
+            <title>Job posting</title>
+            <description>&lt;a href="https://example.com/callback#access_token=secret123"&gt;Apply&lt;/a&gt;</description>
+          </item>
+        </channel></rss>"""
+        with self.assertRaises(MonitorError) as captured:
+            normalize_feed(xml)
+        self.assertNotIn("secret123", str(captured.exception))
 
     def test_atom_xhtml_content_destination_only_change_is_not_missed(
         self,
@@ -1255,6 +1393,41 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertIn("Standard generated PDF", result.text)
         self.assertIn("Price: 42 USD", result.text)
+
+    def test_pdf_link_annotation_destination_only_change_is_not_missed(
+        self,
+    ) -> None:
+        # page.extract_text() reads only the visible content stream and
+        # omits /Annots URI actions, so two PDFs with the same visible
+        # label ("Apply") but a changed clickable destination must not
+        # normalize to the same text/hash.
+        before = normalize_content(
+            _text_pdf_with_link(b"(Apply) Tj", uri="https://example.com/apply-v1"),
+            content_type="application/pdf",
+        )
+        after = normalize_content(
+            _text_pdf_with_link(b"(Apply) Tj", uri="https://example.com/apply-v2"),
+            content_type="application/pdf",
+        )
+        self.assertIn("apply-v1", before.text)
+        self.assertIn("apply-v2", after.text)
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_pdf_link_annotation_credential_destination_fails_closed(
+        self,
+    ) -> None:
+        pdf = _text_pdf_with_link(
+            b"(Apply) Tj", uri="https://example.com/apply?token=secret123"
+        )
+        with self.assertRaises(MonitorError) as captured:
+            normalize_content(pdf, content_type="application/pdf")
+        self.assertNotIn("secret123", str(captured.exception))
+
+    def test_pdf_link_annotation_non_web_scheme_is_omitted(self) -> None:
+        pdf = _text_pdf_with_link(b"(Apply) Tj", uri="mailto:jobs@example.com")
+        result = normalize_content(pdf, content_type="application/pdf")
+        self.assertIn("Apply", result.text)
+        self.assertNotIn("jobs@example.com", result.text)
 
     def test_pdf_indirect_length_reference_is_resolved(self) -> None:
         # /Length can be an indirect reference ("N G R") to a separate
