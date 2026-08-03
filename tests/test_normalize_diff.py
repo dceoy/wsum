@@ -941,6 +941,41 @@ class NormalizationTests(unittest.TestCase):
         self.assertNotEqual(before, after)
         self.assertIn("Apply [https://example.com/jobs/apply-v1", before)
 
+    def test_feed_channel_link_change_is_tracked_with_fetched_base_url(
+        self,
+    ) -> None:
+        # normalize_content always passes the fetched final URL as base_url
+        # (routine.py wires base_url=fetched.final_url). With no xml:base
+        # anywhere, `base_url or link or feed_link` used to always select
+        # base_url, so an item with no <link> of its own kept resolving its
+        # relative content href against the unchanging fetch URL even when
+        # the channel <link> moved from /jobs-v1/ to /jobs-v2/, silently
+        # missing the destination change. Routed through normalize_content,
+        # like the real fetch -> normalize pipeline, rather than calling
+        # normalize_feed directly.
+        def render(channel_link: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <rss version="2.0">
+            <channel>
+              <link>{channel_link}</link>
+              <item>
+                <guid>job-1</guid>
+                <title>Job posting</title>
+                <description>&lt;a href="apply"&gt;Apply&lt;/a&gt;</description>
+              </item>
+            </channel></rss>""".encode()
+            return normalize_content(
+                xml,
+                content_type="application/rss+xml",
+                base_url="https://example.com/feed.xml",
+            ).text
+
+        before = render("https://example.com/jobs-v1/")
+        after = render("https://example.com/jobs-v2/")
+        self.assertNotEqual(before, after)
+        self.assertIn("Apply [https://example.com/jobs-v1/apply", before)
+        self.assertIn("Apply [https://example.com/jobs-v2/apply", after)
+
     def test_feed_xml_base_only_change_is_not_silently_missed(self) -> None:
         # xml:base overrides the base URI used to resolve relative content
         # links independent of <link> (XML Base). Here the entry's own

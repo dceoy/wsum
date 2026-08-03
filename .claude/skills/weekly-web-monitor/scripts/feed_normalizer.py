@@ -424,10 +424,17 @@ def normalize_feed(
         # xml:base on the feed root, channel/feed container, or entry
         # overrides the base URI used to resolve relative content links,
         # independent of <link> (see _xml_base_scope). The document's own
-        # fetched URL is the base a root-level xml:base resolves against;
-        # only when the caller has no fetched URL to offer does this fall
-        # back to `link or feed_link`, the prior behavior.
-        entry_base = _xml_base_scope(root, base_url or link or feed_link)
+        # fetched URL is the base a present root-level xml:base resolves
+        # against; with no root-level xml:base, `base_url` must not replace
+        # `link or feed_link` as the inherited base, or a feed with no
+        # xml:base anywhere would resolve every entry against the
+        # unchanging document URL and silently miss a destination change
+        # confined to the channel/feed <link>. `base_url` is still the
+        # right fallback when there is no link at all to prefer over it.
+        root_xml_base = root.attrib.get(_XML_BASE_ATTR, "").strip()
+        entry_base = _xml_base_scope(
+            root, base_url if root_xml_base else (link or feed_link or base_url)
+        )
         if root_name in {"rss", "rdf"} and channels:
             entry_base = _xml_base_scope(channels[0], entry_base)
         entry_base = _xml_base_scope(entry, entry_base)
