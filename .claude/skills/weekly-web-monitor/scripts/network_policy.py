@@ -187,6 +187,29 @@ def _split_nested_url(
     return None
 
 
+def _unquote_to_fixed_point(value: str, *, max_layers: int) -> tuple[str, bool]:
+    """Repeatedly percent-decode ``value`` until a further decode is a no-op.
+
+    A single ``unquote``/``parse_qsl`` pass only removes one layer of
+    percent-encoding, so a value that is still multiply-encoded at the
+    recursion budget boundary (e.g. ``%2561ccess_token%253Dabc``, two
+    decodes away from ``access_token=abc``) would pass a flat, one-pass
+    sensitive-name scan unnoticed. Bounded by ``max_layers`` for the same
+    reason ``_split_nested_url`` is bounded: an adversarial value could
+    otherwise force unbounded decoding work. The second return value is
+    ``False`` when the budget was exhausted without reaching a fixed point,
+    meaning further hidden structure may remain -- callers must fail closed
+    in that case rather than trust the partially-decoded text.
+    """
+    candidate = value
+    for _ in range(max_layers + 1):
+        decoded = unquote(candidate)
+        if decoded == candidate:
+            return candidate, True
+        candidate = decoded
+    return candidate, False
+
+
 def _nested_url_has_credential(
     value: str, *, depth: int, allow_path_relative: bool = False
 ) -> bool:
@@ -277,16 +300,27 @@ def has_credential_bearing_query(
     at all) is not itself evidence of a hidden credential, but exhausting it
     on text that *still* parses as a candidate nested URL is exactly the
     "we could not finish checking" case a credential boundary must fail
-    closed on.
+    closed on. A one-pass ``parse_qsl`` on that remaining text is not
+    enough either: the last hop's value can still be multiply encoded
+    (e.g. ``%2561ccess_token%253Dabc``, two decodes from
+    ``access_token=abc``) since a candidate only needs its outermost ``?``
+    exposed to be handed down another recursion level, so the name is
+    fully unquoted to a fixed point (also bounded, and also failing closed
+    if that budget runs out first) before the flat sensitive-name scan.
     """
     if depth > _MAX_NESTED_URL_DEPTH:
         if _split_nested_url(
             query, max_layers=_MAX_NESTED_URL_DEPTH, allow_path_relative=True
         ):
             return True
+        fully_decoded, reached_fixed_point = _unquote_to_fixed_point(
+            query, max_layers=_MAX_NESTED_URL_DEPTH
+        )
+        if not reached_fixed_point:
+            return True
         return any(
             is_sensitive_query_name(name)
-            for name, _ in parse_qsl(query, keep_blank_values=True)
+            for name, _ in parse_qsl(fully_decoded, keep_blank_values=True)
         )
     if _nested_url_has_credential(query, depth=depth):
         return True

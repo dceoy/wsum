@@ -598,6 +598,25 @@ class NetworkPolicyTests(unittest.TestCase):
                 "next2%253Dstep3%253Faccess_token%253Dsecret123"
             )
 
+    def test_canonicalize_url_rejects_credential_at_the_depth_budget_boundary(
+        self,
+    ) -> None:
+        # A six-hop path-relative chain pushes recursion past
+        # _MAX_NESTED_URL_DEPTH, landing in the budget-exhausted fallback
+        # with a query value that is *itself* still two percent-decodes
+        # away from "access_token=abc" ("%2561ccess_token%253Dabc"). A
+        # single parse_qsl pass there only exposes the blank-valued name
+        # "%61ccess_token%3Dabc", which isn't sensitive, so the credential
+        # must be found by unquoting the remaining text to a fixed point
+        # before the flat sensitive-name scan, not by a one-pass decode.
+        with self.assertRaisesRegex(MonitorError, "credential-like"):
+            canonicalize_url(
+                "https://example.com/?redirect=s1%3Fn1%3Ds2%253Fn2%253Ds3"
+                "%25253Fn3%25253Ds4%2525253Fn4%2525253Ds5%252525253Fn5"
+                "%252525253Ds6%25252525253F%2525252525252561ccess_token"
+                "%252525252525253Dabc"
+            )
+
     def test_benign_key_and_token_named_params_are_not_flagged(self) -> None:
         # A blanket "-key"/"-token" suffix would catch these too, but none
         # of them are credentials; over-flagging permanently rejects a
