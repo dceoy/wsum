@@ -459,6 +459,47 @@ class NetworkPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(MonitorError, "credential-like"):
             canonicalize_fragment_identity(webhook_fragment)
 
+    def test_canonicalize_url_rejects_nested_relative_reference_credential(
+        self,
+    ) -> None:
+        # _split_nested_url previously required the nested value to carry
+        # its own scheme or host, so a scheme-less relative reference like
+        # "/callback?access_token=secret" -- the common shape of an OAuth
+        # redirect target -- was never recursively inspected even though
+        # parse_qsl decodes it into the outer "redirect" value intact.
+        with self.assertRaisesRegex(MonitorError, "credential-like"):
+            canonicalize_url(
+                "https://example.com/?redirect=%2Fcallback%3Faccess_token"
+                "%3Dsecret123"
+            )
+
+    def test_canonicalize_url_allows_benign_nested_relative_reference(self) -> None:
+        # The relative-reference nested-URL check must not over-flag an
+        # ordinary relative redirect target that carries no credential-like
+        # query parameter of its own.
+        canonical, _ = canonicalize_url(
+            "https://example.com/?redirect=%2Fcallback%3Fpage%3D2"
+        )
+        self.assertEqual(
+            canonical, "https://example.com/?redirect=%2Fcallback%3Fpage%3D2"
+        )
+
+    def test_canonicalize_url_allows_query_value_with_literal_question_marks(
+        self,
+    ) -> None:
+        # A literal, unencoded "?" is legal inside a query value per
+        # RFC 3986 and is not a nested URL. Without a path-shape check, the
+        # relative-reference branch would treat each "?" as one more layer
+        # of nested reference and walk the bounded recursion depth into a
+        # false "credential-like" denial for an ordinary value that just
+        # happens to contain several of them.
+        canonical, _ = canonicalize_url(
+            "https://example.com/?q=a=1?b=2?c=3?d=4?e=5?f=6?g=7"
+        )
+        self.assertEqual(
+            canonical, "https://example.com/?q=a=1?b=2?c=3?d=4?e=5?f=6?g=7"
+        )
+
     def test_benign_key_and_token_named_params_are_not_flagged(self) -> None:
         # A blanket "-key"/"-token" suffix would catch these too, but none
         # of them are credentials; over-flagging permanently rejects a

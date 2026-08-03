@@ -131,15 +131,23 @@ def _is_webhook_credential_host_path(host: str, decoded_path: str) -> bool:
 
 
 def _split_nested_url(value: str, *, max_layers: int) -> SplitResult | None:
-    """Best-effort parse of ``value`` as a nested absolute or network-path URL.
+    """Best-effort parse of ``value`` as a nested absolute or relative URL.
 
     A single ``parse_qsl`` decode can still leave the nested URL encoded
     (e.g. ``%253A`` decodes to a literal ``%3A``, still hiding the URL's own
     ``:``), so this unquotes up to ``max_layers`` further times looking for
-    either an explicit ``http``/``https`` scheme or a scheme-relative
+    either an explicit ``http``/``https`` scheme, a scheme-relative
     network-path reference (``//host/...``, which carries no scheme of its
     own but is still fetched as the current scheme by browsers and HTTP
-    clients) before giving up. A malformed candidate, such as an unbalanced
+    clients), or a relative reference with no scheme/host at all (e.g.
+    ``/callback?access_token=secret``, the common shape of an OAuth or
+    signed-URL redirect target) before giving up. The relative-reference
+    case is restricted to an empty or absolute-path (leading ``/``) path
+    component so that an ordinary query *value* that merely contains a
+    literal, unencoded ``?`` (legal in a query per RFC 3986, and not a
+    nested URL at all) does not get treated as one layer of nested
+    reference per ``?`` and walk the recursion depth bound into a false
+    "credential-like" denial. A malformed candidate, such as an unbalanced
     IPv6-literal-style host, is treated as an opaque non-URL value rather
     than raised.
     """
@@ -153,6 +161,13 @@ def _split_nested_url(value: str, *, max_layers: int) -> SplitResult | None:
         if scheme in {"http", "https"} and split.hostname:
             return split
         if not scheme and split.netloc and split.hostname:
+            return split
+        if (
+            not scheme
+            and not split.netloc
+            and (not split.path or split.path.startswith("/"))
+            and (split.query or split.fragment)
+        ):
             return split
         decoded = unquote(candidate)
         if decoded == candidate:
@@ -180,10 +195,12 @@ def has_credential_bearing_query(query: str, *, depth: int = 0) -> bool:
     """Bounded recursive check for credential-bearing query values.
 
     A benign outer parameter name (e.g. "redirect") can carry a nested,
-    URL-encoded HTTP(S) or scheme-relative (network-path) URL whose own
-    query, fragment, embedded userinfo, or host/path carries the credential
-    (e.g. "?redirect=https%3A%2F%2Fidp.example%2Fcb%3Faccess_token%3Dsecret",
-    a nested Slack/Discord webhook URL possibly carried after a "#" instead
+    URL-encoded HTTP(S), scheme-relative (network-path), or scheme-less
+    relative-reference URL whose own query, fragment, embedded userinfo, or
+    host/path carries the credential (e.g.
+    "?redirect=https%3A%2F%2Fidp.example%2Fcb%3Faccess_token%3Dsecret",
+    "?redirect=%2Fcallback%3Faccess_token%3Dsecret" with no host at all, a
+    nested Slack/Discord webhook URL possibly carried after a "#" instead
     of a "?", or the same nested URL under an extra layer of percent-
     encoding), which ``parse_qsl`` decodes into the value but a flat
     exact-name/suffix check never re-inspects. Depth is bounded and fails

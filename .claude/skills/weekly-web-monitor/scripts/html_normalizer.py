@@ -496,12 +496,15 @@ def _text_content(node: Node, excluded: set[Node], ctx: _LinkContext) -> str:
                 and child.attrs.get("type", "").strip().lower()
                 in _SUBMIT_INPUT_TYPES
             ):
+                # The visible value/alt label is real user-facing content
+                # even when the control has no formaction of its own (it
+                # still submits via the form's normal action), so it must
+                # not be gated on an annotation being present.
                 annotation = _submit_control_annotation(child, ctx)
-                if annotation:
-                    label = _clean_line(
-                        child.attrs.get("value", "") or child.attrs.get("alt", "")
-                    )
-                    text = f"{label} {annotation}".strip()
+                label = _clean_line(
+                    child.attrs.get("value", "") or child.attrs.get("alt", "")
+                )
+                text = f"{label} {annotation}".strip()
             pieces.append(text)
     return " ".join(pieces)
 
@@ -591,14 +594,18 @@ def _extract_lines(root: Node, excluded: set[Node], ctx: _LinkContext) -> list[s
             and node.attrs.get("type", "").strip().lower() in _SUBMIT_INPUT_TYPES
         ):
             # Submit/image inputs are void elements with nothing further to
-            # visit, so returning unconditionally is safe even without a
-            # formaction (matching the prior no-output behavior for them).
+            # visit, so returning unconditionally is safe. The visible
+            # value/alt label is real user-facing content even when the
+            # control has no formaction of its own (it still submits via
+            # the form's normal action), so it is emitted regardless of
+            # whether formaction produced its own annotation.
             annotation = _submit_control_annotation(node, ctx)
-            if annotation:
-                label = _clean_line(
-                    node.attrs.get("value", "") or node.attrs.get("alt", "")
-                )
-                lines.append(f"{label} {annotation}".strip())
+            label = _clean_line(
+                node.attrs.get("value", "") or node.attrs.get("alt", "")
+            )
+            text = f"{label} {annotation}".strip()
+            if text:
+                lines.append(text)
             return
         if node.tag == "form":
             # A form's own text content (buttons/labels, handled by the

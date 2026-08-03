@@ -658,22 +658,59 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertEqual(before.normalized_hash, after.normalized_hash)
 
-    def test_submit_input_without_formaction_is_not_newly_annotated(self) -> None:
-        # A plain submit button with no formaction has nothing destination-
-        # related to report; annotating its value/alt label anyway would
-        # shift the hash of every page using an ordinary submit button.
+    def test_hidden_and_password_input_values_are_never_emitted(self) -> None:
+        # The submit/image label fix must stay scoped to _SUBMIT_INPUT_TYPES:
+        # a hidden or password input's value is not user-facing content, and
+        # must never be treated as a label regardless of where in the tree
+        # it appears.
+        result = normalize_content(
+            b'<main><p>Status: <input type="hidden" value="secret-token">'
+            b'<input type="password" value="hunter2"></p></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotIn("secret-token", result.text)
+        self.assertNotIn("hunter2", result.text)
+
+    def test_submit_input_label_change_without_formaction_is_not_silently_missed(
+        self,
+    ) -> None:
+        # A submit control's visible value/alt label is real user-facing
+        # content even when it has no formaction of its own (it still
+        # submits via the form's normal action), so losing it here would
+        # let a status change like "Applications open" -> "Applications
+        # closed" disappear from the normalized hash.
         before = normalize_content(
             b'<main><form action="/checkout">'
-            b'<input type="submit" value="Buy"></form></main>',
+            b'<input type="submit" value="Applications open"></form></main>',
             content_type="text/html",
             base_url="https://example.com/page",
         )
         after = normalize_content(
-            b'<main><form action="/checkout"></form></main>',
+            b'<main><form action="/checkout">'
+            b'<input type="submit" value="Applications closed"></form></main>',
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertEqual(before.normalized_hash, after.normalized_hash)
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_image_input_label_change_nested_in_text_without_formaction_is_not_silently_missed(  # noqa: E501
+        self,
+    ) -> None:
+        # The same label-loss bug also affects a submit/image input reached
+        # via the parent-text-extraction path (a directly visited input is
+        # covered above), so it needs its own regression case.
+        before = normalize_content(
+            b'<main><p>Status: <input type="image" alt="Open"></p></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<main><p>Status: <input type="image" alt="Closed"></p></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
 
     def test_button_without_formaction_keeps_existing_line_splitting(self) -> None:
         # A directly visited button with no formaction must fall through to
@@ -758,6 +795,27 @@ class NormalizationTests(unittest.TestCase):
                         base_url="https://example.com/page",
                     )
                 self.assertNotIn("XXXXXXXXXXXXXXXXXXXXXXXX", str(captured.exception))
+
+    def test_credential_bearing_link_nested_relative_reference_fails_closed(
+        self,
+    ) -> None:
+        # canonicalize_url only recognized a nested URL that carried its own
+        # scheme or host, so a scheme-less relative reference like
+        # "/callback?access_token=secret" -- the common shape of an OAuth
+        # redirect target -- reached the normalized link destination
+        # unexamined even though its query carries the credential.
+        destination = (
+            "https://example.com/?redirect=%2Fcallback%3Faccess_token"
+            "%3Dsecret123"
+        )
+        source = f'<main><a href="{destination}">Link</a></main>'.encode()
+        with self.assertRaises(MonitorError) as captured:
+            normalize_content(
+                source,
+                content_type="text/html",
+                base_url="https://example.com/page",
+            )
+        self.assertNotIn("secret123", str(captured.exception))
 
     def test_relative_links_without_base_url_are_not_annotated(self) -> None:
         no_base = normalize_content(
