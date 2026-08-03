@@ -32,7 +32,10 @@ _SENSITIVE_QUERY_NAMES = frozenset(
         "authorization",
         "awsaccesskeyid",
         "credential",
+        "id-token",
+        "oauth-token",
         "password",
+        "refresh-token",
         "secret",
         "sig",
         "signature",
@@ -192,15 +195,19 @@ def _nested_url_has_credential(
     )
     if match is None:
         return False
-    nested, was_path_relative = match
+    nested, _was_path_relative = match
     nested_host = (nested.hostname or "").rstrip(".").lower()
     nested_path = unquote(nested.path)
-    # A path-relative match is a heuristic guess rather than confirmed URL
-    # evidence, so it is not allowed to chain into another path-relative
-    # match one level down -- that would repeat the literal-"?" false
-    # positive above one recursive hop later. A scheme/host or absolute-path
-    # match is unambiguous URL evidence, so permissiveness carries forward.
-    next_allow_path_relative = not was_path_relative
+    # Whether this hop matched via the ambiguous path-relative branch or
+    # confirmed scheme/host or absolute-path evidence, the same
+    # ``allow_path_relative`` permission a caller granted for the outer
+    # value carries forward to every deeper hop: a value already isolated
+    # via ``parse_qsl`` is exactly as trustworthy one hop down as it is
+    # here, so breaking the chain after a single ambiguous hop would accept
+    # a credential hidden behind two (or more) path-relative hops in a row.
+    # The bounded recursion depth in ``has_credential_bearing_query`` -- not
+    # this flag -- is what keeps an arbitrarily long chain from recursing
+    # unboundedly.
     return (
         nested.username is not None
         or nested.password is not None
@@ -208,12 +215,12 @@ def _nested_url_has_credential(
         or has_credential_bearing_query(
             nested.fragment,
             depth=depth + 1,
-            allow_path_relative=next_allow_path_relative,
+            allow_path_relative=allow_path_relative,
         )
         or has_credential_bearing_query(
             nested.query,
             depth=depth + 1,
-            allow_path_relative=next_allow_path_relative,
+            allow_path_relative=allow_path_relative,
         )
     )
 
@@ -233,23 +240,21 @@ def has_credential_bearing_query(
     either, a nested Slack/Discord webhook URL possibly carried after a "#"
     instead of a "?", or the same nested URL under an extra layer of
     percent-encoding), which ``parse_qsl`` decodes into the value but a flat
-    exact-name/suffix check never re-inspects. Depth is bounded and fails
-    closed at the bound, so a chain of encoded URLs cannot recurse
-    unboundedly or slip past validation.
+    exact-name/suffix check never re-inspects. A chain of path-relative
+    hops is trusted for as many hops as ``allow_path_relative`` was granted
+    for, not just the first one -- see ``_nested_url_has_credential`` --
+    since the depth bound below, not a one-hop chain-break, is what keeps
+    recursion bounded.
 
     ``allow_path_relative`` has no default and every caller must state it:
     entry points that validate a real, directly-supplied URL or fragment
     (``canonicalize_url``, ``canonicalize_fragment_identity``,
     ``validate_http_url``) pass ``True``, since there the "outer query" is
     the thing actually being fetched or stored, not a heuristically-detected
-    nested guess. Recursive calls from ``_nested_url_has_credential`` pass
-    whatever it computes for the hop that was just taken -- see there for
-    why that is not simply "always True".
+    nested guess.
 
     ``allow_path_relative`` gates only the ambiguous no-leading-slash
-    relative-reference match in ``_split_nested_url``; see
-    ``_nested_url_has_credential`` for why it does not simply propagate
-    unconditionally on every recursive call.
+    relative-reference match in ``_split_nested_url``.
 
     A fragment can also be the nested URL itself rather than key/value pairs
     (e.g. "...#https%3A%2F%2Fuser%3Apass%40example.com/"), in which case
@@ -260,9 +265,29 @@ def has_credential_bearing_query(
     left at its default ``False`` in ``_split_nested_url``) because a raw,
     unparsed query string is exactly the "ordinary value with a literal ?"
     case the ambiguous branch must not be applied to.
+
+    Once the recursion budget (``depth`` past ``_MAX_NESTED_URL_DEPTH``) is
+    spent, there is no more budget left to keep unwrapping candidate nested
+    URLs, but the remaining text is still flat-scanned once for a sensitive
+    parameter name, and denied outright if it still looks like it could
+    contain further nested-URL structure we can no longer afford to
+    unwrap -- exhausting the budget on an ordinary, fully-decoded value
+    (e.g. the tail end of a query value that merely contains several
+    literal, unencoded "?" characters, RFC 3986-legal and not a nested URL
+    at all) is not itself evidence of a hidden credential, but exhausting it
+    on text that *still* parses as a candidate nested URL is exactly the
+    "we could not finish checking" case a credential boundary must fail
+    closed on.
     """
     if depth > _MAX_NESTED_URL_DEPTH:
-        return True
+        if _split_nested_url(
+            query, max_layers=_MAX_NESTED_URL_DEPTH, allow_path_relative=True
+        ):
+            return True
+        return any(
+            is_sensitive_query_name(name)
+            for name, _ in parse_qsl(query, keep_blank_values=True)
+        )
     if _nested_url_has_credential(query, depth=depth):
         return True
     for name, value in parse_qsl(query, keep_blank_values=True):

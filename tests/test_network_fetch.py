@@ -411,6 +411,23 @@ class NetworkPolicyTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue(is_sensitive_query_name(name))
 
+    def test_detects_common_oauth_token_parameter_names(self) -> None:
+        # access-token was already covered, but refresh_token, id_token, and
+        # oauth_token are equally standard OAuth/OIDC credential names that
+        # separator normalization turns into names matching neither the
+        # exact-name set nor the narrow signed-URL suffix list, leaving them
+        # in target.url on their way into model input and Slack.
+        for name in (
+            "refresh_token",
+            "refresh-token",
+            "id_token",
+            "id-token",
+            "oauth_token",
+            "oauth-token",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(is_sensitive_query_name(name))
+
     def test_detects_whitespace_and_dot_separator_variants(self) -> None:
         # parse_qsl decodes "?api%20key=secret" to the name "api key", and
         # dotted spellings such as "x.api.key" are common in nested/JS-style
@@ -550,26 +567,36 @@ class NetworkPolicyTests(unittest.TestCase):
                 "%253Dsecret123"
             )
 
-    def test_canonicalize_url_does_not_chain_two_ambiguous_path_relative_hops(
+    def test_canonicalize_url_rejects_credential_behind_two_path_relative_hops(
         self,
     ) -> None:
-        # Deliberate, bounded detection gap: a credential hidden behind two
-        # *ambiguous* (no scheme/host) path-relative hops in a row is not
-        # detected. Only one path-relative match is trusted per chain --
-        # allowing a second consecutive one would repeat the literal-"?"
-        # false positive (see the literal-question-marks test above) one
-        # recursive hop later. This is the accepted trade-off, not a bug:
-        # re-enabling chained path-relative matching must not "fix" this
-        # without re-checking that false-positive test still passes.
-        canonical, _ = canonicalize_url(
-            "https://example.com/?redirect=step1%3Fnext%3Dstep2%253Faccess_"
-            "token%253Dsecret123"
-        )
-        self.assertEqual(
-            canonical,
-            "https://example.com/?redirect=step1%3Fnext%3Dstep2%253Faccess_"
-            "token%253Dsecret123",
-        )
+        # A path-relative match is trusted for as many hops as the caller
+        # granted, not just the first one: the outer "redirect" value is
+        # itself a path-relative reference ("step1?next=...") whose own
+        # query is *also* only reachable as a path-relative reference
+        # ("step2?access_token=..."), so a chain-break after the first
+        # ambiguous hop would let this credential reach the accepted target
+        # URL -- and from there the summary model and Slack notification.
+        # The literal-question-marks test above still passes because the
+        # bounded recursion depth, not a one-hop chain-break, is what stops
+        # an ordinary multi-"?" value from recursing unboundedly.
+        with self.assertRaisesRegex(MonitorError, "credential-like"):
+            canonicalize_url(
+                "https://example.com/?redirect=step1%3Fnext%3Dstep2%253Faccess_"
+                "token%253Dsecret123"
+            )
+
+    def test_canonicalize_url_rejects_credential_behind_three_path_relative_hops(
+        self,
+    ) -> None:
+        # Same gap, one hop deeper: nothing about carrying
+        # ``allow_path_relative`` forward should special-case exactly two
+        # hops.
+        with self.assertRaisesRegex(MonitorError, "credential-like"):
+            canonicalize_url(
+                "https://example.com/?redirect=step1%253Fnext%253Dstep2%253F"
+                "next2%253Dstep3%253Faccess_token%253Dsecret123"
+            )
 
     def test_benign_key_and_token_named_params_are_not_flagged(self) -> None:
         # A blanket "-key"/"-token" suffix would catch these too, but none
