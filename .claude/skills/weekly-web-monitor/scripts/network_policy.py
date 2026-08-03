@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import re
 import socket
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -49,19 +50,24 @@ _SENSITIVE_QUERY_SUFFIXES = (
 )
 
 
+_SEPARATOR_RUN = re.compile(r"[\s._-]+")
+
+
 def is_sensitive_query_name(name: str) -> bool:
     """True for exact credential names and provider-prefixed signed-URL params.
 
     Provider signed-URL schemes namespace their credential/signature params
     under a prefix (``X-Amz-Credential``, ``X-Amz-Signature``,
     ``X-Goog-Signature``, ...) that an exact-name check misses entirely, so
-    those are matched by suffix instead of by exact name. Separators are
-    normalized to ``-`` before both checks so ``client_secret``,
-    ``client-secret``, and a hypothetical ``client secret`` are all treated
-    as the same name instead of only the underscore/hyphen form the set
-    happens to spell out.
+    those are matched by suffix instead of by exact name. Runs of whitespace,
+    dots, underscores, and hyphens are collapsed to a single ``-`` before
+    both checks so ``client_secret``, ``client-secret``, ``client secret``,
+    and ``x.api.key`` are all treated as the same name as the underscore/
+    hyphen form the set happens to spell out. ``parse_qsl`` decodes
+    ``%20`` to a literal space, so this also covers percent-encoded
+    separators without any extra decoding step.
     """
-    normalized = name.strip().lower().replace("_", "-")
+    normalized = _SEPARATOR_RUN.sub("-", name.strip().lower())
     if normalized in _SENSITIVE_QUERY_NAMES:
         return True
     return normalized.endswith(_SENSITIVE_QUERY_SUFFIXES)

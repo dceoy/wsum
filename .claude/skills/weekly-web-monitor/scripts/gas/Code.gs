@@ -34,9 +34,18 @@ function dispatchOutbox() {
       if (headers.indexOf(name) < 0) throw new Error(`Missing column: ${name}`);
     });
     const column = Object.fromEntries(headers.map((name, index) => [name, index]));
-    const sentEvents = new Set(
+    // A "sending" row is an outstanding delivery claim, not just a "sent"
+    // row: it means a prior invocation already dispatched this event and the
+    // outcome is ambiguous (see dispatchRow_), so it must never be retried
+    // automatically. Index every claimed event ID up front, before the
+    // dispatch loop, so a pending/retry duplicate row is poisoned regardless
+    // of whether it sits before or after the sending/sent row in the sheet.
+    const claimedEvents = new Set(
       values.slice(1)
-        .filter((row) => String(row[column.status]) === 'sent')
+        .filter((row) => {
+          const status = String(row[column.status]);
+          return status === 'sent' || status === 'sending';
+        })
         .map((row) => String(row[column.event_id]))
     );
     const handledEvents = new Set();
@@ -46,7 +55,7 @@ function dispatchOutbox() {
       const status = String(row[column.status]);
       if (status !== 'pending' && status !== 'retry') continue;
       const eventId = String(row[column.event_id]);
-      if (sentEvents.has(eventId) || handledEvents.has(eventId)) {
+      if (claimedEvents.has(eventId) || handledEvents.has(eventId)) {
         updateOutbox_(sheet, rowIndex + 1, column, 'poison',
                       Number(row[column.attempt_count]) || 0, '', 'duplicate_event_id');
         continue;

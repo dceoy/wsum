@@ -15,6 +15,7 @@ from errors import MonitorError
 from fetch import FetchConfig, fetch_url
 from network_policy import (
     BrowserNetworkGuard,
+    canonicalize_url,
     is_sensitive_query_name,
     resolve_public_url,
 )
@@ -408,6 +409,35 @@ class NetworkPolicyTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 self.assertTrue(is_sensitive_query_name(name))
+
+    def test_detects_whitespace_and_dot_separator_variants(self) -> None:
+        # parse_qsl decodes "?api%20key=secret" to the name "api key", and
+        # dotted spellings such as "x.api.key" are common in nested/JS-style
+        # query params; only the underscore form was previously normalized.
+        for name in (
+            "api key",
+            "API KEY",
+            "api  key",
+            "x.api.key",
+            "auth token",
+            "auth.token",
+            "client secret",
+            "client.secret",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(is_sensitive_query_name(name))
+
+    def test_canonicalize_url_rejects_percent_and_plus_encoded_credential_names(
+        self,
+    ) -> None:
+        # The finding this guards against: parse_qsl decodes "?api%20key="
+        # to the name "api key" *through the real URL entry point*, not
+        # just as an already-decoded string handed directly to the
+        # detector. "+" is the same encoding for a query string.
+        for query in ("api%20key=secret", "api+key=secret", "x.api.key=secret"):
+            with self.subTest(query=query):
+                with self.assertRaisesRegex(MonitorError, "credential-like"):
+                    canonicalize_url(f"https://example.com/?{query}")
 
     def test_benign_key_and_token_named_params_are_not_flagged(self) -> None:
         # A blanket "-key"/"-token" suffix would catch these too, but none

@@ -463,6 +463,85 @@ console.log(JSON.stringify({{fetchCalls, byEventId}}));
             outcome["byEventId"]["event-mismatched"]["last_error"],
         )
 
+    def test_gas_dispatcher_treats_existing_sending_row_as_delivery_claim(
+        self,
+    ) -> None:
+        # A "sending" row means a prior invocation already dispatched this
+        # event and the outcome is ambiguous (see dispatchRow_'s own
+        # comment: "sending" is never retried automatically). If a
+        # pending/retry row for the same event ID exists too -- e.g. after
+        # an ambiguous Slack response or a concurrent duplicate enqueue --
+        # it must be poisoned rather than dispatched again. Only running the
+        # real Code.gs proves the upfront claimed-event index actually
+        # covers "sending", not just "sent".
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not available to execute Code.gs")
+        gas = (support.SCRIPTS / "gas" / "Code.gs").read_text(encoding="utf-8")
+        header = [
+            "event_id", "target_id", "payload", "status", "attempt_count",
+            "created_at", "updated_at", "next_attempt_at", "last_error",
+        ]
+        sending_row = [
+            "event-dup", "target-1",
+            json.dumps({"message": "hello", "notification_group": "team-a"}),
+            "sending", 1, "", "", "", "",
+        ]
+        duplicate_pending_row = [
+            "event-dup", "target-1",
+            json.dumps({"message": "hello", "notification_group": "team-a"}),
+            "pending", 0, "", "", "", "",
+        ]
+        rows_json = json.dumps([header, sending_row, duplicate_pending_row])
+        harness = f"""
+'use strict';
+const rows = {rows_json};
+const fetchCalls = [];
+global.LockService = {{
+  getScriptLock: () => ({{ tryLock: () => true, releaseLock: () => {{}} }}),
+}};
+global.PropertiesService = {{
+  getScriptProperties: () => ({{
+    getProperty: (name) => ({{
+      SLACK_WEBHOOK_URL: 'https://example.test/webhook',
+      ALLOWED_NOTIFICATION_GROUP: 'team-a',
+    }}[name] || null),
+  }}),
+}};
+global.SpreadsheetApp = {{
+  getActive: () => ({{
+    getSheetByName: () => ({{
+      getDataRange: () => ({{ getValues: () => rows.map((row) => row.slice()) }}),
+      getRange: (rowNumber, columnNumber) => ({{
+        setValue: (value) => {{ rows[rowNumber - 1][columnNumber - 1] = value; }},
+      }}),
+    }}),
+  }}),
+  flush: () => {{}},
+}};
+global.UrlFetchApp = {{
+  fetch: (url, options) => {{
+    fetchCalls.push({{url, body: JSON.parse(options.payload)}});
+    return {{ getResponseCode: () => 200 }};
+  }},
+}};
+{gas}
+dispatchOutbox();
+console.log(JSON.stringify({{
+  fetchCalls,
+  rows: rows.slice(1).map((row) => ({{status: row[3], last_error: row[8]}})),
+}}));
+"""
+        result = subprocess.run(
+            [node, "-e", harness], capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        outcome = json.loads(result.stdout)
+        self.assertEqual(0, len(outcome["fetchCalls"]))
+        self.assertEqual("sending", outcome["rows"][0]["status"])
+        self.assertEqual("poison", outcome["rows"][1]["status"])
+        self.assertEqual("duplicate_event_id", outcome["rows"][1]["last_error"])
+
 
 if __name__ == "__main__":
     unittest.main()
