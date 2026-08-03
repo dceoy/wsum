@@ -7,10 +7,10 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import unquote, urlsplit
 
 from errors import MonitorError
-from network_policy import is_sensitive_query_name
+from network_policy import has_credential_bearing_query
 
 TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HASH_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -28,7 +28,6 @@ RUN_RESULTS = frozenset(
     }
 )
 NOTIFICATION_STATUSES = frozenset({"pending", "sent", "failed", "suppressed"})
-_MAX_NESTED_URL_DEPTH = 5
 
 
 def utc_now() -> str:
@@ -49,40 +48,6 @@ def validate_timestamp(
     if parsed.tzinfo is None:
         raise MonitorError("invalid_record", f"{field_name} must include a timezone")
     return value
-
-
-def _query_has_credential_bearing_url(query: str, depth: int = 0) -> bool:
-    # A benign outer parameter name (e.g. "redirect") can carry a nested,
-    # URL-encoded HTTP(S) URL whose own query, fragment, or embedded
-    # userinfo carries the credential (e.g. "?redirect=https%3A%2F%2F
-    # idp.example%2Fcb%3Faccess_token%3Dsecret", or the same token after a
-    # "#" for an OAuth implicit-flow callback), which parse_qsl decodes into
-    # the value but the exact-name/suffix check never re-inspects. Depth is
-    # bounded and fails closed at the bound, so a chain of encoded URLs
-    # cannot recurse unboundedly or slip past validation.
-    if depth > _MAX_NESTED_URL_DEPTH:
-        return True
-    for name, value in parse_qsl(query, keep_blank_values=True):
-        if is_sensitive_query_name(name):
-            return True
-        try:
-            nested = urlsplit(value)
-        except ValueError:
-            continue
-        if nested.scheme.lower() in {"http", "https"} and nested.hostname:
-            if (
-                nested.username is not None
-                or nested.password is not None
-                or any(
-                    is_sensitive_query_name(fragment_name)
-                    for fragment_name, _ in parse_qsl(
-                        nested.fragment, keep_blank_values=True
-                    )
-                )
-                or _query_has_credential_bearing_url(nested.query, depth + 1)
-            ):
-                return True
-    return False
 
 
 def validate_http_url(value: str, field_name: str = "url") -> str:
@@ -107,7 +72,7 @@ def validate_http_url(value: str, field_name: str = "url") -> str:
             "invalid_record",
             f"{field_name} must be an HTTP(S) URL without embedded credentials",
         )
-    if _query_has_credential_bearing_url(parsed.query):
+    if has_credential_bearing_query(parsed.query):
         raise MonitorError(
             "invalid_record",
             f"{field_name} must not contain credential-like query parameters",

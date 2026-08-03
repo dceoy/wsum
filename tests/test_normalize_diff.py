@@ -710,6 +710,28 @@ class NormalizationTests(unittest.TestCase):
                     )
                 self.assertNotIn(secret, str(captured.exception))
 
+    def test_credential_bearing_link_nested_in_query_value_fails_closed(
+        self,
+    ) -> None:
+        # A benign-looking outer query parameter (e.g. "redirect") can carry
+        # a nested, URL-encoded HTTP(S) URL whose own query or userinfo
+        # carries the credential; canonicalize_url must catch this for
+        # page-controlled link destinations, not just configured target
+        # URLs, since the canonical destination is written into normalized
+        # snapshots/diffs and can reach summary-model context.
+        destination = (
+            "https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
+            "cb%3Faccess_token%3Dsecret123"
+        )
+        source = f'<main><a href="{destination}">Link</a></main>'.encode()
+        with self.assertRaises(MonitorError) as captured:
+            normalize_content(
+                source,
+                content_type="text/html",
+                base_url="https://example.com/page",
+            )
+        self.assertNotIn("secret123", str(captured.exception))
+
     def test_relative_links_without_base_url_are_not_annotated(self) -> None:
         no_base = normalize_content(
             b'<main><p><a href="/apply-v1">Apply</a></p></main>',
@@ -768,6 +790,29 @@ class NormalizationTests(unittest.TestCase):
         # credential-bearing query parameter rather than being retained or
         # hashed into a stored artifact.
         source = b'<main><a href="/callback#access_token=secret123">Link</a></main>'
+        with self.assertRaises(MonitorError) as captured:
+            normalize_content(
+                source,
+                content_type="text/html",
+                base_url="https://example.com/page",
+            )
+        self.assertNotIn("secret123", str(captured.exception))
+
+    def test_credential_bearing_link_nested_in_fragment_value_fails_closed(
+        self,
+    ) -> None:
+        # canonicalize_url always strips the fragment, so a fragment-only
+        # destination is tracked separately via canonicalize_fragment_identity
+        # and written verbatim into normalized text/hash once accepted; a
+        # benign-looking fragment parameter name (e.g. "redirect") can carry
+        # a nested, URL-encoded HTTP(S) URL whose own query carries the
+        # credential, so this must fail closed exactly like the query and
+        # nested-query cases above rather than write the credential in.
+        destination = (
+            "https://example.com/page#redirect=https%3A%2F%2Fidp.example%2F"
+            "cb%3Faccess_token%3Dsecret123"
+        )
+        source = f'<main><a href="{destination}">Link</a></main>'.encode()
         with self.assertRaises(MonitorError) as captured:
             normalize_content(
                 source,
@@ -1219,6 +1264,29 @@ class NormalizationTests(unittest.TestCase):
             <description>&lt;a href="https://example.com/callback#access_token=secret123"&gt;Apply&lt;/a&gt;</description>
           </item>
         </channel></rss>"""
+        with self.assertRaises(MonitorError) as captured:
+            normalize_feed(xml)
+        self.assertNotIn("secret123", str(captured.exception))
+
+    def test_feed_content_link_nested_credential_destination_fails_closed(
+        self,
+    ) -> None:
+        # Same nested-credential-URL case as the HTML link destination
+        # check, reached through the feed content-link path instead.
+        destination = (
+            "https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
+            "cb%3Faccess_token%3Dsecret123"
+        )
+        xml = f"""<?xml version="1.0"?>
+        <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
+        <channel>
+          <link>https://example.com/jobs/</link>
+          <item>
+            <guid>job-1</guid>
+            <title>Job posting</title>
+            <description>&lt;a href="{destination}"&gt;Apply&lt;/a&gt;</description>
+          </item>
+        </channel></rss>""".encode()
         with self.assertRaises(MonitorError) as captured:
             normalize_feed(xml)
         self.assertNotIn("secret123", str(captured.exception))
@@ -1747,6 +1815,20 @@ class NormalizationTests(unittest.TestCase):
         pdf = _text_pdf_with_link(
             b"(Apply) Tj", uri="https://example.com/apply?token=secret123"
         )
+        with self.assertRaises(MonitorError) as captured:
+            normalize_content(pdf, content_type="application/pdf")
+        self.assertNotIn("secret123", str(captured.exception))
+
+    def test_pdf_link_annotation_nested_credential_destination_fails_closed(
+        self,
+    ) -> None:
+        # Same nested-credential-URL case as the HTML link destination
+        # check, reached through the PDF /URI link-annotation path instead.
+        destination = (
+            "https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
+            "cb%3Faccess_token%3Dsecret123"
+        )
+        pdf = _text_pdf_with_link(b"(Apply) Tj", uri=destination)
         with self.assertRaises(MonitorError) as captured:
             normalize_content(pdf, content_type="application/pdf")
         self.assertNotIn("secret123", str(captured.exception))

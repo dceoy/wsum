@@ -51,6 +51,7 @@ _SENSITIVE_QUERY_SUFFIXES = (
 
 
 _SEPARATOR_RUN = re.compile(r"[\s._-]+")
+_MAX_NESTED_URL_DEPTH = 5
 
 
 def is_sensitive_query_name(name: str) -> bool:
@@ -120,6 +121,56 @@ def _normalize_host(host: str) -> str:
     return normalized
 
 
+def _is_webhook_credential_host_path(host: str, decoded_path: str) -> bool:
+    return (
+        host == "hooks.slack.com"
+        and decoded_path.startswith("/services/")
+        or host in {"discord.com", "discordapp.com"}
+        and "/api/webhooks/" in decoded_path
+    )
+
+
+def has_credential_bearing_query(query: str, *, depth: int = 0) -> bool:
+    """Bounded recursive check for credential-bearing query values.
+
+    A benign outer parameter name (e.g. "redirect") can carry a nested,
+    URL-encoded HTTP(S) URL whose own query, fragment, embedded userinfo, or
+    host/path carries the credential (e.g. "?redirect=https%3A%2F%2F
+    idp.example%2Fcb%3Faccess_token%3Dsecret", a nested Slack/Discord
+    webhook URL, or the same token after a "#" for an OAuth implicit-flow
+    callback), which ``parse_qsl`` decodes into the value but a flat
+    exact-name/suffix check never re-inspects. Depth is bounded and fails
+    closed at the bound, so a chain of encoded URLs cannot recurse
+    unboundedly or slip past validation.
+    """
+    if depth > _MAX_NESTED_URL_DEPTH:
+        return True
+    for name, value in parse_qsl(query, keep_blank_values=True):
+        if is_sensitive_query_name(name):
+            return True
+        try:
+            nested = urlsplit(value)
+        except ValueError:
+            continue
+        if nested.scheme.lower() in {"http", "https"} and nested.hostname:
+            nested_host = nested.hostname.rstrip(".").lower()
+            nested_path = unquote(nested.path)
+            if (
+                nested.username is not None
+                or nested.password is not None
+                or _is_webhook_credential_host_path(nested_host, nested_path)
+                or any(
+                    is_sensitive_query_name(fragment_name)
+                    for fragment_name, _ in parse_qsl(
+                        nested.fragment, keep_blank_values=True
+                    )
+                )
+                or has_credential_bearing_query(nested.query, depth=depth + 1)
+            ):
+                return True
+    return False
+
+
 def canonicalize_url(value: str) -> tuple[str, SplitResult]:
     if not isinstance(value, str) or len(value) > 4_096:
         raise _deny("URL must be a string no longer than 4096 characters")
@@ -137,19 +188,11 @@ def canonicalize_url(value: str) -> tuple[str, SplitResult]:
         raise _deny("URL host is required")
     if parsed.username is not None or parsed.password is not None:
         raise _deny("embedded URL credentials are forbidden")
-    if any(
-        is_sensitive_query_name(name)
-        for name, _ in parse_qsl(parsed.query, keep_blank_values=True)
-    ):
+    if has_credential_bearing_query(parsed.query):
         raise _deny("credential-like URL query parameters are forbidden")
     host = _normalize_host(parsed.hostname)
     decoded_path = unquote(parsed.path)
-    if (
-        host == "hooks.slack.com"
-        and decoded_path.startswith("/services/")
-        or host in {"discord.com", "discordapp.com"}
-        and "/api/webhooks/" in decoded_path
-    ):
+    if _is_webhook_credential_host_path(host, decoded_path):
         raise _deny("webhook credential URLs are forbidden")
     port = port or (443 if scheme == "https" else 80)
     if not 1 <= port <= 65535:
@@ -188,10 +231,7 @@ def canonicalize_fragment_identity(fragment: str) -> str:
         ord(char) < 32 or ord(char) == 127 for char in fragment
     ):
         raise _deny("URL fragment is malformed")
-    if any(
-        is_sensitive_query_name(name)
-        for name, _ in parse_qsl(fragment, keep_blank_values=True)
-    ):
+    if has_credential_bearing_query(fragment):
         raise _deny("credential-like URL fragment is forbidden")
     if len(fragment) <= MAX_FRAGMENT_IDENTITY_CHARS:
         return fragment

@@ -149,6 +149,29 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 with self.assertRaisesRegex(MonitorError, "credential-like"):
                     Target.from_mapping({**base, "url": url})
 
+    def test_rejects_nested_webhook_urls_in_query_values(self) -> None:
+        # A nested URL's own userinfo/query/fragment were checked, but its
+        # host/path were not, so a benign-looking outer parameter could
+        # still carry an encoded Slack/Discord webhook URL through
+        # unexamined and later reach the summary model context and Slack
+        # notification text.
+        base = {
+            "target_id": "one",
+            "enabled": True,
+            "name": "One",
+            "url": "https://example.com",
+        }
+        nested_webhook_urls = (
+            "https://example.com/?redirect=https%3A%2F%2Fhooks.slack.com"
+            "%2Fservices%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX",
+            "https://example.com/?next=https%3A%2F%2Fdiscord.com"
+            "%2Fapi%2Fwebhooks%2F123456789%2Fabcdef",
+        )
+        for url in nested_webhook_urls:
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(MonitorError, "credential-like"):
+                    Target.from_mapping({**base, "url": url})
+
     def test_malformed_nested_url_in_query_value_does_not_crash(self) -> None:
         # A decoded query value that merely looks like it could be a URL
         # (e.g. an unbalanced IPv6-literal-style host) must not escape as an
