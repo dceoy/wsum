@@ -161,6 +161,21 @@ def _split_nested_url(value: str, *, max_layers: int) -> SplitResult | None:
     return None
 
 
+def _nested_url_has_credential(value: str, *, depth: int) -> bool:
+    nested = _split_nested_url(value, max_layers=_MAX_NESTED_URL_DEPTH)
+    if nested is None:
+        return False
+    nested_host = (nested.hostname or "").rstrip(".").lower()
+    nested_path = unquote(nested.path)
+    return (
+        nested.username is not None
+        or nested.password is not None
+        or _is_webhook_credential_host_path(nested_host, nested_path)
+        or has_credential_bearing_query(nested.fragment, depth=depth + 1)
+        or has_credential_bearing_query(nested.query, depth=depth + 1)
+    )
+
+
 def has_credential_bearing_query(query: str, *, depth: int = 0) -> bool:
     """Bounded recursive check for credential-bearing query values.
 
@@ -174,24 +189,22 @@ def has_credential_bearing_query(query: str, *, depth: int = 0) -> bool:
     exact-name/suffix check never re-inspects. Depth is bounded and fails
     closed at the bound, so a chain of encoded URLs cannot recurse
     unboundedly or slip past validation.
+
+    A fragment can also be the nested URL itself rather than key/value pairs
+    (e.g. "...#https%3A%2F%2Fuser%3Apass%40example.com/"), in which case
+    ``parse_qsl`` decodes it into a single blank-valued parameter *name* and
+    never hands the encoded URL to ``_split_nested_url`` at all, so the raw
+    string is also checked as a candidate nested URL before it is split into
+    pairs.
     """
     if depth > _MAX_NESTED_URL_DEPTH:
+        return True
+    if _nested_url_has_credential(query, depth=depth):
         return True
     for name, value in parse_qsl(query, keep_blank_values=True):
         if is_sensitive_query_name(name):
             return True
-        nested = _split_nested_url(value, max_layers=_MAX_NESTED_URL_DEPTH)
-        if nested is None:
-            continue
-        nested_host = (nested.hostname or "").rstrip(".").lower()
-        nested_path = unquote(nested.path)
-        if (
-            nested.username is not None
-            or nested.password is not None
-            or _is_webhook_credential_host_path(nested_host, nested_path)
-            or has_credential_bearing_query(nested.fragment, depth=depth + 1)
-            or has_credential_bearing_query(nested.query, depth=depth + 1)
-        ):
+        if _nested_url_has_credential(value, depth=depth):
             return True
     return False
 

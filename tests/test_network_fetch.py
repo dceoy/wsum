@@ -15,6 +15,7 @@ from errors import MonitorError
 from fetch import FetchConfig, fetch_url
 from network_policy import (
     BrowserNetworkGuard,
+    canonicalize_fragment_identity,
     canonicalize_url,
     is_sensitive_query_name,
     resolve_public_url,
@@ -438,6 +439,25 @@ class NetworkPolicyTests(unittest.TestCase):
             with self.subTest(query=query):
                 with self.assertRaisesRegex(MonitorError, "credential-like"):
                     canonicalize_url(f"https://example.com/?{query}")
+
+    def test_fragment_identity_rejects_a_fragment_that_is_itself_a_nested_url(
+        self,
+    ) -> None:
+        # canonicalize_fragment_identity is what anchor fragments from
+        # untrusted feed/HTML content flow through on their way into the
+        # summary model and Slack notification text. A fragment can be a
+        # bare encoded URL rather than "#name=<url>" key/value pairs, so
+        # parse_qsl alone would decode it into a single blank-valued name
+        # and never hand it to the nested-URL check.
+        credential_fragment = "https%3A%2F%2Fuser%3Apass%40example.com%2F"
+        with self.assertRaisesRegex(MonitorError, "credential-like"):
+            canonicalize_fragment_identity(credential_fragment)
+        webhook_fragment = (
+            "https%3A%2F%2Fhooks.slack.com%2Fservices"
+            "%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX"
+        )
+        with self.assertRaisesRegex(MonitorError, "credential-like"):
+            canonicalize_fragment_identity(webhook_fragment)
 
     def test_benign_key_and_token_named_params_are_not_flagged(self) -> None:
         # A blanket "-key"/"-token" suffix would catch these too, but none

@@ -1367,6 +1367,75 @@ class NormalizationTests(unittest.TestCase):
         self.assertNotEqual(before, after)
         self.assertIn("Apply [https://example.com/apply-v1", before)
 
+    def test_atom_xhtml_descendant_xml_base_change_is_not_missed(self) -> None:
+        # XML Base can be overridden on any descendant of the content
+        # element, not just re-declared at the content element itself,
+        # so every real anchor below it was previously resolved against
+        # the same content-level base regardless of a wrapper's own
+        # xml:base. Changing only the wrapping <div>'s xml:base must
+        # change the resolved destination.
+        def render(div_base: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <feed xmlns="http://www.w3.org/2005/Atom">
+              <entry>
+                <id>1</id><title>Post</title>
+                <link href="https://example.com/post-1"/>
+                <content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"
+                xml:base="{div_base}">
+                <a href="apply">Apply</a></div></content>
+              </entry>
+            </feed>""".encode()
+            text, _ = normalize_feed(xml)
+            return text
+
+        before = render("https://example.com/v1/")
+        after = render("https://example.com/v2/")
+        self.assertNotEqual(before, after)
+        self.assertIn("Apply [https://example.com/v1/apply", before)
+
+    def test_atom_xhtml_anchor_own_xml_base_change_is_not_missed(self) -> None:
+        # xml:base can be set on the anchor element itself rather than a
+        # wrapping ancestor, with no xml:base anywhere else in the content
+        # subtree. Only the anchor's own base changes here.
+        def render(anchor_base: str) -> str:
+            xml = f"""<?xml version="1.0"?>
+            <feed xmlns="http://www.w3.org/2005/Atom">
+              <entry>
+                <id>1</id><title>Post</title>
+                <link href="https://example.com/post-1"/>
+                <content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">
+                <a xml:base="{anchor_base}" href="apply">Apply</a></div></content>
+              </entry>
+            </feed>""".encode()
+            text, _ = normalize_feed(xml)
+            return text
+
+        before = render("https://example.com/v1/")
+        after = render("https://example.com/v2/")
+        self.assertNotEqual(before, after)
+        self.assertIn("Apply [https://example.com/v1/apply", before)
+
+    def test_atom_xhtml_deep_nesting_does_not_raise_recursion_error(self) -> None:
+        # _element_link_destinations walks the real XHTML element tree to
+        # apply per-descendant xml:base; a naive recursive walk would hit
+        # Python's call-stack recursion limit on a deeply nested (but
+        # otherwise small, well within max_elements) content tree and raise
+        # an unhandled RecursionError instead of failing closed with a
+        # MonitorError or succeeding outright.
+        depth = 1_500
+        xml = (
+            b'<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">'
+            b"<entry><id>1</id><title>Post</title>"
+            b'<link href="https://example.com/post-1"/>'
+            b'<content type="xhtml">'
+            + b'<div xmlns="http://www.w3.org/1999/xhtml">' * depth
+            + b'<a href="apply">Apply</a>'
+            + b"</div>" * depth
+            + b"</content></entry></feed>"
+        )
+        text, _ = normalize_feed(xml)
+        self.assertIn("Apply [https://example.com/apply", text)
+
     def test_content_link_budget_covers_an_ordinary_large_feed(self) -> None:
         # The link-destination annotation budget is shared across the whole
         # feed (the feed is normalized into one stored/hashed/diffed blob,

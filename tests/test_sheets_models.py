@@ -191,6 +191,24 @@ class ModelsAndSheetsTests(unittest.TestCase):
         with self.assertRaisesRegex(MonitorError, "credential-like"):
             Target.from_mapping(base)
 
+    def test_rejects_a_fragment_that_is_itself_a_nested_credential_url(self) -> None:
+        # A nested URL's fragment was only ever decoded as key/value pairs
+        # via parse_qsl, so a fragment that is itself a bare encoded URL
+        # (rather than "#next=<url>") parsed as a single blank-valued
+        # parameter name and _split_nested_url never inspected it, letting
+        # a credential-bearing target reach the summary model and Slack.
+        base = {
+            "target_id": "one",
+            "enabled": True,
+            "name": "One",
+            "url": (
+                "https://example.com/?redirect=https%3A%2F%2Fidp.example"
+                "%2Fcb%23https%253A%252F%252Fuser%253Apass%2540example.com%2F"
+            ),
+        }
+        with self.assertRaisesRegex(MonitorError, "credential-like"):
+            Target.from_mapping(base)
+
     def test_rejects_scheme_relative_and_double_encoded_nested_webhook_urls(
         self,
     ) -> None:

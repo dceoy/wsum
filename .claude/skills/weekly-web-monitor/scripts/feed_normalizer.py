@@ -206,16 +206,30 @@ def _element_link_destinations(
     # nodes and drops attributes, so a real <a> element's href would
     # otherwise never reach ``_ContentTextParser`` at all. Walk the actual
     # element tree for any real anchor elements to cover that case too.
+    #
+    # XML Base can be overridden on any descendant, not just re-declared at
+    # this content element, so the effective base must be recomputed while
+    # walking (an ``xml:base`` on an intermediate wrapper, or on the anchor
+    # itself, changes only that subtree's resolution) rather than resolving
+    # every anchor against a single content-level ``base_url``. An explicit
+    # stack keeps this bounded by ``max_elements`` rather than by the
+    # interpreter's call-stack recursion limit, which a deeply nested (but
+    # otherwise small) content tree could otherwise exceed.
     destinations: list[str] = []
-    for node in element.iter():
-        if node is element or _local_name(node.tag) != "a":
-            continue
-        href = node.attrib.get("href")
-        if href is None:
-            continue
-        destination = _content_link_destination(href, base_url, budget)
-        if destination:
-            destinations.append(destination)
+    stack: list[tuple[ET.Element, str]] = [
+        (child, _xml_base_scope(child, base_url)) for child in reversed(list(element))
+    ]
+    while stack:
+        node, base = stack.pop()
+        if _local_name(node.tag) == "a":
+            href = node.attrib.get("href")
+            if href is not None:
+                destination = _content_link_destination(href, base, budget)
+                if destination:
+                    destinations.append(destination)
+        stack.extend(
+            (child, _xml_base_scope(child, base)) for child in reversed(list(node))
+        )
     return destinations
 
 
