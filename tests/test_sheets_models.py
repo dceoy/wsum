@@ -121,6 +121,47 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 with self.assertRaisesRegex(MonitorError, "credential-like"):
                     Target.from_mapping({**base, "url": url})
 
+    def test_rejects_credential_bearing_urls_nested_in_query_values(self) -> None:
+        # The outer query parameter name (e.g. "redirect") can be benign
+        # while its decoded value is itself an HTTP(S) URL carrying a
+        # credential in its own query or userinfo; that nested URL would
+        # otherwise reach the summary model context and Slack notification
+        # text unexamined.
+        base = {
+            "target_id": "one",
+            "enabled": True,
+            "name": "One",
+            "url": "https://example.com",
+        }
+        nested_urls = (
+            "https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
+            "cb%3Faccess_token%3Dsecret",
+            "https://example.com/?next=https%3A%2F%2Fbucket.s3.amazonaws.com"
+            "%2Fkey%3FX-Amz-Signature%3Dabc123",
+            "https://example.com/?redirect=https%3A%2F%2Fuser%3Apass%40evil.com",
+            # An OAuth implicit-flow token after "#" in the nested URL, not
+            # its query string.
+            "https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
+            "cb%23access_token%3Dsecret",
+        )
+        for url in nested_urls:
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(MonitorError, "credential-like"):
+                    Target.from_mapping({**base, "url": url})
+
+    def test_malformed_nested_url_in_query_value_does_not_crash(self) -> None:
+        # A decoded query value that merely looks like it could be a URL
+        # (e.g. an unbalanced IPv6-literal-style host) must not escape as an
+        # unhandled ValueError from urlsplit; it should just be treated as
+        # an opaque, non-URL value.
+        base = {
+            "target_id": "one",
+            "enabled": True,
+            "name": "One",
+            "url": "https://example.com/?redirect=http%3A%2F%2F%5B%3A%3A1",
+        }
+        Target.from_mapping(base)
+
     def test_exclude_selectors_enforce_count_and_length_bounds(self) -> None:
         base = {
             "target_id": "one",

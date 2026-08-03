@@ -576,6 +576,121 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertNotEqual(before.normalized_hash, after.normalized_hash)
 
+    def test_button_formaction_change_is_not_silently_missed(self) -> None:
+        # A submit button's formaction overrides the form's action for that
+        # control only, so the visible text and form action can stay
+        # identical while the actual submit destination changes.
+        before = normalize_content(
+            b'<main><form action="/checkout"><button '
+            b'formaction="/apply-v1">Apply</button></form></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<main><form action="/checkout"><button '
+            b'formaction="/apply-v2">Apply</button></form></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_standalone_button_formaction_change_is_not_silently_missed(
+        self,
+    ) -> None:
+        before = normalize_content(
+            b'<main><button formaction="/apply-v1">Apply</button></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<main><button formaction="/apply-v2">Apply</button></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_submit_input_formaction_change_is_not_silently_missed(self) -> None:
+        before = normalize_content(
+            b'<main><form action="/checkout"><input type="submit" '
+            b'value="Buy" formaction="/apply-v1"></form></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<main><form action="/checkout"><input type="submit" '
+            b'value="Buy" formaction="/apply-v2"></form></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_image_input_formaction_change_is_not_silently_missed(self) -> None:
+        before = normalize_content(
+            b'<main><form action="/checkout"><input type="image" '
+            b'alt="Buy" formaction="/apply-v1"></form></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<main><form action="/checkout"><input type="image" '
+            b'alt="Buy" formaction="/apply-v2"></form></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_non_submit_input_formaction_is_ignored(self) -> None:
+        # Only submit/image inputs are real submit controls; a formaction
+        # on a plain text input has no browser effect and must not be
+        # annotated (which would otherwise mask a real content change under
+        # noise, or worse, misrepresent the digest as destination-relevant).
+        before = normalize_content(
+            b'<main>Status text<input type="text" formaction="/apply-v1">'
+            b"</main>",
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<main>Status text<input type="text" formaction="/apply-v2">'
+            b"</main>",
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_submit_input_without_formaction_is_not_newly_annotated(self) -> None:
+        # A plain submit button with no formaction has nothing destination-
+        # related to report; annotating its value/alt label anyway would
+        # shift the hash of every page using an ordinary submit button.
+        before = normalize_content(
+            b'<main><form action="/checkout">'
+            b'<input type="submit" value="Buy"></form></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        after = normalize_content(
+            b'<main><form action="/checkout"></form></main>',
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertEqual(before.normalized_hash, after.normalized_hash)
+
+    def test_button_without_formaction_keeps_existing_line_splitting(self) -> None:
+        # A directly visited button with no formaction must fall through to
+        # the same generic per-child-node handling used before this change,
+        # not collapse its block-level children into a single joined line.
+        wrapped = normalize_content(
+            b"<main><button><div>a</div><div>b</div></button></main>",
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        without_button = normalize_content(
+            b"<main><div>a</div><div>b</div></main>",
+            content_type="text/html",
+            base_url="https://example.com/page",
+        )
+        self.assertEqual(wrapped.text, without_button.text)
+
     def test_credential_bearing_link_destination_fails_closed(self) -> None:
         # Rejected HTTP(S) destinations must not be omitted or represented by
         # an offline-testable unsalted digest: both choices can expose or miss

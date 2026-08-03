@@ -440,6 +440,18 @@ def _link_destination(node: Node, attr: str, ctx: _LinkContext) -> str:
     return f"{identity[:MAX_LINK_URL_CHARS]} [sha256:{digest}]"
 
 
+_SUBMIT_INPUT_TYPES = frozenset({"submit", "image"})
+
+
+def _submit_control_annotation(node: Node, ctx: _LinkContext) -> str:
+    # A submit control's own ``formaction`` overrides its form's ``action``
+    # for that control only, so a same-text/same-label control whose
+    # formaction destination changes (e.g. /apply-v1 -> /apply-v2) must not
+    # normalize identically to the unchanged control.
+    destination = _link_destination(node, "formaction", ctx)
+    return f"[formaction: {destination}]" if destination else ""
+
+
 def _document_base_url(root: Node, fetched_url: str) -> str:
     """Resolve the first declared document base against the fetched URL."""
     if not fetched_url:
@@ -469,10 +481,27 @@ def _text_content(node: Node, excluded: set[Node], ctx: _LinkContext) -> str:
             pieces.append("\n")
         else:
             text = _text_content(child, excluded, ctx)
-            if child.tag == "a" and child not in excluded and not _is_noise(child):
+            is_live = child not in excluded and not _is_noise(child)
+            if child.tag == "a" and is_live:
                 destination = _link_destination(child, "href", ctx)
                 if destination:
                     text = f"{text} [{destination}]".strip()
+            elif child.tag == "button" and is_live:
+                annotation = _submit_control_annotation(child, ctx)
+                if annotation:
+                    text = f"{text} {annotation}".strip()
+            elif (
+                is_live
+                and child.tag == "input"
+                and child.attrs.get("type", "").strip().lower()
+                in _SUBMIT_INPUT_TYPES
+            ):
+                annotation = _submit_control_annotation(child, ctx)
+                if annotation:
+                    label = _clean_line(
+                        child.attrs.get("value", "") or child.attrs.get("alt", "")
+                    )
+                    text = f"{label} {annotation}".strip()
             pieces.append(text)
     return " ".join(pieces)
 
@@ -542,6 +571,34 @@ def _extract_lines(root: Node, excluded: set[Node], ctx: _LinkContext) -> list[s
                 text = f"{text} [{destination}]".strip()
             if text:
                 lines.append(text)
+            return
+        if node.tag == "button":
+            annotation = _submit_control_annotation(node, ctx)
+            if annotation:
+                # Mirrors the <a> case above: a directly visited button (no
+                # parent text-extraction step annotated it) still needs its
+                # own formaction destination represented, or a
+                # destination-only change on it would silently disappear.
+                # Falling through when there is no formaction preserves the
+                # existing per-child-node line splitting below.
+                text = _clean_line(_text_content(node, excluded, ctx))
+                text = f"{text} {annotation}".strip()
+                if text:
+                    lines.append(text)
+                return
+        if (
+            node.tag == "input"
+            and node.attrs.get("type", "").strip().lower() in _SUBMIT_INPUT_TYPES
+        ):
+            # Submit/image inputs are void elements with nothing further to
+            # visit, so returning unconditionally is safe even without a
+            # formaction (matching the prior no-output behavior for them).
+            annotation = _submit_control_annotation(node, ctx)
+            if annotation:
+                label = _clean_line(
+                    node.attrs.get("value", "") or node.attrs.get("alt", "")
+                )
+                lines.append(f"{label} {annotation}".strip())
             return
         if node.tag == "form":
             # A form's own text content (buttons/labels, handled by the
