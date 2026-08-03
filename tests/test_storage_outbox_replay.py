@@ -176,6 +176,32 @@ class OutboxTests(unittest.TestCase):
         store.upsert_outbox(record)
         self.assertEqual(["RAW"], connector.options)
 
+    def test_rejects_reordered_outbox_header_columns(self) -> None:
+        # upsert_outbox writes OUTBOX_COLUMNS in fixed A:I order, so a header
+        # row that merely contains every required column out of order would
+        # otherwise load fine and then have the next write silently place
+        # values (e.g. status/attempt_count) under the wrong headers.
+        reordered = [
+            "event_id",
+            "target_id",
+            "payload",
+            "attempt_count",
+            "status",
+            "created_at",
+            "updated_at",
+            "next_attempt_at",
+            "last_error",
+        ]
+        record = enqueue_record(
+            "f" * 64,
+            "one",
+            "default",
+            "更新",
+            now="2026-01-01T00:00:00Z",
+        )
+        with self.assertRaisesRegex(MonitorError, "must appear first, in this order"):
+            load_outbox([reordered, record.as_row()])
+
     def test_enqueue_success_duplicate_and_retry_states(self) -> None:
         record = enqueue_record(
             "a" * 64,

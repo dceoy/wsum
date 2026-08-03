@@ -131,6 +131,13 @@ def records_from_values(
             f"{sheet}: missing required columns: {', '.join(missing)}",
             details={"missing_columns": missing},
         )
+    if headers[: len(required_columns)] != list(required_columns):
+        raise MonitorError(
+            "sheet_invalid_structure",
+            f"{sheet}: required columns must appear first, in this order: "
+            f"{', '.join(required_columns)}",
+            details={"required_columns": list(required_columns)},
+        )
     records: list[dict[str, Any]] = []
     for row_number, raw_row in enumerate(table[1:], start=2):
         if not raw_row or all(str(value).strip() == "" for value in raw_row):

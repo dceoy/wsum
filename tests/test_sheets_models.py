@@ -326,6 +326,31 @@ class ModelsAndSheetsTests(unittest.TestCase):
         with self.assertRaises(MonitorError):
             records_from_values([["id"], ["one", "x"]], ("id",), "Test")
 
+    def test_record_parser_rejects_reordered_required_columns(self) -> None:
+        # Write paths serialize STATE_COLUMNS in fixed A:H order, so a header
+        # row that merely contains every required column out of order would
+        # otherwise load fine and then have the next write silently swap
+        # values (e.g. etag/last_modified) under the wrong headers.
+        digest = "a" * 64
+        reordered = table(
+            (
+                "target_id",
+                "last_checked_at",
+                "last_modified",
+                "etag",
+                "validated_url",
+                "normalized_hash",
+                "snapshot_ref",
+                "consecutive_failures",
+            ),
+            ["one", "", "", "", "", digest, "drive:1", 2],
+        )
+        with self.assertRaisesRegex(MonitorError, "must appear first, in this order"):
+            load_states(reordered)
+
+        with self.assertRaises(MonitorError):
+            records_from_values([["extra", "id"], ["x", "one"]], ("id",), "Test")
+
     def test_store_uses_raw_write_semantics_and_idempotent_runs(self) -> None:
         class Connector:
             def __init__(self) -> None:
