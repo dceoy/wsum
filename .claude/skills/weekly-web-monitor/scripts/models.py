@@ -72,7 +72,7 @@ def validate_http_url(value: str, field_name: str = "url") -> str:
             "invalid_record",
             f"{field_name} must be an HTTP(S) URL without embedded credentials",
         )
-    if has_credential_bearing_query(parsed.query):
+    if has_credential_bearing_query(parsed.query, allow_path_relative=True):
         raise MonitorError(
             "invalid_record",
             f"{field_name} must not contain credential-like query parameters",

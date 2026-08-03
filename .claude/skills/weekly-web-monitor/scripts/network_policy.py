@@ -130,8 +130,14 @@ def _is_webhook_credential_host_path(host: str, decoded_path: str) -> bool:
     )
 
 
-def _split_nested_url(value: str, *, max_layers: int) -> SplitResult | None:
+def _split_nested_url(
+    value: str, *, max_layers: int, allow_path_relative: bool = False
+) -> tuple[SplitResult, bool] | None:
     """Best-effort parse of ``value`` as a nested absolute or relative URL.
+
+    Returns the parsed ``SplitResult`` together with a flag saying whether
+    the match relied on the ambiguous path-relative branch (see below), or
+    ``None`` if ``value`` doesn't look like a nested URL at all.
 
     A single ``parse_qsl`` decode can still leave the nested URL encoded
     (e.g. ``%253A`` decodes to a literal ``%3A``, still hiding the URL's own
@@ -139,17 +145,21 @@ def _split_nested_url(value: str, *, max_layers: int) -> SplitResult | None:
     either an explicit ``http``/``https`` scheme, a scheme-relative
     network-path reference (``//host/...``, which carries no scheme of its
     own but is still fetched as the current scheme by browsers and HTTP
-    clients), or a relative reference with no scheme/host at all (e.g.
+    clients), an absolute-path relative reference (e.g.
     ``/callback?access_token=secret``, the common shape of an OAuth or
-    signed-URL redirect target) before giving up. The relative-reference
-    case is restricted to an empty or absolute-path (leading ``/``) path
-    component so that an ordinary query *value* that merely contains a
-    literal, unencoded ``?`` (legal in a query per RFC 3986, and not a
-    nested URL at all) does not get treated as one layer of nested
-    reference per ``?`` and walk the recursion depth bound into a false
-    "credential-like" denial. A malformed candidate, such as an unbalanced
-    IPv6-literal-style host, is treated as an opaque non-URL value rather
-    than raised.
+    signed-URL redirect target), or, when ``allow_path_relative`` is set, a
+    path-relative reference with no leading ``/`` at all (e.g.
+    ``callback?access_token=secret``) before giving up.
+
+    The path-relative branch is opt-in and restricted to callers that
+    already isolated ``value`` as a single ``parse_qsl``-parsed parameter
+    value, because applying it to a whole raw query *string* would treat an
+    ordinary value that merely contains a literal, unencoded ``?`` (legal in
+    a query per RFC 3986, and not a nested URL at all) as one layer of
+    nested reference per ``?`` and walk the recursion depth bound into a
+    false "credential-like" denial. A malformed candidate, such as an
+    unbalanced IPv6-literal-style host, is treated as an opaque non-URL
+    value rather than raised.
     """
     candidate = value
     for _ in range(max_layers + 1):
@@ -159,16 +169,14 @@ def _split_nested_url(value: str, *, max_layers: int) -> SplitResult | None:
             return None
         scheme = split.scheme.lower()
         if scheme in {"http", "https"} and split.hostname:
-            return split
+            return split, False
         if not scheme and split.netloc and split.hostname:
-            return split
-        if (
-            not scheme
-            and not split.netloc
-            and (not split.path or split.path.startswith("/"))
-            and (split.query or split.fragment)
-        ):
-            return split
+            return split, False
+        if not scheme and not split.netloc and (split.query or split.fragment):
+            if not split.path or split.path.startswith("/"):
+                return split, False
+            if allow_path_relative:
+                return split, True
         decoded = unquote(candidate)
         if decoded == candidate:
             return None
@@ -176,22 +184,43 @@ def _split_nested_url(value: str, *, max_layers: int) -> SplitResult | None:
     return None
 
 
-def _nested_url_has_credential(value: str, *, depth: int) -> bool:
-    nested = _split_nested_url(value, max_layers=_MAX_NESTED_URL_DEPTH)
-    if nested is None:
+def _nested_url_has_credential(
+    value: str, *, depth: int, allow_path_relative: bool = False
+) -> bool:
+    match = _split_nested_url(
+        value, max_layers=_MAX_NESTED_URL_DEPTH, allow_path_relative=allow_path_relative
+    )
+    if match is None:
         return False
+    nested, was_path_relative = match
     nested_host = (nested.hostname or "").rstrip(".").lower()
     nested_path = unquote(nested.path)
+    # A path-relative match is a heuristic guess rather than confirmed URL
+    # evidence, so it is not allowed to chain into another path-relative
+    # match one level down -- that would repeat the literal-"?" false
+    # positive above one recursive hop later. A scheme/host or absolute-path
+    # match is unambiguous URL evidence, so permissiveness carries forward.
+    next_allow_path_relative = not was_path_relative
     return (
         nested.username is not None
         or nested.password is not None
         or _is_webhook_credential_host_path(nested_host, nested_path)
-        or has_credential_bearing_query(nested.fragment, depth=depth + 1)
-        or has_credential_bearing_query(nested.query, depth=depth + 1)
+        or has_credential_bearing_query(
+            nested.fragment,
+            depth=depth + 1,
+            allow_path_relative=next_allow_path_relative,
+        )
+        or has_credential_bearing_query(
+            nested.query,
+            depth=depth + 1,
+            allow_path_relative=next_allow_path_relative,
+        )
     )
 
 
-def has_credential_bearing_query(query: str, *, depth: int = 0) -> bool:
+def has_credential_bearing_query(
+    query: str, *, depth: int = 0, allow_path_relative: bool
+) -> bool:
     """Bounded recursive check for credential-bearing query values.
 
     A benign outer parameter name (e.g. "redirect") can carry a nested,
@@ -199,20 +228,38 @@ def has_credential_bearing_query(query: str, *, depth: int = 0) -> bool:
     relative-reference URL whose own query, fragment, embedded userinfo, or
     host/path carries the credential (e.g.
     "?redirect=https%3A%2F%2Fidp.example%2Fcb%3Faccess_token%3Dsecret",
-    "?redirect=%2Fcallback%3Faccess_token%3Dsecret" with no host at all, a
-    nested Slack/Discord webhook URL possibly carried after a "#" instead
-    of a "?", or the same nested URL under an extra layer of percent-
-    encoding), which ``parse_qsl`` decodes into the value but a flat
+    "?redirect=%2Fcallback%3Faccess_token%3Dsecret" with no host at all,
+    "?redirect=callback%3Faccess_token%3Dsecret" with no leading slash
+    either, a nested Slack/Discord webhook URL possibly carried after a "#"
+    instead of a "?", or the same nested URL under an extra layer of
+    percent-encoding), which ``parse_qsl`` decodes into the value but a flat
     exact-name/suffix check never re-inspects. Depth is bounded and fails
     closed at the bound, so a chain of encoded URLs cannot recurse
     unboundedly or slip past validation.
+
+    ``allow_path_relative`` has no default and every caller must state it:
+    entry points that validate a real, directly-supplied URL or fragment
+    (``canonicalize_url``, ``canonicalize_fragment_identity``,
+    ``validate_http_url``) pass ``True``, since there the "outer query" is
+    the thing actually being fetched or stored, not a heuristically-detected
+    nested guess. Recursive calls from ``_nested_url_has_credential`` pass
+    whatever it computes for the hop that was just taken -- see there for
+    why that is not simply "always True".
+
+    ``allow_path_relative`` gates only the ambiguous no-leading-slash
+    relative-reference match in ``_split_nested_url``; see
+    ``_nested_url_has_credential`` for why it does not simply propagate
+    unconditionally on every recursive call.
 
     A fragment can also be the nested URL itself rather than key/value pairs
     (e.g. "...#https%3A%2F%2Fuser%3Apass%40example.com/"), in which case
     ``parse_qsl`` decodes it into a single blank-valued parameter *name* and
     never hands the encoded URL to ``_split_nested_url`` at all, so the raw
     string is also checked as a candidate nested URL before it is split into
-    pairs.
+    pairs. That whole-string check is always strict (``allow_path_relative``
+    left at its default ``False`` in ``_split_nested_url``) because a raw,
+    unparsed query string is exactly the "ordinary value with a literal ?"
+    case the ambiguous branch must not be applied to.
     """
     if depth > _MAX_NESTED_URL_DEPTH:
         return True
@@ -221,7 +268,9 @@ def has_credential_bearing_query(query: str, *, depth: int = 0) -> bool:
     for name, value in parse_qsl(query, keep_blank_values=True):
         if is_sensitive_query_name(name):
             return True
-        if _nested_url_has_credential(value, depth=depth):
+        if _nested_url_has_credential(
+            value, depth=depth, allow_path_relative=allow_path_relative
+        ):
             return True
     return False
 
@@ -243,7 +292,7 @@ def canonicalize_url(value: str) -> tuple[str, SplitResult]:
         raise _deny("URL host is required")
     if parsed.username is not None or parsed.password is not None:
         raise _deny("embedded URL credentials are forbidden")
-    if has_credential_bearing_query(parsed.query):
+    if has_credential_bearing_query(parsed.query, allow_path_relative=True):
         raise _deny("credential-like URL query parameters are forbidden")
     host = _normalize_host(parsed.hostname)
     decoded_path = unquote(parsed.path)
@@ -286,7 +335,7 @@ def canonicalize_fragment_identity(fragment: str) -> str:
         ord(char) < 32 or ord(char) == 127 for char in fragment
     ):
         raise _deny("URL fragment is malformed")
-    if has_credential_bearing_query(fragment):
+    if has_credential_bearing_query(fragment, allow_path_relative=True):
         raise _deny("credential-like URL fragment is forbidden")
     if len(fragment) <= MAX_FRAGMENT_IDENTITY_CHARS:
         return fragment

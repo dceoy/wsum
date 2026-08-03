@@ -500,6 +500,77 @@ class NetworkPolicyTests(unittest.TestCase):
             canonical, "https://example.com/?q=a=1?b=2?c=3?d=4?e=5?f=6?g=7"
         )
 
+    def test_canonicalize_url_rejects_path_relative_nested_url_query(self) -> None:
+        # _split_nested_url previously required the nested relative
+        # reference to have an empty or leading-slash path, so a
+        # path-relative reference like "callback?access_token=secret" --
+        # decoded from the outer "redirect" value -- was rejected because
+        # split.path == "callback" has no leading slash, leaving the
+        # credential in the accepted target URL.
+        with self.assertRaisesRegex(MonitorError, "credential-like"):
+            canonicalize_url(
+                "https://example.com/?redirect=callback%3Faccess_token"
+                "%3Dsecret123"
+            )
+
+    def test_canonicalize_url_rejects_path_relative_nested_url_fragment(self) -> None:
+        # Same path-relative gap as above, but the credential is carried
+        # after a "#" instead of a "?" in the nested reference.
+        with self.assertRaisesRegex(MonitorError, "credential-like"):
+            canonicalize_url(
+                "https://example.com/?redirect=callback%23access_token"
+                "%3Dsecret123"
+            )
+
+    def test_canonicalize_url_allows_benign_path_relative_reference(self) -> None:
+        # The path-relative nested-URL check must not over-flag an ordinary
+        # path-relative redirect target that carries no credential-like
+        # query parameter of its own.
+        canonical, _ = canonicalize_url(
+            "https://example.com/?redirect=callback%3Fpage%3D2"
+        )
+        self.assertEqual(
+            canonical, "https://example.com/?redirect=callback%3Fpage%3D2"
+        )
+
+    def test_canonicalize_url_rejects_path_relative_credential_past_an_absolute_hop(
+        self,
+    ) -> None:
+        # allow_path_relative must carry forward past an *unambiguous*
+        # nested hop (one with its own scheme+host), not just at the outer
+        # query: redirect -> an encoded absolute idp.example URL -> whose
+        # own query carries a path-relative "callback?access_token=..."
+        # target. A design that only special-cases the outermost call
+        # (e.g. gating on recursion depth == 0) would miss this, since the
+        # credential is one hop deeper than the outer query.
+        with self.assertRaisesRegex(MonitorError, "credential-like"):
+            canonicalize_url(
+                "https://example.com/?redirect=https%3A%2F%2Fidp.example"
+                "%2Fcb%3Fredirect2%3Dcallback%253Faccess_token"
+                "%253Dsecret123"
+            )
+
+    def test_canonicalize_url_does_not_chain_two_ambiguous_path_relative_hops(
+        self,
+    ) -> None:
+        # Deliberate, bounded detection gap: a credential hidden behind two
+        # *ambiguous* (no scheme/host) path-relative hops in a row is not
+        # detected. Only one path-relative match is trusted per chain --
+        # allowing a second consecutive one would repeat the literal-"?"
+        # false positive (see the literal-question-marks test above) one
+        # recursive hop later. This is the accepted trade-off, not a bug:
+        # re-enabling chained path-relative matching must not "fix" this
+        # without re-checking that false-positive test still passes.
+        canonical, _ = canonicalize_url(
+            "https://example.com/?redirect=step1%3Fnext%3Dstep2%253Faccess_"
+            "token%253Dsecret123"
+        )
+        self.assertEqual(
+            canonical,
+            "https://example.com/?redirect=step1%3Fnext%3Dstep2%253Faccess_"
+            "token%253Dsecret123",
+        )
+
     def test_benign_key_and_token_named_params_are_not_flagged(self) -> None:
         # A blanket "-key"/"-token" suffix would catch these too, but none
         # of them are credentials; over-flagging permanently rejects a
