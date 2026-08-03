@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/weekly-web-monitor/run-summary.schema.json",
+  "title": "Weekly run metrics",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "checked",
+    "unchanged",
+    "baseline",
+    "minor",
+    "material",
+    "notified",
+    "failed"
+  ],
+  "properties": {
+    "checked": {"type": "integer", "minimum": 0},
+    "unchanged": {"type": "integer", "minimum": 0},
+    "baseline": {"type": "integer", "minimum": 0},
+    "minor": {"type": "integer", "minimum": 0},
+    "material": {"type": "integer", "minimum": 0},
+    "notified": {"type": "integer", "minimum": 0},
+    "failed": {"type": "integer", "minimum": 0}
+  }
+}

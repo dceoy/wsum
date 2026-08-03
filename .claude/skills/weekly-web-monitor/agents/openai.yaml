@@ -1,0 +1,4 @@
+interface:
+  display_name: "Weekly Web Monitor"
+  short_description: "Monitor website changes safely each week"
+  default_prompt: "Use $weekly-web-monitor to run a safe weekly website change check."

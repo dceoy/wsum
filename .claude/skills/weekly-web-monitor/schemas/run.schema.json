@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/weekly-web-monitor/run.schema.json",
+  "title": "Run",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "target_id",
+    "result",
+    "change_score",
+    "summary",
+    "error_code",
+    "started_at",
+    "finished_at",
+    "attempts"
+  ],
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "target_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "result": {
+      "enum": [
+        "baseline_created",
+        "failed",
+        "material",
+        "minor",
+        "non_material",
+        "notified",
+        "suppressed",
+        "unchanged"
+      ]
+    },
+    "change_score": {"type": "integer", "minimum": 0, "maximum": 100},
+    "summary": {"type": "string", "maxLength": 2000},
+    "error_code": {"type": "string", "maxLength": 100},
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "attempts": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["number", "result", "error_code"],
+        "properties": {
+          "number": {"type": "integer", "minimum": 1},
+          "result": {"type": "string", "minLength": 1, "maxLength": 100},
+          "error_code": {"type": "string", "maxLength": 100}
+        }
+      }
+    }
+  }
+}

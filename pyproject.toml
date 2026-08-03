@@ -1,0 +1,15 @@
+[project]
+name = "wsum"
+version = "0.1.0"
+description = "Deterministic connector-backed weekly website update monitoring"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = ["pypdf>=6,<7"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "S", "UP"]
+ignore = ["S101"]
