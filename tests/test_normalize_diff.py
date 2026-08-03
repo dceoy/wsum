@@ -732,6 +732,33 @@ class NormalizationTests(unittest.TestCase):
             )
         self.assertNotIn("secret123", str(captured.exception))
 
+    def test_credential_bearing_link_scheme_relative_or_double_encoded_fails_closed(
+        self,
+    ) -> None:
+        # canonicalize_url only recognized a nested URL with an explicit
+        # http(s) scheme and a single layer of percent-encoding, so a
+        # scheme-relative ("//host/...") or double-encoded nested webhook
+        # URL reached the normalized link destination unexamined even though
+        # it is fully recoverable and would cross the documented
+        # snapshot/model/Slack secret boundary.
+        destinations = (
+            "https://example.com/?redirect=%2F%2Fhooks.slack.com%2Fservices"
+            "%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX",
+            "https://example.com/?redirect=https%253A%252F%252Fhooks.slack"
+            ".com%252Fservices%252FT00000000%252FB00000000"
+            "%252FXXXXXXXXXXXXXXXXXXXXXXXX",
+        )
+        for destination in destinations:
+            with self.subTest(destination=destination):
+                source = f'<main><a href="{destination}">Link</a></main>'.encode()
+                with self.assertRaises(MonitorError) as captured:
+                    normalize_content(
+                        source,
+                        content_type="text/html",
+                        base_url="https://example.com/page",
+                    )
+                self.assertNotIn("XXXXXXXXXXXXXXXXXXXXXXXX", str(captured.exception))
+
     def test_relative_links_without_base_url_are_not_annotated(self) -> None:
         no_base = normalize_content(
             b'<main><p><a href="/apply-v1">Apply</a></p></main>',

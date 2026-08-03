@@ -130,15 +130,47 @@ def _is_webhook_credential_host_path(host: str, decoded_path: str) -> bool:
     )
 
 
+def _split_nested_url(value: str, *, max_layers: int) -> SplitResult | None:
+    """Best-effort parse of ``value`` as a nested absolute or network-path URL.
+
+    A single ``parse_qsl`` decode can still leave the nested URL encoded
+    (e.g. ``%253A`` decodes to a literal ``%3A``, still hiding the URL's own
+    ``:``), so this unquotes up to ``max_layers`` further times looking for
+    either an explicit ``http``/``https`` scheme or a scheme-relative
+    network-path reference (``//host/...``, which carries no scheme of its
+    own but is still fetched as the current scheme by browsers and HTTP
+    clients) before giving up. A malformed candidate, such as an unbalanced
+    IPv6-literal-style host, is treated as an opaque non-URL value rather
+    than raised.
+    """
+    candidate = value
+    for _ in range(max_layers + 1):
+        try:
+            split = urlsplit(candidate)
+        except ValueError:
+            return None
+        scheme = split.scheme.lower()
+        if scheme in {"http", "https"} and split.hostname:
+            return split
+        if not scheme and split.netloc and split.hostname:
+            return split
+        decoded = unquote(candidate)
+        if decoded == candidate:
+            return None
+        candidate = decoded
+    return None
+
+
 def has_credential_bearing_query(query: str, *, depth: int = 0) -> bool:
     """Bounded recursive check for credential-bearing query values.
 
     A benign outer parameter name (e.g. "redirect") can carry a nested,
-    URL-encoded HTTP(S) URL whose own query, fragment, embedded userinfo, or
-    host/path carries the credential (e.g. "?redirect=https%3A%2F%2F
-    idp.example%2Fcb%3Faccess_token%3Dsecret", a nested Slack/Discord
-    webhook URL, or the same token after a "#" for an OAuth implicit-flow
-    callback), which ``parse_qsl`` decodes into the value but a flat
+    URL-encoded HTTP(S) or scheme-relative (network-path) URL whose own
+    query, fragment, embedded userinfo, or host/path carries the credential
+    (e.g. "?redirect=https%3A%2F%2Fidp.example%2Fcb%3Faccess_token%3Dsecret",
+    a nested Slack/Discord webhook URL possibly carried after a "#" instead
+    of a "?", or the same nested URL under an extra layer of percent-
+    encoding), which ``parse_qsl`` decodes into the value but a flat
     exact-name/suffix check never re-inspects. Depth is bounded and fails
     closed at the bound, so a chain of encoded URLs cannot recurse
     unboundedly or slip past validation.
@@ -148,26 +180,19 @@ def has_credential_bearing_query(query: str, *, depth: int = 0) -> bool:
     for name, value in parse_qsl(query, keep_blank_values=True):
         if is_sensitive_query_name(name):
             return True
-        try:
-            nested = urlsplit(value)
-        except ValueError:
+        nested = _split_nested_url(value, max_layers=_MAX_NESTED_URL_DEPTH)
+        if nested is None:
             continue
-        if nested.scheme.lower() in {"http", "https"} and nested.hostname:
-            nested_host = nested.hostname.rstrip(".").lower()
-            nested_path = unquote(nested.path)
-            if (
-                nested.username is not None
-                or nested.password is not None
-                or _is_webhook_credential_host_path(nested_host, nested_path)
-                or any(
-                    is_sensitive_query_name(fragment_name)
-                    for fragment_name, _ in parse_qsl(
-                        nested.fragment, keep_blank_values=True
-                    )
-                )
-                or has_credential_bearing_query(nested.query, depth=depth + 1)
-            ):
-                return True
+        nested_host = (nested.hostname or "").rstrip(".").lower()
+        nested_path = unquote(nested.path)
+        if (
+            nested.username is not None
+            or nested.password is not None
+            or _is_webhook_credential_host_path(nested_host, nested_path)
+            or has_credential_bearing_query(nested.fragment, depth=depth + 1)
+            or has_credential_bearing_query(nested.query, depth=depth + 1)
+        ):
+            return True
     return False
 
 

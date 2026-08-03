@@ -172,6 +172,51 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 with self.assertRaisesRegex(MonitorError, "credential-like"):
                     Target.from_mapping({**base, "url": url})
 
+    def test_rejects_nested_webhook_url_carried_in_a_fragment_value(self) -> None:
+        # A nested URL's fragment was only checked for sensitive parameter
+        # *names*, so a benign fragment name (e.g. "next") whose value is
+        # itself an encoded Slack/Discord webhook URL passed through
+        # unexamined; it must now recurse into fragment values the same way
+        # it recurses into query values.
+        base = {
+            "target_id": "one",
+            "enabled": True,
+            "name": "One",
+            "url": (
+                "https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
+                "cb%23next%3Dhttps%253A%252F%252Fhooks.slack.com%252Fservices"
+                "%252FT00000000%252FB00000000%252FXXXXXXXXXXXXXXXXXXXXXXXX"
+            ),
+        }
+        with self.assertRaisesRegex(MonitorError, "credential-like"):
+            Target.from_mapping(base)
+
+    def test_rejects_scheme_relative_and_double_encoded_nested_webhook_urls(
+        self,
+    ) -> None:
+        # The nested check only recognized an explicit http(s) scheme, and
+        # only a single layer of percent-encoding, so a scheme-relative
+        # ("//host/...", a network-path reference resolved against the
+        # current scheme) or double-encoded nested webhook URL slipped
+        # through with the credential fully recoverable.
+        base = {
+            "target_id": "one",
+            "enabled": True,
+            "name": "One",
+            "url": "https://example.com",
+        }
+        bypassing_urls = (
+            "https://example.com/?redirect=%2F%2Fhooks.slack.com%2Fservices"
+            "%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX",
+            "https://example.com/?redirect=https%253A%252F%252Fhooks.slack"
+            ".com%252Fservices%252FT00000000%252FB00000000"
+            "%252FXXXXXXXXXXXXXXXXXXXXXXXX",
+        )
+        for url in bypassing_urls:
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(MonitorError, "credential-like"):
+                    Target.from_mapping({**base, "url": url})
+
     def test_malformed_nested_url_in_query_value_does_not_crash(self) -> None:
         # A decoded query value that merely looks like it could be a URL
         # (e.g. an unbalanced IPv6-literal-style host) must not escape as an
