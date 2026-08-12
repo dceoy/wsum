@@ -1,0 +1,16 @@
+---
+name: CI/CD
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+permissions:
+  contents: read
+jobs:
+  markdown-lint:
+    uses: dceoy/gha-for-devops/.github/workflows/markdown-lint.yml@main  # zizmor: ignore[unpinned-uses]
+    with:
+      search-path: .
