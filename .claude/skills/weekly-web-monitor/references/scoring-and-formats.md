@@ -58,14 +58,14 @@ Equal hashes return `unchanged`. A missing previous snapshot returns
 
 Start with up to 60 points from changed-character ratio. Add deterministic weights:
 
-| Signal | Points |
-| --- | ---: |
-| Price | 30 |
-| Contractual terms or policy | 30 |
-| Availability | 25 |
-| Eligibility or application requirements | 25 |
-| Specifications | 20 |
-| Rewrite of at least 65% | 20 |
+| Signal                                  | Points |
+| --------------------------------------- | -----: |
+| Price                                   |     30 |
+| Contractual terms or policy             |     30 |
+| Availability                            |     25 |
+| Eligibility or application requirements |     25 |
+| Specifications                          |     20 |
+| Rewrite of at least 65%                 |     20 |
 
 Cap at 100. Cap obvious date/counter-only noise at 15. Scores below 35 are `minor`;
 35–69 are `moderate` candidates; 70–100 are `high` candidates. Only candidates may
