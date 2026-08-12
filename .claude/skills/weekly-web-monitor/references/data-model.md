@@ -11,17 +11,17 @@ deployment-owned columns after them.
 
 ### Targets
 
-| Column | Meaning |
-| --- | --- |
-| `target_id` | Stable key; letters, digits, dot, underscore, and hyphen only |
-| `enabled` | Boolean gate |
-| `name` | Human-readable label |
-| `url` | Public HTTP(S) URL without credentials |
-| `fetch_mode` | `static` or explicitly approved `browser` |
-| `include_selector` | Optional strict, supported CSS subset |
-| `exclude_selectors` | Comma-separated strict selector list |
-| `watch_focus` | Bounded guidance for materiality |
-| `notification_group` | Logical destination key, never a channel secret |
+| Column               | Meaning                                                       |
+| -------------------- | ------------------------------------------------------------- |
+| `target_id`          | Stable key; letters, digits, dot, underscore, and hyphen only |
+| `enabled`            | Boolean gate                                                  |
+| `name`               | Human-readable label                                          |
+| `url`                | Public HTTP(S) URL without credentials                        |
+| `fetch_mode`         | `static` or explicitly approved `browser`                     |
+| `include_selector`   | Optional strict, supported CSS subset                         |
+| `exclude_selectors`  | Comma-separated strict selector list                          |
+| `watch_focus`        | Bounded guidance for materiality                              |
+| `notification_group` | Logical destination key, never a channel secret               |
 
 ### State
 
