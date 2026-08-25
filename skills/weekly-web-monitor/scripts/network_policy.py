@@ -114,22 +114,25 @@ def is_public_address(value: str) -> bool:
 def _normalize_host(host: str) -> str:
     host = host.rstrip(".").lower()
     if not host:
-        raise _deny("URL host is empty")
+        msg = "URL host is empty"
+        raise _deny(msg)
     try:
         normalized = host.encode("idna").decode("ascii")
     except UnicodeError as exc:
-        raise _deny("URL host is not valid IDNA") from exc
+        msg = "URL host is not valid IDNA"
+        raise _deny(msg) from exc
     if len(normalized) > 253 or any(len(label) > 63 for label in normalized.split(".")):
-        raise _deny("URL host is too long")
+        msg = "URL host is too long"
+        raise _deny(msg)
     return normalized
 
 
 def _is_webhook_credential_host_path(host: str, decoded_path: str) -> bool:
     return (
-        host == "hooks.slack.com"
-        and decoded_path.startswith("/services/")
-        or host in {"discord.com", "discordapp.com"}
-        and "/api/webhooks/" in decoded_path
+        (host == "hooks.slack.com"
+        and decoded_path.startswith("/services/"))
+        or (host in {"discord.com", "discordapp.com"}
+        and "/api/webhooks/" in decoded_path)
     )
 
 
@@ -336,30 +339,39 @@ def has_credential_bearing_query(
 
 def canonicalize_url(value: str) -> tuple[str, SplitResult]:
     if not isinstance(value, str) or len(value) > 4_096:
-        raise _deny("URL must be a string no longer than 4096 characters")
+        msg = "URL must be a string no longer than 4096 characters"
+        raise _deny(msg)
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise _deny("URL contains control characters")
+        msg = "URL contains control characters"
+        raise _deny(msg)
     try:
         parsed = urlsplit(value)
         port = parsed.port
     except ValueError as exc:
-        raise _deny("URL is malformed") from exc
+        msg = "URL is malformed"
+        raise _deny(msg) from exc
     scheme = parsed.scheme.lower()
     if scheme not in {"http", "https"}:
-        raise _deny("only HTTP and HTTPS URLs are allowed")
+        msg = "only HTTP and HTTPS URLs are allowed"
+        raise _deny(msg)
     if not parsed.hostname:
-        raise _deny("URL host is required")
+        msg = "URL host is required"
+        raise _deny(msg)
     if parsed.username is not None or parsed.password is not None:
-        raise _deny("embedded URL credentials are forbidden")
+        msg = "embedded URL credentials are forbidden"
+        raise _deny(msg)
     if has_credential_bearing_query(parsed.query, allow_path_relative=True):
-        raise _deny("credential-like URL query parameters are forbidden")
+        msg = "credential-like URL query parameters are forbidden"
+        raise _deny(msg)
     host = _normalize_host(parsed.hostname)
     decoded_path = unquote(parsed.path)
     if _is_webhook_credential_host_path(host, decoded_path):
-        raise _deny("webhook credential URLs are forbidden")
+        msg = "webhook credential URLs are forbidden"
+        raise _deny(msg)
     port = port or (443 if scheme == "https" else 80)
     if not 1 <= port <= 65535:
-        raise _deny("URL port is invalid")
+        msg = "URL port is invalid"
+        raise _deny(msg)
     default_port = 443 if scheme == "https" else 80
     display_host = f"[{host}]" if ":" in host else host
     netloc = display_host if port == default_port else f"{display_host}:{port}"
@@ -393,9 +405,11 @@ def canonicalize_fragment_identity(fragment: str) -> str:
     if len(fragment) > 4_096 or any(
         ord(char) < 32 or ord(char) == 127 for char in fragment
     ):
-        raise _deny("URL fragment is malformed")
+        msg = "URL fragment is malformed"
+        raise _deny(msg)
     if has_credential_bearing_query(fragment, allow_path_relative=True):
-        raise _deny("credential-like URL fragment is forbidden")
+        msg = "credential-like URL fragment is forbidden"
+        raise _deny(msg)
     if len(fragment) <= MAX_FRAGMENT_IDENTITY_CHARS:
         return fragment
     digest = hashlib.sha256(fragment.encode("utf-8")).hexdigest()
@@ -417,8 +431,9 @@ def _addresses_from_resolution(
         try:
             answers = resolver(host, port, type=socket.SOCK_STREAM)
         except (OSError, socket.gaierror) as exc:
+            msg = "dns_resolution_failed"
             raise MonitorError(
-                "dns_resolution_failed",
+                msg,
                 "target host could not be resolved",
                 retryable=True,
             ) from exc
@@ -429,14 +444,16 @@ def _addresses_from_resolution(
             )
         )
     if not addresses:
+        msg = "dns_resolution_failed"
         raise MonitorError(
-            "dns_resolution_failed",
+            msg,
             "target host resolved to no addresses",
             retryable=True,
         )
     disallowed = [address for address in addresses if not is_public_address(address)]
     if disallowed:
-        raise _deny("target host resolves to a non-public address")
+        msg = "target host resolves to a non-public address"
+        raise _deny(msg)
     return addresses
 
 
@@ -453,7 +470,8 @@ def resolve_public_url(
     if verify_stable_dns:
         second = _addresses_from_resolution(host, port, resolver)
         if first != second:
-            raise _deny("target DNS answers changed during validation")
+            msg = "target DNS answers changed during validation"
+            raise _deny(msg)
     return ResolvedTarget(canonical, parsed.scheme, host, port, first)
 
 
@@ -463,7 +481,8 @@ def validate_peer_address(peer_address: str, allowed: Iterable[str]) -> None:
         str(ipaddress.ip_address(item.split("%", 1)[0])) for item in allowed
     }
     if peer not in normalized_allowed or not is_public_address(peer):
-        raise _deny("connected peer does not match the validated public address set")
+        msg = "connected peer does not match the validated public address set"
+        raise _deny(msg)
 
 
 def validate_redirect(
@@ -473,8 +492,9 @@ def validate_redirect(
     resolver: Resolver = socket.getaddrinfo,
 ) -> ResolvedTarget:
     if not location or len(location) > 4_096:
+        msg = "redirect_missing_location"
         raise MonitorError(
-            "redirect_missing_location", "redirect has no usable Location header"
+            msg, "redirect has no usable Location header"
         )
     return resolve_public_url(urljoin(current_url, location), resolver=resolver)
 
@@ -500,7 +520,8 @@ class BrowserNetworkGuard:
     def validate_request(self, url: str) -> ResolvedTarget:
         target = resolve_public_url(url, resolver=self._resolver)
         if target.host not in self._allowed_hosts:
-            raise _deny("browser request host is not explicitly allowed")
+            msg = "browser request host is not explicitly allowed"
+            raise _deny(msg)
         return target
 
     def validate_response_peer(self, url: str, peer_address: str) -> None:

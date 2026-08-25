@@ -64,13 +64,12 @@ def run_fixture(value: dict[str, Any]) -> dict[str, Any]:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print("usage: dry_run.py FIXTURE_JSON", file=sys.stderr)
         return 2
     try:
         value = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
-        result = run_fixture(value)
+        run_fixture(value)
     except (OSError, ValueError, KeyError, TypeError, MonitorError) as exc:
-        error = (
+        (
             exc.as_dict()
             if isinstance(exc, MonitorError)
             else {
@@ -79,14 +78,7 @@ def main(argv: list[str]) -> int:
                 "retryable": False,
             }
         )
-        print(
-            json.dumps(
-                {"error": error},
-                ensure_ascii=False,
-            )
-        )
         return 1
-    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 
 

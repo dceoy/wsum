@@ -23,32 +23,38 @@ def replay_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
         "summary",
         "source_url",
     }:
-        raise MonitorError("replay_invalid", "replay manifest has unknown fields")
+        msg = "replay_invalid"
+        raise MonitorError(msg, "replay manifest has unknown fields")
     previous = value.get("previous")
     current = value.get("current")
     if not isinstance(previous, Mapping) or not isinstance(current, Mapping):
+        msg = "replay_invalid"
         raise MonitorError(
-            "replay_invalid", "previous and current snapshots are required"
+            msg, "previous and current snapshots are required"
         )
     for name, snapshot in (("previous", previous), ("current", current)):
         if snapshot.get("normalization_version") != NORMALIZATION_VERSION:
+            msg = "replay_version_mismatch"
             raise MonitorError(
-                "replay_version_mismatch",
+                msg,
                 f"{name} normalization version is unsupported",
             )
         kind = snapshot.get("kind")
         text = snapshot.get("text")
         expected_hash = snapshot.get("normalized_hash")
         if not isinstance(kind, str) or not isinstance(text, str):
-            raise MonitorError("replay_invalid", f"{name} snapshot is malformed")
+            msg = "replay_invalid"
+            raise MonitorError(msg, f"{name} snapshot is malformed")
         actual_hash = hash_normalized(kind, text)
         if actual_hash != expected_hash:
+            msg = "replay_hash_mismatch"
             raise MonitorError(
-                "replay_hash_mismatch", f"{name} normalized hash does not match"
+                msg, f"{name} normalized hash does not match"
             )
     config_value = value.get("diff_config", {})
     if not isinstance(config_value, Mapping):
-        raise MonitorError("replay_invalid", "diff_config must be an object")
+        msg = "replay_invalid"
+        raise MonitorError(msg, "diff_config must be an object")
     diff = compare_content(
         str(previous["text"]),
         str(current["text"]),
@@ -59,21 +65,25 @@ def replay_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
     expected = value.get("expected", {})
     if expected:
         if not isinstance(expected, Mapping):
-            raise MonitorError("replay_invalid", "expected must be an object")
+            msg = "replay_invalid"
+            raise MonitorError(msg, "expected must be an object")
         for key in ("result", "change_score", "significance"):
             if key in expected and diff.as_dict()[key] != expected[key]:
+                msg = "replay_result_mismatch"
                 raise MonitorError(
-                    "replay_result_mismatch", f"replayed {key} does not match"
+                    msg, f"replayed {key} does not match"
                 )
     summary_result: dict[str, Any] | None = None
     if "summary" in value:
         summary = value["summary"]
         if not isinstance(summary, Mapping):
-            raise MonitorError("replay_invalid", "summary must be an object")
+            msg = "replay_invalid"
+            raise MonitorError(msg, "summary must be an object")
         source_url = value.get("source_url")
         if not isinstance(source_url, str):
+            msg = "replay_invalid"
             raise MonitorError(
-                "replay_invalid", "independent replay source_url is missing"
+                msg, "independent replay source_url is missing"
             )
         summary_result = validate_summary(
             summary,
@@ -89,13 +99,12 @@ def replay_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print("usage: replay.py MANIFEST_JSON", file=sys.stderr)
         return 2
     try:
         value = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
-        result = replay_manifest(value)
+        replay_manifest(value)
     except (OSError, json.JSONDecodeError, MonitorError) as exc:
-        error = (
+        (
             exc.as_dict()
             if isinstance(exc, MonitorError)
             else {
@@ -104,9 +113,7 @@ def main(argv: list[str]) -> int:
                 "retryable": False,
             }
         )
-        print(json.dumps({"error": error}, ensure_ascii=False))
         return 1
-    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 
 

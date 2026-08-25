@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from diff import DiffResult
 from errors import MonitorError
 from models import HASH_RE, validate_target_id
-from normalize import NormalizedContent
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from diff import DiffResult
+    from normalize import NormalizedContent
 
 
 class DriveConnector(Protocol):
@@ -45,9 +48,11 @@ def snapshot_paths(
 ) -> SnapshotPaths:
     validate_target_id(target_id)
     if not HASH_RE.fullmatch(normalized_hash):
-        raise MonitorError("invalid_snapshot", "normalized_hash is invalid")
+        msg = "invalid_snapshot"
+        raise MonitorError(msg, "normalized_hash is invalid")
     if previous_hash and not HASH_RE.fullmatch(previous_hash):
-        raise MonitorError("invalid_snapshot", "previous_hash is invalid")
+        msg = "invalid_snapshot"
+        raise MonitorError(msg, "previous_hash is invalid")
     prefix = f"snapshots/{target_id}/{normalized_hash}"
     diff_name = f"diff-{previous_hash}.json" if previous_hash else "diff.json"
     return SnapshotPaths(
@@ -62,8 +67,9 @@ class SnapshotStore:
         self, connector: DriveConnector, *, max_snapshot_bytes: int = 10_000_000
     ) -> None:
         if not 1_024 <= max_snapshot_bytes <= 50_000_000:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "snapshot size limit is invalid"
+                msg, "snapshot size limit is invalid"
             )
         self._connector = connector
         self._max_snapshot_bytes = max_snapshot_bytes
@@ -73,8 +79,9 @@ class SnapshotStore:
             existing = self._connector.find_file(path)
             if existing:
                 if len(existing) > 1_000:
+                    msg = "drive_reference_invalid"
                     raise MonitorError(
-                        "drive_reference_invalid",
+                        msg,
                         "Drive connector returned an oversized file reference",
                     )
                 return existing
@@ -82,14 +89,16 @@ class SnapshotStore:
         except MonitorError:
             raise
         except Exception as exc:
+            msg = "drive_write_failed"
             raise MonitorError(
-                "drive_write_failed",
+                msg,
                 "Drive snapshot write failed",
                 retryable=True,
             ) from exc
         if not reference or len(reference) > 1_000:
+            msg = "drive_write_failed"
             raise MonitorError(
-                "drive_write_failed",
+                msg,
                 "Drive connector returned no usable file reference",
             )
         return reference
@@ -104,8 +113,9 @@ class SnapshotStore:
         paths = snapshot_paths(target_id, content.normalized_hash, previous_hash)
         normalized_bytes = content.text.encode("utf-8")
         if len(normalized_bytes) > self._max_snapshot_bytes:
+            msg = "snapshot_too_large"
             raise MonitorError(
-                "snapshot_too_large", "normalized snapshot exceeds the size limit"
+                msg, "normalized snapshot exceeds the size limit"
             )
         normalized_ref = self._ensure_file(
             paths.normalized, normalized_bytes, "text/plain; charset=utf-8"
@@ -133,27 +143,32 @@ class SnapshotStore:
 
     def load_normalized(self, snapshot_ref: str) -> str:
         if not snapshot_ref or len(snapshot_ref) > 1_000:
-            raise MonitorError("snapshot_missing", "snapshot reference is missing")
+            msg = "snapshot_missing"
+            raise MonitorError(msg, "snapshot reference is missing")
         try:
             content = self._connector.download_file(snapshot_ref)
             if not isinstance(content, bytes):
+                msg = "snapshot_invalid"
                 raise MonitorError(
-                    "snapshot_invalid", "stored snapshot is not a byte sequence"
+                    msg, "stored snapshot is not a byte sequence"
                 )
             if len(content) > self._max_snapshot_bytes:
+                msg = "snapshot_too_large"
                 raise MonitorError(
-                    "snapshot_too_large", "stored snapshot exceeds the size limit"
+                    msg, "stored snapshot exceeds the size limit"
                 )
             return content.decode("utf-8")
         except UnicodeDecodeError as exc:
+            msg = "snapshot_invalid"
             raise MonitorError(
-                "snapshot_invalid", "stored normalized snapshot is not UTF-8"
+                msg, "stored normalized snapshot is not UTF-8"
             ) from exc
         except MonitorError:
             raise
         except Exception as exc:
+            msg = "snapshot_missing"
             raise MonitorError(
-                "snapshot_missing", "stored normalized snapshot could not be loaded"
+                msg, "stored normalized snapshot could not be loaded"
             ) from exc
 
     def plan_cleanup(
@@ -165,14 +180,16 @@ class SnapshotStore:
     ) -> list[CleanupCandidate]:
         validate_target_id(target_id)
         if retain_snapshots < 1:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "retain_snapshots must be at least one"
+                msg, "retain_snapshots must be at least one"
             )
         try:
             files = list(self._connector.list_files(f"snapshots/{target_id}/"))
         except Exception as exc:
+            msg = "connector_unavailable"
             raise MonitorError(
-                "connector_unavailable",
+                msg,
                 "Drive snapshot listing failed",
                 retryable=True,
             ) from exc

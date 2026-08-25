@@ -5,12 +5,11 @@ from __future__ import annotations
 import secrets
 import tempfile
 import threading
-from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from audit import AuditSink, configuration_digest, make_audit_record
 from diff import DiffConfig, DiffResult, compare_content
@@ -36,6 +35,9 @@ from outbox import OutboxStore, enqueue_record
 from retry import RetryConfig, run_with_retry
 from summary import build_summary_request
 from validate_summary import validate_summary
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
 
 
 class OperationalStore(NotificationStore, Protocol):
@@ -83,20 +85,24 @@ class RoutineConfig:
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_concurrency <= 4:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "max_concurrency must be between 1 and 4"
+                msg, "max_concurrency must be between 1 and 4"
             )
         if not 1 <= self.failure_alert_threshold <= 100:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "failure alert threshold is invalid"
+                msg, "failure alert threshold is invalid"
             )
         if self.delivery_mode not in {"direct", "outbox"}:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "delivery_mode must be direct or outbox"
+                msg, "delivery_mode must be direct or outbox"
             )
         if not 100 <= self.max_notification_chars <= 3_500:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "notification length limit is invalid"
+                msg, "notification length limit is invalid"
             )
 
 
@@ -185,13 +191,15 @@ class WeeklyMonitorRoutine:
         self.summary_client = summary_client
         if self.config.delivery_mode == "direct":
             if slack is None or outbox_store is not None:
+                msg = "invalid_configuration"
                 raise MonitorError(
-                    "invalid_configuration",
+                    msg,
                     "direct delivery requires only a Slack connector",
                 )
         elif outbox_store is None or slack is not None:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration",
+                msg,
                 "outbox delivery requires only an Outbox store",
             )
         self.slack = slack
@@ -268,8 +276,9 @@ class WeeklyMonitorRoutine:
             or not run_id
             or any(not char.isprintable() for char in run_id)
         ):
+            msg = "invalid_record"
             raise MonitorError(
-                "invalid_record",
+                msg,
                 "run_id must be a non-empty string without control characters",
             )
         longest_target_id = max(
@@ -277,8 +286,9 @@ class WeeklyMonitorRoutine:
         )
         max_length = 200 if longest_target_id < 0 else 199 - longest_target_id
         if len(run_id) > max_length:
+            msg = "invalid_record"
             raise MonitorError(
-                "invalid_record",
+                msg,
                 "run_id is too long for the enabled target IDs",
             )
         return run_id
@@ -331,8 +341,9 @@ class WeeklyMonitorRoutine:
                 # no longer be made to record a different outcome for this
                 # run_id. Raise rather than let a caller retry the pair and
                 # silently no-op the append while replace_state runs again.
+                msg = f"State commit failed after Run {run.run_id} was already persisted"
                 raise _PartialCommitError(
-                    f"State commit failed after Run {run.run_id} was already persisted"
+                    msg
                 ) from exc
         return run
 
@@ -384,14 +395,16 @@ class WeeklyMonitorRoutine:
         try:
             with self._slack_lock:
                 if self.slack is None:
+                    msg = "connector_configuration_missing"
                     raise MonitorError(
-                        "connector_configuration_missing",
+                        msg,
                         "Slack connector is unavailable",
                     )
                 reference = self.slack.send_message(target.notification_group, message)
             if not reference:
+                msg = "notification_send_failed"
                 raise AmbiguousDeliveryFailure(
-                    "notification_send_failed",
+                    msg,
                     "failure alert returned no delivery reference",
                 )
         except ConfirmedDeliveryFailure:
@@ -498,7 +511,7 @@ class WeeklyMonitorRoutine:
             try:
                 previous_state = self._state(target)
                 state_loaded = True
-            except Exception:  # noqa: S110 - the second load is best-effort
+            except Exception:  # ruff: ignore[try-except-pass] - the second load is best-effort
                 pass
         failed_state = replace(
             previous_state,
@@ -660,8 +673,9 @@ class WeeklyMonitorRoutine:
                     watch_focus=target.watch_focus,
                 )
                 if diff.budget_exceeded:
+                    msg = "diff_budget_exceeded"
                     raise MonitorError(
-                        "diff_budget_exceeded",
+                        msg,
                         "diff exceeded the configured line budget; the change "
                         "cannot be assessed from synthetic evidence and needs "
                         "manual review",
@@ -714,8 +728,9 @@ class WeeklyMonitorRoutine:
                     # truncation means the model judged materiality from an
                     # incomplete view, so a non-material verdict cannot be
                     # trusted regardless of which section was cut.
+                    msg = "truncated_diff_non_material"
                     raise MonitorError(
-                        "truncated_diff_non_material",
+                        msg,
                         "diff truncation dropped evidence the model never saw; "
                         "a non-material verdict over incomplete evidence needs "
                         "manual review before the baseline can advance",
@@ -949,8 +964,9 @@ class WeeklyMonitorRoutine:
             else:
                 try:
                     if self.slack is None:
+                        msg = "connector_configuration_missing"
                         raise MonitorError(
-                            "connector_configuration_missing",
+                            msg,
                             "Slack connector is unavailable",
                         )
                     outcomes = deliver_grouped(

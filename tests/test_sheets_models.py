@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-import support  # noqa: F401
+import pytest
+import support  # ruff: ignore[unused-import]
 from errors import MonitorError
 from models import Attempt, NotificationRecord, RunRecord, State, Target
 from sheets import (
@@ -53,20 +54,20 @@ class ModelsAndSheetsTests(unittest.TestCase):
             ],
         )
         targets = load_enabled_targets(values)
-        self.assertEqual(["one"], [target.target_id for target in targets])
-        self.assertEqual((".ad", ".nav"), targets[0].exclude_selectors)
+        assert [target.target_id for target in targets] == ["one"]
+        assert targets[0].exclude_selectors == (".ad", ".nav")
 
     def test_invalid_structure_empty_and_duplicate_ids_fail(self) -> None:
-        with self.assertRaisesRegex(MonitorError, "header row"):
+        with pytest.raises(MonitorError, match="header row"):
             load_enabled_targets([])
-        with self.assertRaisesRegex(MonitorError, "missing required columns"):
+        with pytest.raises(MonitorError, match="missing required columns"):
             load_enabled_targets([["target_id"], ["one"]])
         duplicate = table(
             TARGET_COLUMNS,
             ["one", True, "One", "https://example.com", "static", "", "", "", "d"],
             ["one", True, "Two", "https://example.org", "static", "", "", "", "d"],
         )
-        with self.assertRaisesRegex(MonitorError, "duplicate"):
+        with pytest.raises(MonitorError, match="duplicate"):
             load_enabled_targets(duplicate)
 
     def test_rejects_bad_values_and_credential_urls(self) -> None:
@@ -76,13 +77,13 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "name": "One",
             "url": "https://example.com/?token=secret",
         }
-        with self.assertRaisesRegex(MonitorError, "credential-like"):
+        with pytest.raises(MonitorError, match="credential-like"):
             Target.from_mapping(base)
         base["url"] = "https://hooks.slack.com/%73ervices/T/B/secret"
-        with self.assertRaisesRegex(MonitorError, "webhook"):
+        with pytest.raises(MonitorError, match="webhook"):
             Target.from_mapping(base)
         base["url"] = "file:///tmp/test"
-        with self.assertRaises(MonitorError):
+        with pytest.raises(MonitorError):
             Target.from_mapping(base)
 
     def test_rejects_url_fragments(self) -> None:
@@ -96,7 +97,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "name": "One",
             "url": "https://example.com/#access_token=secret",
         }
-        with self.assertRaisesRegex(MonitorError, "fragment"):
+        with pytest.raises(MonitorError, match="fragment"):
             Target.from_mapping(base)
 
     def test_rejects_provider_prefixed_signed_url_credentials(self) -> None:
@@ -110,15 +111,15 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "url": "https://example.com",
         }
         signed_urls = (
-            "https://bucket.s3.amazonaws.com/key"
-            "?X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request",
+            ("https://bucket.s3.amazonaws.com/key"
+            "?X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"),
             "https://bucket.s3.amazonaws.com/key?X-Amz-Signature=abc123",
             "https://storage.googleapis.com/bucket/key?X-Goog-Signature=abc123",
             "https://bucket.s3.amazonaws.com/key?AWSAccessKeyId=AKIAEXAMPLE",
         )
         for url in signed_urls:
             with self.subTest(url=url):
-                with self.assertRaisesRegex(MonitorError, "credential-like"):
+                with pytest.raises(MonitorError, match="credential-like"):
                     Target.from_mapping({**base, "url": url})
 
     def test_rejects_credential_bearing_urls_nested_in_query_values(self) -> None:
@@ -134,19 +135,19 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "url": "https://example.com",
         }
         nested_urls = (
-            "https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
-            "cb%3Faccess_token%3Dsecret",
-            "https://example.com/?next=https%3A%2F%2Fbucket.s3.amazonaws.com"
-            "%2Fkey%3FX-Amz-Signature%3Dabc123",
+            ("https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
+            "cb%3Faccess_token%3Dsecret"),
+            ("https://example.com/?next=https%3A%2F%2Fbucket.s3.amazonaws.com"
+            "%2Fkey%3FX-Amz-Signature%3Dabc123"),
             "https://example.com/?redirect=https%3A%2F%2Fuser%3Apass%40evil.com",
             # An OAuth implicit-flow token after "#" in the nested URL, not
             # its query string.
-            "https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
-            "cb%23access_token%3Dsecret",
+            ("https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
+            "cb%23access_token%3Dsecret"),
         )
         for url in nested_urls:
             with self.subTest(url=url):
-                with self.assertRaisesRegex(MonitorError, "credential-like"):
+                with pytest.raises(MonitorError, match="credential-like"):
                     Target.from_mapping({**base, "url": url})
 
     def test_rejects_nested_webhook_urls_in_query_values(self) -> None:
@@ -162,14 +163,14 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "url": "https://example.com",
         }
         nested_webhook_urls = (
-            "https://example.com/?redirect=https%3A%2F%2Fhooks.slack.com"
-            "%2Fservices%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX",
-            "https://example.com/?next=https%3A%2F%2Fdiscord.com"
-            "%2Fapi%2Fwebhooks%2F123456789%2Fabcdef",
+            ("https://example.com/?redirect=https%3A%2F%2Fhooks.slack.com"
+            "%2Fservices%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX"),
+            ("https://example.com/?next=https%3A%2F%2Fdiscord.com"
+            "%2Fapi%2Fwebhooks%2F123456789%2Fabcdef"),
         )
         for url in nested_webhook_urls:
             with self.subTest(url=url):
-                with self.assertRaisesRegex(MonitorError, "credential-like"):
+                with pytest.raises(MonitorError, match="credential-like"):
                     Target.from_mapping({**base, "url": url})
 
     def test_rejects_nested_webhook_url_carried_in_a_fragment_value(self) -> None:
@@ -188,7 +189,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 "%252FT00000000%252FB00000000%252FXXXXXXXXXXXXXXXXXXXXXXXX"
             ),
         }
-        with self.assertRaisesRegex(MonitorError, "credential-like"):
+        with pytest.raises(MonitorError, match="credential-like"):
             Target.from_mapping(base)
 
     def test_rejects_a_fragment_that_is_itself_a_nested_credential_url(self) -> None:
@@ -206,7 +207,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 "%2Fcb%23https%253A%252F%252Fuser%253Apass%2540example.com%2F"
             ),
         }
-        with self.assertRaisesRegex(MonitorError, "credential-like"):
+        with pytest.raises(MonitorError, match="credential-like"):
             Target.from_mapping(base)
 
     def test_rejects_scheme_relative_and_double_encoded_nested_webhook_urls(
@@ -224,15 +225,15 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "url": "https://example.com",
         }
         bypassing_urls = (
-            "https://example.com/?redirect=%2F%2Fhooks.slack.com%2Fservices"
-            "%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX",
-            "https://example.com/?redirect=https%253A%252F%252Fhooks.slack"
+            ("https://example.com/?redirect=%2F%2Fhooks.slack.com%2Fservices"
+            "%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX"),
+            ("https://example.com/?redirect=https%253A%252F%252Fhooks.slack"
             ".com%252Fservices%252FT00000000%252FB00000000"
-            "%252FXXXXXXXXXXXXXXXXXXXXXXXX",
+            "%252FXXXXXXXXXXXXXXXXXXXXXXXX"),
         )
         for url in bypassing_urls:
             with self.subTest(url=url):
-                with self.assertRaisesRegex(MonitorError, "credential-like"):
+                with pytest.raises(MonitorError, match="credential-like"):
                     Target.from_mapping({**base, "url": url})
 
     def test_malformed_nested_url_in_query_value_does_not_crash(self) -> None:
@@ -255,9 +256,9 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "name": "One",
             "url": "https://example.com",
         }
-        with self.assertRaisesRegex(MonitorError, "count or length limit"):
+        with pytest.raises(MonitorError, match="count or length limit"):
             Target.from_mapping({**base, "exclude_selectors": [".a"] * 51})
-        with self.assertRaisesRegex(MonitorError, "count or length limit"):
+        with pytest.raises(MonitorError, match="count or length limit"):
             Target.from_mapping({**base, "exclude_selectors": ["." + "a" * 500]})
 
     def test_state_and_notification_queries(self) -> None:
@@ -268,16 +269,16 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 ["one", "", "", "", "", digest, "drive:1", 2],
             )
         )
-        self.assertEqual(2, states["one"][0])
-        self.assertEqual(2, states["one"][1].consecutive_failures)
+        assert states["one"][0] == 2
+        assert states["one"][1].consecutive_failures == 2
         notifications = load_notifications(
             table(
                 NOTIFICATION_COLUMNS,
                 [digest, "one", "sent", "2026-01-01T00:00:00Z"],
             )
         )
-        self.assertEqual("sent", notifications[digest][1].status)
-        with self.assertRaisesRegex(MonitorError, "validator"):
+        assert notifications[digest][1].status == "sent"
+        with pytest.raises(MonitorError, match="validator"):
             State.from_mapping(
                 {
                     "target_id": "one",
@@ -292,7 +293,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
 
     def test_write_payload_generation(self) -> None:
         state = State("one")
-        self.assertEqual("State!A3:H3", replace_state_payload(3, state)["range"])
+        assert replace_state_payload(3, state)["range"] == "State!A3:H3"
         run = RunRecord(
             "run:one",
             "one",
@@ -305,25 +306,18 @@ class ModelsAndSheetsTests(unittest.TestCase):
             (Attempt(1, "succeeded"),),
         )
         payload = append_run_payload(run)
-        self.assertEqual("Runs!A:H", payload["range"])
-        self.assertIn('"attempts"', payload["values"][0][4])
+        assert payload["range"] == "Runs!A:H"
+        assert '"attempts"' in payload["values"][0][4]
         notification = NotificationRecord("b" * 64, "one", "pending")
-        self.assertEqual("append", upsert_notification_payload(notification)["mode"])
-        self.assertEqual(
-            "Notifications!A:F", upsert_notification_payload(notification)["range"]
-        )
-        self.assertEqual(
-            "replace", upsert_notification_payload(notification, 4)["mode"]
-        )
-        self.assertEqual(
-            "Notifications!A4:F4",
-            upsert_notification_payload(notification, 4)["range"],
-        )
+        assert upsert_notification_payload(notification)["mode"] == "append"
+        assert upsert_notification_payload(notification)["range"] == "Notifications!A:F"
+        assert upsert_notification_payload(notification, 4)["mode"] == "replace"
+        assert upsert_notification_payload(notification, 4)["range"] == "Notifications!A4:F4"
 
     def test_record_parser_allows_extra_columns_but_not_extra_values(self) -> None:
         values = [["id", "extra"], ["one", "x"]]
-        self.assertEqual("x", records_from_values(values, ("id",), "Test")[0]["extra"])
-        with self.assertRaises(MonitorError):
+        assert records_from_values(values, ("id",), "Test")[0]["extra"] == "x"
+        with pytest.raises(MonitorError):
             records_from_values([["id"], ["one", "x"]], ("id",), "Test")
 
     def test_record_parser_rejects_reordered_required_columns(self) -> None:
@@ -345,10 +339,10 @@ class ModelsAndSheetsTests(unittest.TestCase):
             ),
             ["one", "", "", "", "", digest, "drive:1", 2],
         )
-        with self.assertRaisesRegex(MonitorError, "must appear first, in this order"):
+        with pytest.raises(MonitorError, match="must appear first, in this order"):
             load_states(reordered)
 
-        with self.assertRaises(MonitorError):
+        with pytest.raises(MonitorError):
             records_from_values([["extra", "id"], ["x", "one"]], ("id",), "Test")
 
     def test_store_uses_raw_write_semantics_and_idempotent_runs(self) -> None:
@@ -401,8 +395,8 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "2026-01-01T00:00:01Z",
         )
         store.append_run(run)
-        self.assertTrue(connector.calls)
-        self.assertTrue(all(option == "RAW" for _, option in connector.calls))
+        assert connector.calls
+        assert all(option == "RAW" for _, option in connector.calls)
 
     def test_get_run_round_trips_result_and_attempts(self) -> None:
         class Connector:
@@ -416,13 +410,14 @@ class ModelsAndSheetsTests(unittest.TestCase):
             def replace_values(
                 self, spreadsheet_id, range_name, values, *, value_input_option
             ):
-                raise AssertionError("runs are append-only")
+                msg = "runs are append-only"
+                raise AssertionError(msg)
 
             def append_values(
                 self, spreadsheet_id, range_name, values, *, value_input_option
             ):
                 del spreadsheet_id, value_input_option
-                self.values[range_name] = self.values[range_name] + list(values)
+                self.values[range_name] += list(values)
 
         connector = Connector()
         store = SheetsStore(connector, "runtime-only-id")
@@ -438,8 +433,8 @@ class ModelsAndSheetsTests(unittest.TestCase):
             (Attempt(1, "succeeded"),),
         )
         store.append_run(run)
-        self.assertIsNone(store.get_run("run-1:two"))
-        self.assertEqual(run, store.get_run("run-1:one"))
+        assert store.get_run("run-1:two") is None
+        assert run == store.get_run("run-1:one")
 
     def test_notification_round_trips_kind_and_last_error(self) -> None:
         class Connector:
@@ -454,17 +449,13 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 self, spreadsheet_id, range_name, values, *, value_input_option
             ):
                 del spreadsheet_id, value_input_option
-                self.values["Notifications!A:F"] = [list(NOTIFICATION_COLUMNS)] + list(
-                    values
-                )
+                self.values["Notifications!A:F"] = [list(NOTIFICATION_COLUMNS), *list(values)]
 
             def append_values(
                 self, spreadsheet_id, range_name, values, *, value_input_option
             ):
                 del spreadsheet_id, value_input_option
-                self.values["Notifications!A:F"] = self.values[
-                    "Notifications!A:F"
-                ] + list(values)
+                self.values["Notifications!A:F"] += list(values)
 
         connector = Connector()
         store = SheetsStore(connector, "runtime-only-id")
@@ -476,7 +467,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
             last_error="notification_send_failed",
         )
         store.upsert_notification(notification)
-        self.assertEqual(notification, store.get_notification("c" * 64))
+        assert notification == store.get_notification("c" * 64)
 
     def test_notification_batch_uses_one_atomic_raw_connector_call(self) -> None:
         first = NotificationRecord("d" * 64, "one", "pending")
@@ -521,13 +512,10 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 ),
             ]
         )
-        self.assertEqual(1, len(connector.batches))
+        assert len(connector.batches) == 1
         data, option = connector.batches[0]
-        self.assertEqual("RAW", option)
-        self.assertEqual(
-            ["Notifications!A2:F2", "Notifications!A3:F3"],
-            [item["range"] for item in data],
-        )
+        assert option == "RAW"
+        assert [item["range"] for item in data] == ["Notifications!A2:F2", "Notifications!A3:F3"]
 
 
 if __name__ == "__main__":

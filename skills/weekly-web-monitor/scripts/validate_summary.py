@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 import re
 import sys
 from collections.abc import Mapping, Sequence
@@ -52,13 +53,16 @@ def _require_string(
 ) -> str:
     raw = value.get(key)
     if not isinstance(raw, str):
-        raise MonitorError("summary_invalid", f"{key} must be a string")
-    if len(raw) > maximum or not allow_empty and not raw.strip():
+        msg = "summary_invalid"
+        raise MonitorError(msg, f"{key} must be a string")
+    if len(raw) > maximum or (not allow_empty and not raw.strip()):
+        msg = "summary_invalid"
         raise MonitorError(
-            "summary_invalid", f"{key} is empty or exceeds {maximum} characters"
+            msg, f"{key} is empty or exceeds {maximum} characters"
         )
     if any(ord(char) < 32 and char not in "\n\t" for char in raw):
-        raise MonitorError("summary_invalid", f"{key} contains control characters")
+        msg = "summary_invalid"
+        raise MonitorError(msg, f"{key} contains control characters")
     return raw.strip()
 
 
@@ -66,7 +70,8 @@ def _validate_url(value: str, expected: str) -> None:
     try:
         parsed = urlsplit(value)
     except ValueError as exc:
-        raise MonitorError("summary_invalid_url", "source_url is malformed") from exc
+        msg = "summary_invalid_url"
+        raise MonitorError(msg, "source_url is malformed") from exc
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.hostname
@@ -74,17 +79,20 @@ def _validate_url(value: str, expected: str) -> None:
         or parsed.password is not None
         or value != expected
     ):
+        msg = "summary_invalid_url"
         raise MonitorError(
-            "summary_invalid_url", "source_url does not match the monitored source"
+            msg, "source_url does not match the monitored source"
         )
 
 
 def _normalized_evidence_lines(section: Mapping[str, Any], key: str) -> list[str]:
     value = section.get(key, [])
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise MonitorError("summary_invalid", "diff evidence must contain line arrays")
+        msg = "summary_invalid"
+        raise MonitorError(msg, "diff evidence must contain line arrays")
     if not all(isinstance(item, str) for item in value):
-        raise MonitorError("summary_invalid", "diff evidence lines must be strings")
+        msg = "summary_invalid"
+        raise MonitorError(msg, "diff evidence lines must be strings")
     return [" ".join(item.split()) for item in value]
 
 
@@ -96,21 +104,25 @@ def validate_summary(
     max_notification_chars: int = 1_500,
 ) -> dict[str, Any]:
     if not isinstance(summary, Mapping):
-        raise MonitorError("summary_invalid", "summary must be an object")
+        msg = "summary_invalid"
+        raise MonitorError(msg, "summary must be an object")
     unknown = set(summary) - ALLOWED_KEYS
     missing = ALLOWED_KEYS - set(summary)
     if unknown or missing:
+        msg = "summary_invalid"
         raise MonitorError(
-            "summary_invalid",
+            msg,
             "summary fields do not match the required schema",
             details={"missing": sorted(missing), "unknown": sorted(unknown)},
         )
     material = summary.get("material")
     if not isinstance(material, bool):
-        raise MonitorError("summary_invalid", "material must be a boolean")
+        msg = "summary_invalid"
+        raise MonitorError(msg, "material must be a boolean")
     significance = summary.get("significance")
     if significance not in {"minor", "moderate", "high"}:
-        raise MonitorError("summary_invalid", "significance is invalid")
+        msg = "summary_invalid"
+        raise MonitorError(msg, "significance is invalid")
     summary_ja = _require_string(summary, "summary_ja", maximum=500)
     action = _require_string(
         summary, "recommended_action_ja", maximum=300, allow_empty=True
@@ -130,39 +142,46 @@ def validate_summary(
         ("notification_text_ja", notification),
     ):
         if value and INJECTION_RE.search(value):
+            msg = "summary_prompt_injection"
             raise MonitorError(
-                "summary_prompt_injection",
+                msg,
                 f"{field_name} reproduces an instruction-like payload",
             )
     if not JAPANESE_RE.search(summary_ja):
-        raise MonitorError("summary_invalid", "summary_ja must contain Japanese text")
+        msg = "summary_invalid"
+        raise MonitorError(msg, "summary_ja must contain Japanese text")
     if action and not JAPANESE_RE.search(action):
+        msg = "summary_invalid"
         raise MonitorError(
-            "summary_invalid", "recommended_action_ja must contain Japanese text"
+            msg, "recommended_action_ja must contain Japanese text"
         )
     if material and (
         not JAPANESE_RE.search(notification) or source_url not in notification
     ):
+        msg = "summary_invalid"
         raise MonitorError(
-            "summary_invalid",
+            msg,
             "material notification must be Japanese and include the source URL",
         )
     delivery_text = f"{notification}\n{action}"
     if SLACK_CONTROL_RE.search(delivery_text):
+        msg = "summary_invalid"
         raise MonitorError(
-            "summary_invalid", "delivery text contains a forbidden Slack control token"
+            msg, "delivery text contains a forbidden Slack control token"
         )
     delivery_urls = URL_RE.findall(delivery_text)
     if any(
         value != source_url and value.rstrip(".,;:!?。、，；：！？") != source_url
         for value in delivery_urls
     ):
+        msg = "summary_invalid"
         raise MonitorError(
-            "summary_invalid", "delivery text contains an unsupported external URL"
+            msg, "delivery text contains an unsupported external URL"
         )
     if not material and notification:
+        msg = "summary_invalid"
         raise MonitorError(
-            "summary_invalid",
+            msg,
             "non-material summaries must not provide notification text",
         )
 
@@ -170,22 +189,27 @@ def validate_summary(
     for section in changed_sections:
         section_id = section.get("section_id")
         if not isinstance(section_id, str) or section_id in section_map:
-            raise MonitorError("summary_invalid", "diff section ids are invalid")
+            msg = "summary_invalid"
+            raise MonitorError(msg, "diff section ids are invalid")
         section_map[section_id] = section
     evidence = summary.get("evidence")
     if not isinstance(evidence, Sequence) or isinstance(evidence, (str, bytes)):
-        raise MonitorError("summary_invalid", "evidence must be an array")
+        msg = "summary_invalid"
+        raise MonitorError(msg, "evidence must be an array")
     if len(evidence) > MAX_EVIDENCE_ITEMS:
-        raise MonitorError("summary_invalid", "evidence exceeds the item limit")
+        msg = "summary_invalid"
+        raise MonitorError(msg, "evidence exceeds the item limit")
     if material and not evidence:
-        raise MonitorError("summary_unsupported", "material summary has no evidence")
+        msg = "summary_unsupported"
+        raise MonitorError(msg, "material summary has no evidence")
 
     supported_text_parts: list[str] = []
     validated_evidence: list[dict[str, str]] = []
     for item in evidence:
         if not isinstance(item, Mapping) or set(item) != EVIDENCE_KEYS:
+            msg = "summary_invalid"
             raise MonitorError(
-                "summary_invalid", "evidence fields do not match the required schema"
+                msg, "evidence fields do not match the required schema"
             )
         section_id = _require_string(item, "section_id", maximum=64)
         claim = _require_string(item, "claim_ja", maximum=300)
@@ -193,40 +217,46 @@ def validate_summary(
         after = _require_string(item, "after", maximum=500, allow_empty=True)
         section = section_map.get(section_id)
         if section is None:
+            msg = "summary_unsupported"
             raise MonitorError(
-                "summary_unsupported", "evidence references an unknown diff section"
+                msg, "evidence references an unknown diff section"
             )
         if not JAPANESE_RE.search(claim):
+            msg = "summary_invalid"
             raise MonitorError(
-                "summary_invalid", "evidence claim_ja must contain Japanese text"
+                msg, "evidence claim_ja must contain Japanese text"
             )
         allowed_before = _normalized_evidence_lines(section, "before")
         allowed_after = _normalized_evidence_lines(section, "after")
         normalized_before = " ".join(before.split())
         normalized_after = " ".join(after.split())
         if not normalized_before and not normalized_after:
+            msg = "summary_unsupported"
             raise MonitorError(
-                "summary_unsupported", "evidence must quote before or after text"
+                msg, "evidence must quote before or after text"
             )
         if (
             normalized_before
             and normalized_after
             and normalized_before == normalized_after
         ):
+            msg = "summary_unsupported"
             raise MonitorError(
-                "summary_unsupported", "before and after evidence must show a change"
+                msg, "before and after evidence must show a change"
             )
         if normalized_before and not any(
             normalized_before in line for line in allowed_before
         ):
+            msg = "summary_unsupported"
             raise MonitorError(
-                "summary_unsupported", "before evidence is absent from its diff section"
+                msg, "before evidence is absent from its diff section"
             )
         if normalized_after and not any(
             normalized_after in line for line in allowed_after
         ):
+            msg = "summary_unsupported"
             raise MonitorError(
-                "summary_unsupported", "after evidence is absent from its diff section"
+                msg, "after evidence is absent from its diff section"
             )
         supported_text_parts.extend((before, after))
         validated_evidence.append(
@@ -245,8 +275,9 @@ def validate_summary(
     evidence_facts = set(FACT_TOKEN_RE.findall(supported_text))
     unsupported_facts = claimed_facts - evidence_facts
     if unsupported_facts:
+        msg = "summary_unsupported"
         raise MonitorError(
-            "summary_unsupported",
+            msg,
             "summary contains numeric facts absent from cited evidence",
         )
     return {
@@ -262,20 +293,19 @@ def validate_summary(
 
 def _main(argv: list[str]) -> int:
     if len(argv) != 3:
-        print("usage: validate_summary.py SUMMARY_JSON REQUEST_JSON", file=sys.stderr)
         return 2
     try:
-        with open(argv[1], encoding="utf-8") as summary_stream:
+        with pathlib.Path(argv[1]).open(encoding="utf-8") as summary_stream:
             summary = json.load(summary_stream)
-        with open(argv[2], encoding="utf-8") as request_stream:
+        with pathlib.Path(argv[2]).open(encoding="utf-8") as request_stream:
             request = json.load(request_stream)
-        validated = validate_summary(
+        validate_summary(
             summary,
             changed_sections=request["changed_sections"],
             source_url=request["target"]["source_url"],
         )
     except (OSError, KeyError, json.JSONDecodeError, MonitorError) as exc:
-        error = (
+        (
             exc.as_dict()
             if isinstance(exc, MonitorError)
             else {
@@ -284,9 +314,7 @@ def _main(argv: list[str]) -> int:
                 "retryable": False,
             }
         )
-        print(json.dumps({"error": error}, ensure_ascii=False))
         return 1
-    print(json.dumps(validated, ensure_ascii=False, sort_keys=True))
     return 0
 
 

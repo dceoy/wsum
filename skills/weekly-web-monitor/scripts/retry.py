@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from errors import MonitorError, is_retryable_error
 from models import Attempt
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 T = TypeVar("T")
 
@@ -22,20 +24,24 @@ class RetryConfig:
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_attempts <= 5:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "max_attempts must be between 1 and 5"
+                msg, "max_attempts must be between 1 and 5"
             )
         if not 0 <= self.initial_delay_seconds <= 60:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "initial retry delay is invalid"
+                msg, "initial retry delay is invalid"
             )
         if not 1 <= self.backoff_multiplier <= 10:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "retry backoff multiplier is invalid"
+                msg, "retry backoff multiplier is invalid"
             )
         if not 0 <= self.max_delay_seconds <= 300:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "maximum retry delay is invalid"
+                msg, "maximum retry delay is invalid"
             )
 
 
@@ -69,11 +75,13 @@ def run_with_retry(
                         "attempts": [attempt.as_dict() for attempt in attempts],
                     }
                     raise
+                msg = "unexpected_error"
                 raise MonitorError(
-                    "unexpected_error",
+                    msg,
                     "operation failed unexpectedly",
                     details={"attempts": [attempt.as_dict() for attempt in attempts]},
                 ) from exc
             sleeper(min(delay, active.max_delay_seconds))
             delay = min(delay * active.backoff_multiplier, active.max_delay_seconds)
-    raise AssertionError("retry loop must return or raise")
+    msg = "retry loop must return or raise"
+    raise AssertionError(msg)

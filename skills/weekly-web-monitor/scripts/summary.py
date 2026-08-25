@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from diff import DiffResult
 from errors import MonitorError
 from models import Target, validate_http_url
+
+if TYPE_CHECKING:
+    from diff import DiffResult
 
 SYSTEM_PROMPT = """\
 You assess website changes from a bounded normalized diff.
@@ -22,12 +24,14 @@ text and cite section_id plus exact before/after evidence for every material cla
 
 def build_summary_request(target: Target, diff: DiffResult) -> dict[str, Any]:
     if not diff.should_summarize:
+        msg = "summary_not_required"
         raise MonitorError(
-            "summary_not_required", "only candidate material diffs may be summarized"
+            msg, "only candidate material diffs may be summarized"
         )
     validate_http_url(target.url)
     if not diff.sections:
-        raise MonitorError("diff_empty", "candidate diff has no changed sections")
+        msg = "diff_empty"
+        raise MonitorError(msg, "candidate diff has no changed sections")
     return {
         "system_prompt": SYSTEM_PROMPT,
         "response_schema": "schemas/claude-summary.schema.json",

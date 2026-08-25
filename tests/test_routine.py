@@ -4,7 +4,8 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
-import support  # noqa: F401
+import pytest
+import support  # ruff: ignore[unused-import]
 from diff import DiffConfig
 from drive import SnapshotStore
 from errors import MonitorError
@@ -113,27 +114,25 @@ class RoutineTests(unittest.TestCase):
 
     def test_baseline_material_notification_then_unchanged_and_cleanup(self) -> None:
         baseline, first_fetcher = self.run_cycle(response(1000), "run-1")
-        self.assertEqual(1, baseline.metrics.baseline)
-        self.assertEqual(0, len(self.slack.messages))
+        assert baseline.metrics.baseline == 1
+        assert len(self.slack.messages) == 0
         first_hash = self.store.states["one"].normalized_hash
-        self.assertTrue(first_hash)
+        assert first_hash
 
         changed, second_fetcher = self.run_cycle(response(1200), "run-2")
-        self.assertEqual(1, changed.metrics.notified)
-        self.assertEqual(1, len(self.slack.messages))
+        assert changed.metrics.notified == 1
+        assert len(self.slack.messages) == 1
         second_hash = self.store.states["one"].normalized_hash
-        self.assertNotEqual(first_hash, second_hash)
+        assert first_hash != second_hash
 
         unchanged, third_fetcher = self.run_cycle(response(1200), "run-3")
-        self.assertEqual(1, unchanged.metrics.unchanged)
-        self.assertEqual(1, len(self.slack.messages))
-        self.assertEqual(0, self.store.states["one"].consecutive_failures)
-        self.assertEqual(3, len(self.store.runs))
+        assert unchanged.metrics.unchanged == 1
+        assert len(self.slack.messages) == 1
+        assert self.store.states["one"].consecutive_failures == 0
+        assert len(self.store.runs) == 3
         for fetcher in (first_fetcher, second_fetcher, third_fetcher):
-            self.assertTrue(fetcher.workspaces)
-            self.assertTrue(
-                all(not Path(workspace).exists() for workspace in fetcher.workspaces)
-            )
+            assert fetcher.workspaces
+            assert all(not Path(workspace).exists() for workspace in fetcher.workspaces)
 
     def test_operator_suppressed_change_advances_baseline_without_notified_result(
         self,
@@ -165,25 +164,23 @@ class RoutineTests(unittest.TestCase):
 
         result, _ = self.run_cycle(fixture, "run-2")
 
-        self.assertEqual([], self.slack.messages)
-        self.assertEqual(0, result.metrics.notified)
-        self.assertEqual(0, result.metrics.failed)
-        self.assertEqual("suppressed", self.store.runs["run-2:one"].result)
-        self.assertEqual(
-            normalized.normalized_hash, self.store.states["one"].normalized_hash
-        )
+        assert self.slack.messages == []
+        assert result.metrics.notified == 0
+        assert result.metrics.failed == 0
+        assert self.store.runs["run-2:one"].result == "suppressed"
+        assert normalized.normalized_hash == self.store.states["one"].normalized_hash
 
     def test_failed_notification_preserves_baseline_and_retries_safely(self) -> None:
         self.run_cycle(response(1000), "run-1")
         baseline_hash = self.store.states["one"].normalized_hash
         failing_slack = MemorySlackConnector(["default"])
         failed, _ = self.run_cycle(response(1200), "run-2", slack=failing_slack)
-        self.assertEqual(1, failed.metrics.failed)
-        self.assertEqual(baseline_hash, self.store.states["one"].normalized_hash)
-        self.assertEqual(1, self.store.states["one"].consecutive_failures)
+        assert failed.metrics.failed == 1
+        assert baseline_hash == self.store.states["one"].normalized_hash
+        assert self.store.states["one"].consecutive_failures == 1
         retried, _ = self.run_cycle(response(1200), "run-3")
-        self.assertEqual(1, retried.metrics.notified)
-        self.assertNotEqual(baseline_hash, self.store.states["one"].normalized_hash)
+        assert retried.metrics.notified == 1
+        assert baseline_hash != self.store.states["one"].normalized_hash
 
     def test_retry_failure_alert_and_recovery(self) -> None:
         transient = MonitorError("fetch_timeout", "fixture timeout", retryable=True)
@@ -193,13 +190,13 @@ class RoutineTests(unittest.TestCase):
                 f"run-{index}",
                 retry=RetryConfig(max_attempts=3, initial_delay_seconds=0),
             )
-            self.assertEqual(1, result.metrics.failed)
-            self.assertEqual(3, fetcher.calls["one"])
-        self.assertEqual(3, self.store.states["one"].consecutive_failures)
-        self.assertEqual(1, len(self.slack.messages))
+            assert result.metrics.failed == 1
+            assert fetcher.calls["one"] == 3
+        assert self.store.states["one"].consecutive_failures == 3
+        assert len(self.slack.messages) == 1
         recovered, _ = self.run_cycle(response(1000), "run-4")
-        self.assertEqual(1, recovered.metrics.baseline)
-        self.assertEqual(0, self.store.states["one"].consecutive_failures)
+        assert recovered.metrics.baseline == 1
+        assert self.store.states["one"].consecutive_failures == 0
 
     def test_suppressed_failure_alert_is_preserved_and_not_retried(self) -> None:
         transient = MonitorError("fetch_timeout", "fixture timeout", retryable=True)
@@ -226,9 +223,9 @@ class RoutineTests(unittest.TestCase):
             retry=RetryConfig(max_attempts=1),
         )
 
-        self.assertEqual(1, result.metrics.failed)
-        self.assertEqual([], self.slack.messages)
-        self.assertEqual(suppressed, self.store.notifications[event_id])
+        assert result.metrics.failed == 1
+        assert self.slack.messages == []
+        assert suppressed == self.store.notifications[event_id]
 
     def test_transient_state_read_failure_does_not_wipe_existing_baseline(
         self,
@@ -240,7 +237,7 @@ class RoutineTests(unittest.TestCase):
         # existing baseline.
         self.run_cycle(response(1000), "run-1")
         baseline_hash = self.store.states["one"].normalized_hash
-        self.assertTrue(baseline_hash)
+        assert baseline_hash
 
         class FlakyStateStore(MemoryOperationalStore):
             def __init__(self, targets, states) -> None:
@@ -251,8 +248,9 @@ class RoutineTests(unittest.TestCase):
             def get_state(self, target_id):
                 self.get_state_calls += 1
                 if self.get_state_calls == 1:
+                    msg = "state_read_failed"
                     raise MonitorError(
-                        "state_read_failed", "simulated transient failure"
+                        msg, "simulated transient failure"
                     )
                 return super().get_state(target_id)
 
@@ -271,10 +269,10 @@ class RoutineTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         result = routine.run(run_id="run-2")
-        self.assertEqual(1, result.metrics.failed)
-        self.assertEqual(baseline_hash, flaky_store.states["one"].normalized_hash)
-        self.assertEqual(1, flaky_store.states["one"].consecutive_failures)
-        self.assertEqual("failed", flaky_store.runs["run-2:one"].result)
+        assert result.metrics.failed == 1
+        assert baseline_hash == flaky_store.states["one"].normalized_hash
+        assert flaky_store.states["one"].consecutive_failures == 1
+        assert flaky_store.runs["run-2:one"].result == "failed"
 
     def test_persistent_state_read_failure_still_records_run_without_state_write(
         self,
@@ -285,7 +283,7 @@ class RoutineTests(unittest.TestCase):
         # untouched rather than replaced with the empty placeholder.
         self.run_cycle(response(1000), "run-1")
         baseline_hash = self.store.states["one"].normalized_hash
-        self.assertTrue(baseline_hash)
+        assert baseline_hash
 
         class AlwaysFailingStateStore(MemoryOperationalStore):
             def __init__(self, targets, states) -> None:
@@ -293,7 +291,8 @@ class RoutineTests(unittest.TestCase):
                 self.states = states
 
             def get_state(self, target_id):
-                raise MonitorError("state_read_failed", "simulated persistent failure")
+                msg = "state_read_failed"
+                raise MonitorError(msg, "simulated persistent failure")
 
         broken_store = AlwaysFailingStateStore([self.target], dict(self.store.states))
         routine = WeeklyMonitorRoutine(
@@ -310,10 +309,10 @@ class RoutineTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         result = routine.run(run_id="run-2")
-        self.assertEqual(1, result.metrics.failed)
-        self.assertEqual(baseline_hash, broken_store.states["one"].normalized_hash)
-        self.assertEqual(0, broken_store.states["one"].consecutive_failures)
-        self.assertEqual("failed", broken_store.runs["run-2:one"].result)
+        assert result.metrics.failed == 1
+        assert baseline_hash == broken_store.states["one"].normalized_hash
+        assert broken_store.states["one"].consecutive_failures == 0
+        assert broken_store.runs["run-2:one"].result == "failed"
 
     def test_run_is_written_before_state_on_success(self) -> None:
         # If the process fails between the two independent connector writes
@@ -343,7 +342,7 @@ class RoutineTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         routine.run(run_id="run-1")
-        self.assertEqual(["append_run", "replace_state"], calls)
+        assert calls == ["append_run", "replace_state"]
 
     def test_partial_commit_does_not_revert_state_behind_a_committed_run(
         self,
@@ -367,8 +366,9 @@ class RoutineTests(unittest.TestCase):
             def replace_state(self, state) -> None:
                 self.replace_state_calls += 1
                 if self.replace_state_calls == 1:
+                    msg = "state_write_failed"
                     raise MonitorError(
-                        "state_write_failed", "simulated transient failure"
+                        msg, "simulated transient failure"
                     )
                 super().replace_state(state)
 
@@ -385,9 +385,9 @@ class RoutineTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         result = routine.run(run_id="run-2")
-        self.assertEqual(1, result.metrics.failed)
-        self.assertEqual("unchanged", store.runs["run-2:one"].result)
-        self.assertEqual(baseline_state, store.states["one"])
+        assert result.metrics.failed == 1
+        assert store.runs["run-2:one"].result == "unchanged"
+        assert baseline_state == store.states["one"]
 
     def test_failure_alert_waits_for_durable_failure_state(self) -> None:
         transient = MonitorError("fetch_timeout", "fixture timeout", retryable=True)
@@ -397,12 +397,13 @@ class RoutineTests(unittest.TestCase):
                 f"run-{index}",
                 retry=RetryConfig(max_attempts=1),
             )
-        self.assertEqual(2, self.store.states["one"].consecutive_failures)
+        assert self.store.states["one"].consecutive_failures == 2
 
         class FailingStateStore(MemoryOperationalStore):
             def replace_state(self, state) -> None:
                 del state
-                raise MonitorError("state_write_failed", "simulated write failure")
+                msg = "state_write_failed"
+                raise MonitorError(msg, "simulated write failure")
 
         store = FailingStateStore([self.target])
         store.states = dict(self.store.states)
@@ -424,10 +425,10 @@ class RoutineTests(unittest.TestCase):
 
         result = routine.run(run_id="run-3")
 
-        self.assertEqual(1, result.metrics.failed)
-        self.assertEqual(2, store.states["one"].consecutive_failures)
-        self.assertEqual([], slack.messages)
-        self.assertEqual({}, store.notifications)
+        assert result.metrics.failed == 1
+        assert store.states["one"].consecutive_failures == 2
+        assert slack.messages == []
+        assert store.notifications == {}
 
     def test_one_target_failure_does_not_abort_other_targets(self) -> None:
         targets = [make_target("good"), make_target("bad")]
@@ -448,20 +449,20 @@ class RoutineTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         result = routine.run(run_id="isolated")
-        self.assertEqual(2, result.metrics.checked)
-        self.assertEqual(1, result.metrics.baseline)
-        self.assertEqual(1, result.metrics.failed)
-        self.assertEqual({"good", "bad"}, set(store.states))
+        assert result.metrics.checked == 2
+        assert result.metrics.baseline == 1
+        assert result.metrics.failed == 1
+        assert {"good", "bad"} == set(store.states)
 
     def test_same_run_id_is_idempotent_in_fixture_store(self) -> None:
         self.run_cycle(response(1000), "stable")
-        self.assertEqual(1, len(self.store.runs))
+        assert len(self.store.runs) == 1
         baseline_state = self.store.states["one"]
         second, second_fetcher = self.run_cycle(response(1200), "stable")
-        self.assertEqual(1, len(self.store.runs))
-        self.assertEqual(1, second.metrics.baseline)
-        self.assertEqual(0, second_fetcher.calls["one"])
-        self.assertEqual(baseline_state, self.store.states["one"])
+        assert len(self.store.runs) == 1
+        assert second.metrics.baseline == 1
+        assert second_fetcher.calls["one"] == 0
+        assert baseline_state == self.store.states["one"]
 
     def test_invalid_caller_run_id_fails_before_target_side_effects(self) -> None:
         longest = make_target("x" * 128)
@@ -483,15 +484,15 @@ class RoutineTests(unittest.TestCase):
         invalid_run_ids = ("", "line\nbreak", "r" * 72, 123)
         for invalid_run_id in invalid_run_ids:
             with self.subTest(run_id=invalid_run_id):
-                with self.assertRaisesRegex(MonitorError, "run_id"):
+                with pytest.raises(MonitorError, match="run_id"):
                     routine.run(run_id=invalid_run_id)  # type: ignore[arg-type]
 
-        self.assertEqual({}, dict(fetcher.calls))
-        self.assertEqual([], slack.messages)
-        self.assertEqual({}, store.states)
-        self.assertEqual({}, store.runs)
-        self.assertEqual({}, store.notifications)
-        self.assertEqual([], store.audit)
+        assert dict(fetcher.calls) == {}
+        assert slack.messages == []
+        assert store.states == {}
+        assert store.runs == {}
+        assert store.notifications == {}
+        assert store.audit == []
 
     def test_audit_sink_failure_does_not_change_primary_result(self) -> None:
         class FailingAudit:
@@ -509,8 +510,8 @@ class RoutineTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         result = routine.run(run_id="audit-failure")
-        self.assertEqual(1, result.metrics.baseline)
-        self.assertIn("one", self.store.states)
+        assert result.metrics.baseline == 1
+        assert "one" in self.store.states
 
     def test_outbox_is_a_mutually_exclusive_delivery_backend(self) -> None:
         def outbox_cycle(price: int, run_id: str):
@@ -526,13 +527,13 @@ class RoutineTests(unittest.TestCase):
             return routine.run(run_id=run_id)
 
         baseline = outbox_cycle(1000, "outbox-1")
-        self.assertEqual(1, baseline.metrics.baseline)
+        assert baseline.metrics.baseline == 1
         changed = outbox_cycle(1200, "outbox-2")
-        self.assertEqual(1, changed.metrics.material)
-        self.assertEqual(0, changed.metrics.notified)
-        self.assertEqual(1, len(self.store.outbox))
-        self.assertEqual("pending", next(iter(self.store.outbox.values())).status)
-        with self.assertRaisesRegex(MonitorError, "requires only"):
+        assert changed.metrics.material == 1
+        assert changed.metrics.notified == 0
+        assert len(self.store.outbox) == 1
+        assert next(iter(self.store.outbox.values())).status == "pending"
+        with pytest.raises(MonitorError, match="requires only"):
             WeeklyMonitorRoutine(
                 store=self.store,
                 snapshots=self.snapshots,
@@ -548,8 +549,9 @@ class RoutineTests(unittest.TestCase):
         class FailingSummary:
             def summarize(self, request):
                 del request
+                msg = "connector_unavailable"
                 raise MonitorError(
-                    "connector_unavailable",
+                    msg,
                     "fixture summary connector failure",
                     retryable=True,
                 )
@@ -566,19 +568,19 @@ class RoutineTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         result = routine.run(run_id="summary-2")
-        self.assertEqual(1, result.metrics.failed)
-        self.assertEqual(3, len(result.runs[0].attempts))
-        self.assertEqual(
-            ["", "connector_unavailable", "connector_unavailable"],
-            [attempt.error_code for attempt in result.runs[0].attempts],
-        )
+        assert result.metrics.failed == 1
+        assert len(result.runs[0].attempts) == 3
+        assert [attempt.error_code for attempt in result.runs[0].attempts] == ["", "connector_unavailable", "connector_unavailable"]
 
     def test_oversized_diff_fails_closed_instead_of_advancing_baseline(self) -> None:
         class UnreachableSummary:
             def summarize(self, request):
-                raise AssertionError(
+                msg = (
                     "synthetic budget-exceeded evidence must never reach a "
                     "summary model"
+                )
+                raise AssertionError(
+                    msg
                 )
 
         routine_config = RoutineConfig(
@@ -599,7 +601,7 @@ class RoutineTests(unittest.TestCase):
         )
         baseline_routine.run(run_id="budget-1")
         baseline_hash = self.store.states["one"].normalized_hash
-        self.assertTrue(baseline_hash)
+        assert baseline_hash
 
         oversized_routine = WeeklyMonitorRoutine(
             store=self.store,
@@ -612,13 +614,11 @@ class RoutineTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         result = oversized_routine.run(run_id="budget-2")
-        self.assertEqual(1, result.metrics.failed)
-        self.assertEqual(
-            "diff_budget_exceeded", self.store.runs["budget-2:one"].error_code
-        )
-        self.assertEqual(baseline_hash, self.store.states["one"].normalized_hash)
-        self.assertEqual(1, self.store.states["one"].consecutive_failures)
-        self.assertEqual(0, len(self.slack.messages))
+        assert result.metrics.failed == 1
+        assert self.store.runs["budget-2:one"].error_code == "diff_budget_exceeded"
+        assert baseline_hash == self.store.states["one"].normalized_hash
+        assert self.store.states["one"].consecutive_failures == 1
+        assert len(self.slack.messages) == 0
 
     def test_non_material_over_ordinary_truncation_still_advances_baseline(
         self,
@@ -653,7 +653,7 @@ class RoutineTests(unittest.TestCase):
         )
         baseline_routine.run(run_id="signal-1")
         baseline_hash = self.store.states["one"].normalized_hash
-        self.assertTrue(baseline_hash)
+        assert baseline_hash
 
         changed_routine = WeeklyMonitorRoutine(
             store=self.store,
@@ -666,10 +666,10 @@ class RoutineTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         result = changed_routine.run(run_id="signal-2")
-        self.assertEqual(1, result.metrics.minor)
-        self.assertEqual("non_material", self.store.runs["signal-2:one"].result)
-        self.assertNotEqual(baseline_hash, self.store.states["one"].normalized_hash)
-        self.assertEqual(0, self.store.states["one"].consecutive_failures)
+        assert result.metrics.minor == 1
+        assert self.store.runs["signal-2:one"].result == "non_material"
+        assert baseline_hash != self.store.states["one"].normalized_hash
+        assert self.store.states["one"].consecutive_failures == 0
 
     def test_truncated_non_signal_sections_with_non_material_verdict_fail_closed(
         self,
@@ -707,7 +707,7 @@ class RoutineTests(unittest.TestCase):
         )
         baseline_routine.run(run_id="nonsignal-1")
         baseline_hash = self.store.states["one"].normalized_hash
-        self.assertTrue(baseline_hash)
+        assert baseline_hash
 
         changed_routine = WeeklyMonitorRoutine(
             store=self.store,
@@ -720,13 +720,10 @@ class RoutineTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         result = changed_routine.run(run_id="nonsignal-2")
-        self.assertEqual(1, result.metrics.failed)
-        self.assertEqual(
-            "truncated_diff_non_material",
-            self.store.runs["nonsignal-2:one"].error_code,
-        )
-        self.assertEqual(baseline_hash, self.store.states["one"].normalized_hash)
-        self.assertEqual(1, self.store.states["one"].consecutive_failures)
+        assert result.metrics.failed == 1
+        assert self.store.runs["nonsignal-2:one"].error_code == "truncated_diff_non_material"
+        assert baseline_hash == self.store.states["one"].normalized_hash
+        assert self.store.states["one"].consecutive_failures == 1
 
     def test_truncated_signal_sections_with_non_material_verdict_fail_closed(
         self,
@@ -761,7 +758,7 @@ class RoutineTests(unittest.TestCase):
         )
         baseline_routine.run(run_id="dropped-1")
         baseline_hash = self.store.states["one"].normalized_hash
-        self.assertTrue(baseline_hash)
+        assert baseline_hash
 
         changed_routine = WeeklyMonitorRoutine(
             store=self.store,
@@ -774,13 +771,10 @@ class RoutineTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
         result = changed_routine.run(run_id="dropped-2")
-        self.assertEqual(1, result.metrics.failed)
-        self.assertEqual(
-            "truncated_diff_non_material",
-            self.store.runs["dropped-2:one"].error_code,
-        )
-        self.assertEqual(baseline_hash, self.store.states["one"].normalized_hash)
-        self.assertEqual(1, self.store.states["one"].consecutive_failures)
+        assert result.metrics.failed == 1
+        assert self.store.runs["dropped-2:one"].error_code == "truncated_diff_non_material"
+        assert baseline_hash == self.store.states["one"].normalized_hash
+        assert self.store.states["one"].consecutive_failures == 1
 
 
 if __name__ == "__main__":

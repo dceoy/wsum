@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from audit import AuditRecord
 from errors import MonitorError
 from fetch import FetchResult
-from models import NotificationRecord, RunRecord, State, Target
 from notifications import ConfirmedDeliveryFailure
-from outbox import OutboxRecord
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from audit import AuditRecord
+    from models import NotificationRecord, RunRecord, State, Target
+    from outbox import OutboxRecord
 
 
 class MemoryOperationalStore:
@@ -52,8 +55,9 @@ class MemoryOperationalStore:
     ) -> None:
         updates = {item.event_id: item for item in notifications}
         if len(updates) != len(notifications):
+            msg = "notification_invalid"
             raise MonitorError(
-                "notification_invalid", "notification batch contains duplicate IDs"
+                msg, "notification batch contains duplicate IDs"
             )
         self.notifications = {**self.notifications, **updates}
 
@@ -80,8 +84,9 @@ class MemoryDriveConnector:
     def upload_file(self, path: str, content: bytes, mime_type: str) -> str:
         del mime_type
         if self.fail_upload:
+            msg = "drive_write_failed"
             raise MonitorError(
-                "drive_write_failed", "fixture upload failed", retryable=True
+                msg, "fixture upload failed", retryable=True
             )
         reference = f"drive:{hashlib.sha256(path.encode()).hexdigest()}"
         self.paths[path] = reference
@@ -91,7 +96,8 @@ class MemoryDriveConnector:
 
     def download_file(self, file_ref: str) -> bytes:
         if file_ref not in self.files:
-            raise MonitorError("snapshot_missing", "fixture snapshot is missing")
+            msg = "snapshot_missing"
+            raise MonitorError(msg, "fixture snapshot is missing")
         return self.files[file_ref]
 
     def list_files(self, prefix: str) -> list[dict[str, str]]:
@@ -172,8 +178,9 @@ class MemorySlackConnector:
 
     def send_message(self, notification_group: str, message: str) -> str:
         if notification_group in self.fail_groups:
+            msg = "notification_send_failed"
             raise ConfirmedDeliveryFailure(
-                "notification_send_failed",
+                msg,
                 "fixture Slack delivery failed",
                 retryable=True,
             )

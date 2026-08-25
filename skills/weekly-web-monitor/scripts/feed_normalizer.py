@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import operator
 import re
 import unicodedata
 import xml.etree.ElementTree as ET
-from collections.abc import Iterator
 from html.parser import HTMLParser
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urljoin, urlsplit
 
 from errors import MonitorError
 from models import validate_http_url
 from network_policy import canonicalize_fragment_identity, canonicalize_url
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 MAX_STABLE_ID_CHARS = 1_000
 
@@ -109,16 +112,18 @@ def _content_link_destination(
         except ValueError:
             scheme = resolved.partition(":")[0].lower()
         if not base_url and not scheme:
+            msg = "feed_content_relative_link"
             raise MonitorError(
-                "feed_content_relative_link",
+                msg,
                 "feed entry content link has no base URL to resolve against",
             ) from None
         if scheme not in {"http", "https"}:
             return ""
         raise
     if budget.remaining <= 0:
+        msg = "feed_too_large"
         raise MonitorError(
-            "feed_too_large", "feed entry has too many link destinations"
+            msg, "feed entry has too many link destinations"
         )
     budget.remaining -= 1
     fragment = canonicalize_fragment_identity(urlsplit(resolved).fragment)
@@ -300,15 +305,17 @@ def _entry_link(element: ET.Element) -> str:
             # base-URI inheritance that this bounded normalizer does not
             # implement. Reject them explicitly instead of silently omitting
             # a destination whose later changes would then be invisible.
+            msg = "feed_relative_link"
             raise MonitorError(
-                "feed_relative_link",
+                msg,
                 "feed entry link must be an absolute HTTP(S) URL",
             )
         try:
             return validate_http_url(value, "feed entry link")
         except MonitorError as exc:
+            msg = "feed_unsafe_link"
             raise MonitorError(
-                "feed_unsafe_link",
+                msg,
                 "feed entry contains an unsafe link",
             ) from exc
     return ""
@@ -337,23 +344,26 @@ def _external_content_sources(element: ET.Element) -> tuple[str, ...]:
         try:
             parsed = urlsplit(value)
         except ValueError as exc:
+            msg = "feed_unsafe_content_source"
             raise MonitorError(
-                "feed_unsafe_content_source",
+                msg,
                 "feed entry contains an unsafe external content source",
             ) from exc
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             # Atom permits xml:base inheritance, but this bounded normalizer
             # does not implement base-URI inheritance. Reject relative
             # sources instead of silently omitting their identity.
+            msg = "feed_relative_content_source"
             raise MonitorError(
-                "feed_relative_content_source",
+                msg,
                 "Atom content src must be an absolute HTTP(S) URL",
             )
         try:
             canonical, _ = canonicalize_url(value)
         except MonitorError as exc:
+            msg = "feed_unsafe_content_source"
             raise MonitorError(
-                "feed_unsafe_content_source",
+                msg,
                 "feed entry contains an unsafe external content source",
             ) from exc
         # canonicalize_url always strips the fragment, so a content src
@@ -376,14 +386,17 @@ def normalize_feed(
     max_elements: int = 20_000,
 ) -> tuple[str, dict[str, str]]:
     if len(xml) > max_input_bytes:
-        raise MonitorError("response_too_large", "feed exceeds the input size limit")
+        msg = "response_too_large"
+        raise MonitorError(msg, "feed exceeds the input size limit")
     if b"\x00" in xml[:512]:
+        msg = "feed_unsupported_encoding"
         raise MonitorError(
-            "feed_unsupported_encoding", "UTF-16/32 feeds are not supported"
+            msg, "UTF-16/32 feeds are not supported"
         )
     if b"<!DOCTYPE" in xml.upper() or b"<!ENTITY" in xml.upper():
+        msg = "feed_unsafe_xml"
         raise MonitorError(
-            "feed_unsafe_xml", "DOCTYPE and entity declarations are forbidden"
+            msg, "DOCTYPE and entity declarations are forbidden"
         )
     try:
         parser = ET.XMLPullParser(events=("start",))
@@ -391,21 +404,24 @@ def normalize_feed(
         element_count = 0
         for offset in range(0, len(xml), 65_536):
             parser.feed(xml[offset : offset + 65_536])
-            events = cast(Iterator[tuple[str, ET.Element]], parser.read_events())
+            events = cast("Iterator[tuple[str, ET.Element]]", parser.read_events())
             for _, element in events:
                 if root is None:
                     root = element
                 element_count += 1
                 if element_count > max_elements:
+                    msg = "feed_element_limit"
                     raise MonitorError(
-                        "feed_element_limit",
+                        msg,
                         "feed XML element count exceeds the limit",
                     )
         parser.close()
     except ET.ParseError as exc:
-        raise MonitorError("feed_malformed", "feed XML is malformed") from exc
+        msg = "feed_malformed"
+        raise MonitorError(msg, "feed XML is malformed") from exc
     if root is None:
-        raise MonitorError("feed_malformed", "feed XML has no root element")
+        msg = "feed_malformed"
+        raise MonitorError(msg, "feed XML has no root element")
     root_name = _local_name(root.tag)
     channels: list[ET.Element] = []
     if root_name in {"rss", "rdf"}:
@@ -420,11 +436,14 @@ def normalize_feed(
         feed_kind = "atom"
         feed_link = _feed_base_link(root)
     else:
-        raise MonitorError("feed_unsupported", "XML document is not RSS or Atom")
+        msg = "feed_unsupported"
+        raise MonitorError(msg, "XML document is not RSS or Atom")
     if len(entries) > max_entries:
-        raise MonitorError("feed_entry_limit", "feed entry count exceeds the limit")
+        msg = "feed_entry_limit"
+        raise MonitorError(msg, "feed entry count exceeds the limit")
     if not entries:
-        raise MonitorError("empty_extraction", "feed contains no entries")
+        msg = "empty_extraction"
+        raise MonitorError(msg, "feed contains no entries")
 
     link_budget = _ContentLinkBudget(MAX_CONTENT_LINK_ANNOTATIONS)
     normalized_entries: list[tuple[str, tuple[str, ...]]] = []
@@ -481,7 +500,7 @@ def normalize_feed(
         normalized_entries.append(
             (stable_id, tuple(field for field in fields if field))
         )
-    normalized_entries.sort(key=lambda item: item[0])
+    normalized_entries.sort(key=operator.itemgetter(0))
     text = "\n".join(
         line for _, fields in normalized_entries for line in (*fields, "END ENTRY")
     )

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from errors import MonitorError
 from models import HASH_RE, NotificationRecord, Target, utc_now, validate_target_id
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 class NotificationStore(Protocol):
@@ -57,8 +59,9 @@ class DeliveryOutcome:
 def change_event_id(target_id: str, normalized_hash: str) -> str:
     validate_target_id(target_id)
     if not HASH_RE.fullmatch(normalized_hash):
+        msg = "notification_invalid"
         raise MonitorError(
-            "notification_invalid", "normalized_hash must be a SHA-256 digest"
+            msg, "normalized_hash must be a SHA-256 digest"
         )
     return hashlib.sha256(f"{target_id}{normalized_hash}".encode()).hexdigest()
 
@@ -66,7 +69,8 @@ def change_event_id(target_id: str, normalized_hash: str) -> str:
 def failure_event_id(target_id: str, year_week: str, threshold: int) -> str:
     validate_target_id(target_id)
     if not re.fullmatch(r"\d{4}-W\d{2}", year_week) or not 1 <= threshold <= 100:
-        raise MonitorError("notification_invalid", "failure event inputs are invalid")
+        msg = "notification_invalid"
+        raise MonitorError(msg, "failure event inputs are invalid")
     material = f"failure{target_id}{year_week}{threshold}"
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
@@ -79,13 +83,15 @@ def build_change_event(
     target: Target, normalized_hash: str, summary: Mapping[str, object]
 ) -> NotificationEvent:
     if summary.get("material") is not True:
+        msg = "notification_suppressed"
         raise MonitorError(
-            "notification_suppressed", "only validated material summaries may notify"
+            msg, "only validated material summaries may notify"
         )
     notification_text = str(summary.get("notification_text_ja", ""))
     if target.url not in notification_text:
+        msg = "notification_invalid"
         raise MonitorError(
-            "notification_invalid", "notification text must contain the source URL"
+            msg, "notification text must contain the source URL"
         )
     return NotificationEvent(
         event_id=change_event_id(target.target_id, normalized_hash),
@@ -106,8 +112,9 @@ def _format_group(events: Sequence[NotificationEvent], maximum: int) -> str:
             item += f"\n推奨対応: {event.recommended_action_ja}"
         candidate = "\n".join((*parts, item))
         if len(candidate) > maximum:
+            msg = "notification_too_long"
             raise MonitorError(
-                "notification_too_long",
+                msg,
                 "grouped notification exceeds the configured length limit",
             )
         parts.append(item)
@@ -148,8 +155,9 @@ def deliver_grouped(
     max_message_chars: int = 3_500,
 ) -> dict[str, DeliveryOutcome]:
     if not 500 <= max_message_chars <= 10_000:
+        msg = "invalid_configuration"
         raise MonitorError(
-            "invalid_configuration", "Slack message length limit is invalid"
+            msg, "Slack message length limit is invalid"
         )
     outcomes: dict[str, DeliveryOutcome] = {}
     sendable: dict[str, list[NotificationEvent]] = {}
@@ -209,8 +217,9 @@ def deliver_grouped(
                 message = _format_group(chunk, max_message_chars)
                 delivery_ref = connector.send_message(group, message)
                 if not delivery_ref:
+                    msg = "notification_send_failed"
                     raise AmbiguousDeliveryFailure(
-                        "notification_send_failed",
+                        msg,
                         "Slack connector returned no delivery reference",
                     )
             except ConfirmedDeliveryFailure as exc:

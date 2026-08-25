@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import http.client
-import json
 import queue
 import select
 import socket
 import ssl
 import sys
 import threading
-from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from time import monotonic
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
 from errors import MonitorError
@@ -25,6 +23,9 @@ from network_policy import (
     validate_peer_address,
     validate_redirect,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 SUPPORTED_CONTENT_TYPES = frozenset(
@@ -51,30 +52,36 @@ class FetchConfig:
 
     def __post_init__(self) -> None:
         if not 0.1 <= self.timeout_seconds <= 120:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "timeout must be 0.1-120 seconds"
+                msg, "timeout must be 0.1-120 seconds"
             )
         if not 1.0 <= self.max_total_seconds <= 600.0:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "max_total_seconds must be 1-600 seconds"
+                msg, "max_total_seconds must be 1-600 seconds"
             )
         if self.max_total_seconds < self.timeout_seconds:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration",
+                msg,
                 "max_total_seconds must be at least timeout_seconds",
             )
         if not 0 <= self.max_redirects <= 10:
-            raise MonitorError("invalid_configuration", "max_redirects must be 0-10")
+            msg = "invalid_configuration"
+            raise MonitorError(msg, "max_redirects must be 0-10")
         if not 1_024 <= self.max_response_bytes <= 50_000_000:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "max_response_bytes must be 1024-50000000"
+                msg, "max_response_bytes must be 1024-50000000"
             )
         if (
             not self.user_agent
             or len(self.user_agent) > 200
             or any(ord(char) < 32 for char in self.user_agent)
         ):
-            raise MonitorError("invalid_configuration", "user_agent is invalid")
+            msg = "invalid_configuration"
+            raise MonitorError(msg, "user_agent is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +127,8 @@ class _DeadlineTrackingMixin:
     def _clamp_to_deadline(self) -> None:
         remaining = self._deadline - monotonic()
         if remaining <= 0:
-            raise TimeoutError("recv exceeded the fetch deadline")
+            msg = "recv exceeded the fetch deadline"
+            raise TimeoutError(msg)
         current = self.gettimeout()  # type: ignore[attr-defined]
         if current is None or current > remaining:
             self.settimeout(remaining)  # type: ignore[attr-defined]
@@ -161,21 +169,24 @@ def _do_handshake_with_deadline(sock: ssl.SSLSocket, deadline: float) -> None:
         while True:
             remaining = deadline - monotonic()
             if remaining <= 0:
-                raise TimeoutError("TLS handshake exceeded the fetch deadline")
+                msg = "TLS handshake exceeded the fetch deadline"
+                raise TimeoutError(msg)
             try:
                 sock.do_handshake()
                 return
             except ssl.SSLWantReadError:
                 readable, _, _ = select.select([sock], [], [], remaining)
                 if not readable:
+                    msg = "TLS handshake exceeded the fetch deadline"
                     raise TimeoutError(
-                        "TLS handshake exceeded the fetch deadline"
+                        msg
                     ) from None
             except ssl.SSLWantWriteError:
                 _, writable, _ = select.select([], [sock], [], remaining)
                 if not writable:
+                    msg = "TLS handshake exceeded the fetch deadline"
                     raise TimeoutError(
-                        "TLS handshake exceeded the fetch deadline"
+                        msg
                     ) from None
     finally:
         sock.settimeout(original_timeout)
@@ -264,13 +275,14 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
             # and driven separately under the same deadline, since it bypasses
             # this socket's recv overrides entirely (see
             # ``_do_handshake_with_deadline``).
-            ssl_context = cast(ssl.SSLContext, self._context)  # pyright: ignore[reportAttributeAccessIssue]
+            ssl_context = cast("ssl.SSLContext", self._context)  # pyright: ignore[reportAttributeAccessIssue]
             ssl_context.sslsocket_class = _DeadlineSSLSocket
             wrapped = ssl_context.wrap_socket(
                 raw_socket, server_hostname=self.host, do_handshake_on_connect=False
             )
             if wrapped is None:
-                raise OSError("TLS context returned no socket")
+                msg = "TLS context returned no socket"
+                raise OSError(msg)
             wrapped._deadline = self._deadline  # type: ignore[attr-defined]
             _do_handshake_with_deadline(wrapped, self._deadline)
             self.sock = wrapped
@@ -290,7 +302,8 @@ def _request_path(url: str) -> str:
     if parsed.query:
         path = f"{path}?{parsed.query}"
     if any(char in path for char in "\r\n"):
-        raise MonitorError("network_policy_denied", "request target is malformed")
+        msg = "network_policy_denied"
+        raise MonitorError(msg, "request target is malformed")
     return path
 
 
@@ -344,8 +357,9 @@ def _map_http_error(status: int) -> MonitorError:
 def _safe_validator(value: str, field_name: str) -> str:
     bounded = str(value)[:1_000]
     if any(ord(char) < 32 or ord(char) == 127 for char in bounded):
+        msg = "invalid_validator"
         raise MonitorError(
-            "invalid_validator", f"{field_name} contains forbidden control characters"
+            msg, f"{field_name} contains forbidden control characters"
         )
     return bounded
 
@@ -402,7 +416,7 @@ class _ResolverPool:
             job = self._jobs.get()
             try:
                 job.result = job.resolver(*job.args, **job.kwargs)
-            except BaseException as exc:  # noqa: BLE001 - returned to caller thread
+            except BaseException as exc:  # ruff: ignore[blind-except] - returned to caller thread
                 job.error = exc
             finally:
                 job.done.set()
@@ -416,15 +430,18 @@ class _ResolverPool:
         budget: float,
     ) -> Any:
         if budget <= 0:
-            raise TimeoutError("DNS resolution exceeded the fetch deadline")
+            msg = "DNS resolution exceeded the fetch deadline"
+            raise TimeoutError(msg)
         self._ensure_started()
         deadline = monotonic() + budget
         if not self._capacity.acquire(timeout=budget):
-            raise TimeoutError("DNS resolution exceeded the fetch deadline")
+            msg = "DNS resolution exceeded the fetch deadline"
+            raise TimeoutError(msg)
         remaining = deadline - monotonic()
         if remaining <= 0:
             self._capacity.release()
-            raise TimeoutError("DNS resolution exceeded the fetch deadline")
+            msg = "DNS resolution exceeded the fetch deadline"
+            raise TimeoutError(msg)
         job = _ResolverJob(resolver, args, kwargs)
         self._jobs.put(job)
         if not job.done.wait(remaining):
@@ -432,7 +449,8 @@ class _ResolverPool:
             # getaddrinfo call, but it retains the capacity slot until it exits.
             # Later callers therefore cannot create threads or queue work without
             # bound while the resolver is stuck.
-            raise TimeoutError("DNS resolution exceeded the fetch deadline")
+            msg = "DNS resolution exceeded the fetch deadline"
+            raise TimeoutError(msg)
         if job.error is not None:
             raise job.error
         return job.result
@@ -472,7 +490,6 @@ def fetch_url(
     ssl_context: ssl.SSLContext | None = None,
 ) -> FetchResult:
     """Fetch a URL while pinning each request to prevalidated public addresses."""
-
     active_config = config or FetchConfig()
     if ssl_context is None:
         tls_context = ssl.create_default_context()
@@ -486,8 +503,9 @@ def fetch_url(
         or not tls_context.check_hostname
         or tls_context.minimum_version < ssl.TLSVersion.TLSv1_2
     ):
+        msg = "invalid_configuration"
         raise MonitorError(
-            "invalid_configuration",
+            msg,
             "TLS context must require TLS 1.2+, certificates, "
             "and hostname verification",
         )
@@ -534,7 +552,7 @@ def fetch_url(
                 connection.request("GET", _request_path(target.url), headers=headers)
                 remaining = deadline - monotonic()
                 if remaining <= 0:
-                    raise TimeoutError()
+                    raise TimeoutError
                 # Capture the socket now: ``getresponse()`` below calls
                 # ``connection.close()`` (nulling ``connection.sock``) as
                 # soon as it sees the response will close the connection,
@@ -544,7 +562,8 @@ def fetch_url(
                 # reference to it is cleared.
                 sock = connection.sock
                 if sock is None:
-                    raise OSError("HTTP connection returned no socket")
+                    msg = "HTTP connection returned no socket"
+                    raise OSError(msg)
                 sock.settimeout(min(active_config.timeout_seconds, remaining))
                 response = connection.getresponse()
                 break
@@ -558,13 +577,16 @@ def fetch_url(
                     connection.close()
         if response is None or connection is None or sock is None:
             if isinstance(last_error, (TimeoutError, socket.timeout)):
+                msg = "fetch_timeout"
                 raise MonitorError(
-                    "fetch_timeout", "request exceeded its timeout", retryable=True
+                    msg, "request exceeded its timeout", retryable=True
                 ) from last_error
             if isinstance(last_error, ssl.SSLError):
-                raise MonitorError("tls_error", "TLS connection failed") from last_error
+                msg = "tls_error"
+                raise MonitorError(msg, "TLS connection failed") from last_error
+            msg = "fetch_connection_failed"
             raise MonitorError(
-                "fetch_connection_failed",
+                msg,
                 "connection failed for every validated address",
                 retryable=True,
             ) from last_error
@@ -572,8 +594,9 @@ def fetch_url(
             status = response.status
             if status in REDIRECT_STATUSES:
                 if redirects >= active_config.max_redirects:
+                    msg = "redirect_limit_exceeded"
                     raise MonitorError(
-                        "redirect_limit_exceeded", "maximum redirects exceeded"
+                        msg, "maximum redirects exceeded"
                     )
                 target = validate_redirect(
                     target.url,
@@ -584,8 +607,9 @@ def fetch_url(
                 continue
             if status == 304:
                 if not sent_conditional_request:
+                    msg = "unexpected_not_modified"
                     raise MonitorError(
-                        "unexpected_not_modified",
+                        msg,
                         "server returned HTTP 304 without a conditional request",
                     )
                 return FetchResult(
@@ -606,22 +630,25 @@ def fetch_url(
             if not 200 <= status <= 299:
                 raise _map_http_error(status)
             if status != 200:
+                msg = "unsupported_http_status"
                 raise MonitorError(
-                    "unsupported_http_status",
+                    msg,
                     "GET returned an unsupported successful HTTP status",
                 )
             raw_content_type = response.getheader("Content-Type", "")
             content_type = raw_content_type.split(";", 1)[0].strip().lower()
             charset = _extract_charset(raw_content_type)
             if content_type and content_type not in SUPPORTED_CONTENT_TYPES:
+                msg = "unsupported_content_type"
                 raise MonitorError(
-                    "unsupported_content_type",
+                    msg,
                     "server returned an unsupported content type",
                 )
             content_encoding = response.getheader("Content-Encoding", "")
             if content_encoding.strip().lower() not in {"", "identity"}:
+                msg = "unsupported_content_encoding"
                 raise MonitorError(
-                    "unsupported_content_encoding",
+                    msg,
                     "compressed HTTP content encoding is not supported",
                 )
             content_length_header = response.getheader("Content-Length")
@@ -630,16 +657,19 @@ def fetch_url(
                 try:
                     declared_length = int(content_length_header)
                 except ValueError as exc:
+                    msg = "malformed_response"
                     raise MonitorError(
-                        "malformed_response", "Content-Length header is invalid"
+                        msg, "Content-Length header is invalid"
                     ) from exc
                 if declared_length < 0:
+                    msg = "malformed_response"
                     raise MonitorError(
-                        "malformed_response", "Content-Length header is invalid"
+                        msg, "Content-Length header is invalid"
                     )
                 if declared_length > active_config.max_response_bytes:
+                    msg = "response_too_large"
                     raise MonitorError(
-                        "response_too_large", "declared response exceeds the size limit"
+                        msg, "declared response exceeds the size limit"
                     )
             chunks: list[bytes] = []
             size = 0
@@ -653,8 +683,9 @@ def fetch_url(
                     break
                 remaining = deadline - monotonic()
                 if remaining <= 0:
+                    msg = "fetch_timeout"
                     raise MonitorError(
-                        "fetch_timeout",
+                        msg,
                         "response read exceeded the total request deadline",
                         retryable=True,
                     )
@@ -674,12 +705,14 @@ def fetch_url(
                 chunks.append(chunk)
                 size += len(chunk)
                 if size > active_config.max_response_bytes:
+                    msg = "response_too_large"
                     raise MonitorError(
-                        "response_too_large", "response exceeds the size limit"
+                        msg, "response exceeds the size limit"
                     )
             if declared_length is not None and size != declared_length:
+                msg = "malformed_response"
                 raise MonitorError(
-                    "malformed_response",
+                    msg,
                     "response body length does not match declared Content-Length",
                     retryable=True,
                 )
@@ -699,18 +732,21 @@ def fetch_url(
                 body=b"".join(chunks),
             )
         except TimeoutError as exc:
+            msg = "fetch_timeout"
             raise MonitorError(
-                "fetch_timeout", "response read exceeded its timeout", retryable=True
+                msg, "response read exceeded its timeout", retryable=True
             ) from exc
         except (ssl.SSLError, OSError) as exc:
+            msg = "fetch_connection_failed"
             raise MonitorError(
-                "fetch_connection_failed",
+                msg,
                 "connection failed while reading the response body",
                 retryable=True,
             ) from exc
         except http.client.HTTPException as exc:
+            msg = "malformed_response"
             raise MonitorError(
-                "malformed_response", "server returned a malformed HTTP response"
+                msg, "server returned a malformed HTTP response"
             ) from exc
         finally:
             connection.close()
@@ -718,14 +754,11 @@ def fetch_url(
 
 def _main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print("usage: fetch.py URL", file=sys.stderr)
         return 2
     try:
-        result = fetch_url(argv[1])
-    except MonitorError as exc:
-        print(json.dumps({"error": exc.as_dict()}, ensure_ascii=False))
+        fetch_url(argv[1])
+    except MonitorError:
         return 1
-    print(json.dumps(result.metadata(), ensure_ascii=False, sort_keys=True))
     return 0
 
 

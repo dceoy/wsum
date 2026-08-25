@@ -93,15 +93,17 @@ class SheetsConnector(Protocol):
 
 def _normalize_table(values: Sequence[Sequence[Any]], sheet: str) -> list[list[Any]]:
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        msg = "sheet_invalid_structure"
         raise MonitorError(
-            "sheet_invalid_structure",
+            msg,
             f"{sheet}: expected a two-dimensional values array",
         )
     table: list[list[Any]] = []
     for row in values:
         if not isinstance(row, Sequence) or isinstance(row, (str, bytes)):
+            msg = "sheet_invalid_structure"
             raise MonitorError(
-                "sheet_invalid_structure", f"{sheet}: every row must be an array"
+                msg, f"{sheet}: every row must be an array"
             )
         table.append(list(row))
     return table
@@ -118,22 +120,26 @@ def records_from_values(
     if not table:
         if allow_empty:
             return []
-        raise MonitorError("sheet_empty", f"{sheet}: header row is missing")
+        msg = "sheet_empty"
+        raise MonitorError(msg, f"{sheet}: header row is missing")
     headers = [str(value).strip() for value in table[0]]
     if any(not header for header in headers) or len(headers) != len(set(headers)):
+        msg = "sheet_invalid_structure"
         raise MonitorError(
-            "sheet_invalid_structure", f"{sheet}: headers must be non-empty and unique"
+            msg, f"{sheet}: headers must be non-empty and unique"
         )
     missing = [column for column in required_columns if column not in headers]
     if missing:
+        msg = "sheet_missing_columns"
         raise MonitorError(
-            "sheet_missing_columns",
+            msg,
             f"{sheet}: missing required columns: {', '.join(missing)}",
             details={"missing_columns": missing},
         )
     if headers[: len(required_columns)] != list(required_columns):
+        msg = "sheet_invalid_structure"
         raise MonitorError(
-            "sheet_invalid_structure",
+            msg,
             f"{sheet}: required columns must appear first, in this order: "
             f"{', '.join(required_columns)}",
             details={"required_columns": list(required_columns)},
@@ -143,8 +149,9 @@ def records_from_values(
         if not raw_row or all(str(value).strip() == "" for value in raw_row):
             continue
         if len(raw_row) > len(headers):
+            msg = "sheet_invalid_row"
             raise MonitorError(
-                "sheet_invalid_row", f"{sheet}: row {row_number} has too many values"
+                msg, f"{sheet}: row {row_number} has too many values"
             )
         padded = raw_row + [""] * (len(headers) - len(raw_row))
         record = dict(zip(headers, padded, strict=True))
@@ -161,13 +168,15 @@ def _ensure_unique(
     for record in records:
         value = str(record.get(key, "")).strip()
         if not value:
+            msg = "sheet_invalid_row"
             raise MonitorError(
-                "sheet_invalid_row",
+                msg,
                 f"{sheet}: row {record.get('_row_number', '?')} has no {key}",
             )
         if value in seen:
+            msg = "sheet_duplicate_id"
             raise MonitorError(
-                "sheet_duplicate_id", f"{sheet}: duplicate {key}: {value}"
+                msg, f"{sheet}: duplicate {key}: {value}"
             )
         seen.add(value)
         result.append(record)
@@ -278,7 +287,8 @@ def notification_row(notification: NotificationRecord) -> list[Any]:
 
 def replace_state_payload(row_number: int, state: State) -> dict[str, Any]:
     if row_number < 2:
-        raise MonitorError("sheet_invalid_row", "State row_number must be at least 2")
+        msg = "sheet_invalid_row"
+        raise MonitorError(msg, "State row_number must be at least 2")
     return {
         "range": f"State!A{row_number}:H{row_number}",
         "values": [state_row(state)],
@@ -300,8 +310,9 @@ def upsert_notification_payload(
     if row_number is None:
         return {"range": "Notifications!A:F", "values": [row], "mode": "append"}
     if row_number < 2:
+        msg = "sheet_invalid_row"
         raise MonitorError(
-            "sheet_invalid_row", "Notifications row_number must be at least 2"
+            msg, "Notifications row_number must be at least 2"
         )
     return {
         "range": f"Notifications!A{row_number}:F{row_number}",
@@ -315,8 +326,9 @@ class SheetsStore:
 
     def __init__(self, connector: SheetsConnector, spreadsheet_id: str) -> None:
         if not spreadsheet_id:
+            msg = "connector_configuration_missing"
             raise MonitorError(
-                "connector_configuration_missing",
+                msg,
                 "spreadsheet_id must be supplied at runtime",
             )
         self._connector = connector
@@ -410,8 +422,9 @@ class SheetsStore:
             return
         event_ids = [item.event_id for item in notifications]
         if len(event_ids) != len(set(event_ids)):
+            msg = "notification_invalid"
             raise MonitorError(
-                "notification_invalid", "notification batch contains duplicate IDs"
+                msg, "notification batch contains duplicate IDs"
             )
         existing = load_notifications(
             self._connector.read_values(self._spreadsheet_id, "Notifications!A:F")

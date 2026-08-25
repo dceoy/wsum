@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from errors import MonitorError
 from models import HASH_RE, utc_now, validate_target_id, validate_timestamp
 from sheets import SheetsConnector, records_from_values
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
 
 OUTBOX_COLUMNS = (
     "event_id",
@@ -54,17 +56,21 @@ class OutboxRecord:
 
     def __post_init__(self) -> None:
         if not HASH_RE.fullmatch(self.event_id):
-            raise MonitorError("outbox_invalid", "event_id must be a SHA-256 digest")
+            msg = "outbox_invalid"
+            raise MonitorError(msg, "event_id must be a SHA-256 digest")
         validate_target_id(self.target_id)
         if self.status not in OUTBOX_STATUSES:
-            raise MonitorError("outbox_invalid", "outbox status is invalid")
+            msg = "outbox_invalid"
+            raise MonitorError(msg, "outbox status is invalid")
         if not 0 <= self.attempt_count <= 100:
-            raise MonitorError("outbox_invalid", "attempt_count is invalid")
+            msg = "outbox_invalid"
+            raise MonitorError(msg, "attempt_count is invalid")
         validate_timestamp(self.created_at, "created_at")
         validate_timestamp(self.updated_at, "updated_at")
         validate_timestamp(self.next_attempt_at, "next_attempt_at", allow_empty=True)
         if len(self.payload) > 4_000 or len(self.last_error) > 200:
-            raise MonitorError("outbox_invalid", "outbox payload or error is too long")
+            msg = "outbox_invalid"
+            raise MonitorError(msg, "outbox payload or error is too long")
 
     def as_row(self) -> list[Any]:
         value = asdict(self)
@@ -75,8 +81,9 @@ class OutboxRecord:
         try:
             attempt_count = int(value.get("attempt_count", 0))
         except (TypeError, ValueError) as exc:
+            msg = "outbox_invalid"
             raise MonitorError(
-                "outbox_invalid", "attempt_count must be an integer"
+                msg, "attempt_count must be an integer"
             ) from exc
         return cls(
             event_id=str(value.get("event_id", "")).strip(),
@@ -99,8 +106,9 @@ def load_outbox(
     for value in records:
         record = OutboxRecord.from_mapping(value)
         if record.event_id in result:
+            msg = "sheet_duplicate_id"
             raise MonitorError(
-                "sheet_duplicate_id",
+                msg,
                 f"Outbox: duplicate event_id: {record.event_id}",
             )
         result[record.event_id] = (int(value["_row_number"]), record)
@@ -112,8 +120,9 @@ class OutboxSheetsStore:
 
     def __init__(self, connector: SheetsConnector, spreadsheet_id: str) -> None:
         if not spreadsheet_id:
+            msg = "connector_configuration_missing"
             raise MonitorError(
-                "connector_configuration_missing",
+                msg,
                 "spreadsheet_id must be supplied at runtime",
             )
         self._connector = connector
@@ -158,8 +167,9 @@ def enqueue_record(
 ) -> OutboxRecord:
     validate_target_id(notification_group)
     if "hooks.slack.com/services/" in message.lower():
+        msg = "outbox_invalid"
         raise MonitorError(
-            "outbox_invalid", "Outbox message must not contain a webhook URL"
+            msg, "Outbox message must not contain a webhook URL"
         )
     timestamp = now or utc_now()
     payload = json.dumps(
@@ -223,8 +233,9 @@ def dispatch_record(
     try:
         delivery_ref = sender(group, message)
         if not delivery_ref:
+            msg = "notification_send_failed"
             raise MonitorError(
-                "notification_send_failed", "sender returned no delivery reference"
+                msg, "sender returned no delivery reference"
             )
     except OutboxDeliveryError as exc:
         attempts = sending.attempt_count
@@ -234,7 +245,7 @@ def dispatch_record(
         else:
             status = "retry"
             delay = min(60, 2**attempts)
-            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(timestamp)
             next_attempt = (parsed + timedelta(minutes=delay)).astimezone(UTC)
             next_attempt = next_attempt.isoformat().replace("+00:00", "Z")
         return OutboxRecord(

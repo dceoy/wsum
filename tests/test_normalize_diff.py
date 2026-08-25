@@ -9,7 +9,8 @@ import zlib
 from io import BytesIO
 from unittest.mock import patch
 
-import support  # noqa: F401
+import pytest
+import support  # ruff: ignore[unused-import]
 from diff import DiffConfig, compare_content
 from errors import MonitorError
 from feed_normalizer import normalize_feed
@@ -212,11 +213,9 @@ class NormalizationTests(unittest.TestCase):
         """
         normalized_first = normalize_content(first, content_type="text/html")
         normalized_second = normalize_content(second, content_type="text/html")
-        self.assertEqual(normalized_first.text, normalized_second.text)
-        self.assertEqual(
-            normalized_first.normalized_hash, normalized_second.normalized_hash
-        )
-        self.assertEqual("2026-01", normalized_first.normalization_version)
+        assert normalized_first.text == normalized_second.text
+        assert normalized_first.normalized_hash == normalized_second.normalized_hash
+        assert normalized_first.normalization_version == "2026-01"
 
     def test_form_content_inside_main_is_preserved_but_outside_is_dropped(
         self,
@@ -235,11 +234,9 @@ class NormalizationTests(unittest.TestCase):
         """
         normalized_before = normalize_content(before, content_type="text/html")
         normalized_after = normalize_content(after, content_type="text/html")
-        self.assertIn("2026-08-31", normalized_before.text)
-        self.assertIn("2026-09-30", normalized_after.text)
-        self.assertNotEqual(
-            normalized_before.normalized_hash, normalized_after.normalized_hash
-        )
+        assert "2026-08-31" in normalized_before.text
+        assert "2026-09-30" in normalized_after.text
+        assert normalized_before.normalized_hash != normalized_after.normalized_hash
 
     def test_form_wrapping_main_preserves_the_main_content(self) -> None:
         # The noise check used to look only at ancestors, so a page-level
@@ -259,22 +256,17 @@ class NormalizationTests(unittest.TestCase):
         """
         normalized_before = normalize_content(before, content_type="text/html")
         normalized_after = normalize_content(after, content_type="text/html")
-        self.assertIn("2026-08-31", normalized_before.text)
-        self.assertIn("2026-09-30", normalized_after.text)
-        self.assertNotEqual(
-            normalized_before.normalized_hash, normalized_after.normalized_hash
-        )
+        assert "2026-08-31" in normalized_before.text
+        assert "2026-09-30" in normalized_after.text
+        assert normalized_before.normalized_hash != normalized_after.normalized_hash
         bom_feed = (
             b"\xef\xbb\xbf<!--synthetic--><rss><channel>"
             b"<item><guid>1</guid><title>One</title></item>"
             b"</channel></rss>"
         )
-        self.assertEqual(
-            "feed",
-            normalize_content(bom_feed, content_type="application/rss+xml").kind,
-        )
+        assert normalize_content(bom_feed, content_type="application/rss+xml").kind == "feed"
         plain = normalize_content("ＡＢＣ".encode(), content_type="text/plain")
-        self.assertEqual("ABC", plain.text)
+        assert plain.text == "ABC"
 
     def test_article_header_title_change_is_not_silently_missed(self) -> None:
         # A <header> nested inside <article>/<section> is a content
@@ -290,8 +282,8 @@ class NormalizationTests(unittest.TestCase):
             b"<p>Body text.</p></article></body></html>",
             content_type="text/html",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
-        self.assertIn("New Title", after.text)
+        assert before.normalized_hash != after.normalized_hash
+        assert "New Title" in after.text
         # A page-level header outside any content container remains
         # boilerplate and is still stripped.
         page_header = normalize_content(
@@ -299,7 +291,7 @@ class NormalizationTests(unittest.TestCase):
             b"<main><p>Body text.</p></main></body></html>",
             content_type="text/html",
         )
-        self.assertNotIn("Site Nav", page_header.text)
+        assert "Site Nav" not in page_header.text
 
     def test_classed_article_header_title_change_is_not_silently_missed(
         self,
@@ -320,8 +312,8 @@ class NormalizationTests(unittest.TestCase):
             b"</body></html>",
             content_type="text/html",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
-        self.assertIn("New status", after.text)
+        assert before.normalized_hash != after.normalized_hash
+        assert "New status" in after.text
         # A page-level "site-header" class remains boilerplate and is
         # still stripped.
         page_header = normalize_content(
@@ -329,7 +321,7 @@ class NormalizationTests(unittest.TestCase):
             b"<main><p>Body text.</p></main></body></html>",
             content_type="text/html",
         )
-        self.assertNotIn("Site Nav", page_header.text)
+        assert "Site Nav" not in page_header.text
 
     def test_share_price_business_content_is_not_dropped_as_noise(self) -> None:
         # NOISE_TOKEN_RE used to treat any class/id token containing "share"
@@ -349,8 +341,8 @@ class NormalizationTests(unittest.TestCase):
             b"</main></body></html>",
             content_type="text/html",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
-        self.assertIn("105", after.text)
+        assert before.normalized_hash != after.normalized_hash
+        assert "105" in after.text
         # A genuine social-share widget remains boilerplate and is still
         # stripped.
         share_widget = normalize_content(
@@ -359,7 +351,7 @@ class NormalizationTests(unittest.TestCase):
             b"</main></body></html>",
             content_type="text/html",
         )
-        self.assertNotIn("Share this", share_widget.text)
+        assert "Share this" not in share_widget.text
 
     def test_promo_business_content_is_not_dropped_as_noise(self) -> None:
         # NOISE_TOKEN_RE used to treat any class/id token containing "promo"
@@ -379,9 +371,9 @@ class NormalizationTests(unittest.TestCase):
             b"</main></body></html>",
             content_type="text/html",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
-        self.assertIn("SAVE30", after.text)
-        self.assertIn("105", after.text)
+        assert before.normalized_hash != after.normalized_hash
+        assert "SAVE30" in after.text
+        assert "105" in after.text
         # A genuine promo widget remains boilerplate and is still stripped.
         # "promo-widget" (unlike "promo-banner") is not independently caught
         # by NOISE_TOKEN_RE's generic tokens, so this exercises
@@ -392,19 +384,19 @@ class NormalizationTests(unittest.TestCase):
             b"</main></body></html>",
             content_type="text/html",
         )
-        self.assertNotIn("Save big today", promo_widget.text)
+        assert "Save big today" not in promo_widget.text
 
     def test_http_charset_is_used_before_bom_or_body_sniffing(self) -> None:
         body = "価格改定のお知らせ".encode("shift_jis")
         # Without the declared charset, the shift_jis bytes are not valid
         # UTF-8 and must fail closed rather than silently decode as garbage
         # replacement text (which could mask a real change).
-        with self.assertRaisesRegex(MonitorError, "malformed"):
+        with pytest.raises(MonitorError, match="malformed"):
             normalize_content(body, content_type="text/plain")
         with_charset = normalize_content(
             body, content_type="text/plain", charset="shift_jis"
         )
-        self.assertEqual("価格改定のお知らせ", with_charset.text)
+        assert with_charset.text == "価格改定のお知らせ"
 
     def test_unusable_declared_charset_falls_back_to_bom_instead_of_failing(
         self,
@@ -413,7 +405,7 @@ class NormalizationTests(unittest.TestCase):
         # not turn a previously-decodable BOM'd body into a hard failure.
         body = codecs.BOM_UTF8 + b"Notice"
         result = normalize_content(body, content_type="text/plain", charset="utf-16")
-        self.assertEqual("Notice", result.text)
+        assert result.text == "Notice"
 
     def test_unsupported_declared_charset_fails_closed_without_rescue(
         self,
@@ -424,7 +416,7 @@ class NormalizationTests(unittest.TestCase):
         # to rescue it -- that would make distinct legacy-encoded responses
         # normalize incorrectly or identically, masking real changes.
         body = "価格改定のお知らせ".encode("iso-2022-jp")
-        with self.assertRaisesRegex(MonitorError, "unsupported"):
+        with pytest.raises(MonitorError, match="unsupported"):
             normalize_content(body, content_type="text/plain", charset="iso-2022-jp")
 
     def test_unsupported_declared_charset_still_rescued_by_in_body_declaration(
@@ -437,7 +429,7 @@ class NormalizationTests(unittest.TestCase):
         result = normalize_content(
             body, content_type="text/plain", charset="iso-2022-jp"
         )
-        self.assertIn("価格改定のお知らせ", result.text)
+        assert "価格改定のお知らせ" in result.text
 
     def test_malformed_bytes_fail_closed_instead_of_collapsing_to_replacement(
         self,
@@ -449,9 +441,9 @@ class NormalizationTests(unittest.TestCase):
         # both instead of quietly treating them as equivalent.
         first = b"Price: \xff10"
         second = b"Price: \xfe10"
-        with self.assertRaisesRegex(MonitorError, "malformed"):
+        with pytest.raises(MonitorError, match="malformed"):
             normalize_content(first, content_type="text/plain")
-        with self.assertRaisesRegex(MonitorError, "malformed"):
+        with pytest.raises(MonitorError, match="malformed"):
             normalize_content(second, content_type="text/plain")
 
     def test_meaningful_price_specification_and_terms_change_hash(self) -> None:
@@ -465,7 +457,7 @@ class NormalizationTests(unittest.TestCase):
             normalize_content(value, content_type="text/html").normalized_hash
             for value in values
         }
-        self.assertEqual(4, len(hashes))
+        assert len(hashes) == 4
 
     def test_link_destination_change_is_not_silently_missed(self) -> None:
         # Same visible link text, changed href: without a destination
@@ -482,9 +474,9 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
-        self.assertIn("https://example.com/apply-v1", before.text)
-        self.assertIn("https://example.com/apply-v2", after.text)
+        assert before.normalized_hash != after.normalized_hash
+        assert "https://example.com/apply-v1" in before.text
+        assert "https://example.com/apply-v2" in after.text
 
     def test_standalone_link_destination_change_is_not_silently_missed(self) -> None:
         before = normalize_content(
@@ -497,9 +489,9 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
-        self.assertIn("https://example.com/apply-v1", before.text)
-        self.assertIn("https://example.com/apply-v2", after.text)
+        assert before.normalized_hash != after.normalized_hash
+        assert "https://example.com/apply-v1" in before.text
+        assert "https://example.com/apply-v2" in after.text
 
     def test_document_base_change_is_not_silently_missed(self) -> None:
         before = normalize_content(
@@ -512,12 +504,12 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
-        self.assertIn("https://example.com/v1/apply", before.text)
-        self.assertIn("https://example.com/v2/apply", after.text)
+        assert before.normalized_hash != after.normalized_hash
+        assert "https://example.com/v1/apply" in before.text
+        assert "https://example.com/v2/apply" in after.text
 
     def test_unsafe_document_base_fails_closed(self) -> None:
-        with self.assertRaisesRegex(MonitorError, "HTTP and HTTPS"):
+        with pytest.raises(MonitorError, match="HTTP and HTTPS"):
             normalize_content(
                 b'<base href="javascript:alert(1)"><main>Content</main>',
                 content_type="text/html",
@@ -533,8 +525,8 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/current/page",
         )
-        self.assertIn("https://example.com/current/apply", result.text)
-        self.assertNotIn("https://example.com/ignored/apply", result.text)
+        assert "https://example.com/current/apply" in result.text
+        assert "https://example.com/ignored/apply" not in result.text
 
     def test_long_link_destination_keeps_full_identity_in_digest(self) -> None:
         common_prefix = "/" + "a" * 350
@@ -548,15 +540,15 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
-        self.assertIn("sha256:", before.text)
-        self.assertIn("sha256:", after.text)
+        assert before.normalized_hash != after.normalized_hash
+        assert "sha256:" in before.text
+        assert "sha256:" in after.text
 
     def test_link_destination_budget_fails_closed(self) -> None:
         links = "".join(
             f'<p><a href="/item/{index}">Item</a></p>' for index in range(501)
         )
-        with self.assertRaisesRegex(MonitorError, "too many link destinations"):
+        with pytest.raises(MonitorError, match="too many link destinations"):
             normalize_content(
                 f"<main>{links}</main>".encode(),
                 content_type="text/html",
@@ -574,7 +566,7 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert before.normalized_hash != after.normalized_hash
 
     def test_button_formaction_change_is_not_silently_missed(self) -> None:
         # A submit button's formaction overrides the form's action for that
@@ -592,7 +584,7 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert before.normalized_hash != after.normalized_hash
 
     def test_standalone_button_formaction_change_is_not_silently_missed(
         self,
@@ -607,7 +599,7 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert before.normalized_hash != after.normalized_hash
 
     def test_submit_input_formaction_change_is_not_silently_missed(self) -> None:
         before = normalize_content(
@@ -622,7 +614,7 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert before.normalized_hash != after.normalized_hash
 
     def test_image_input_formaction_change_is_not_silently_missed(self) -> None:
         before = normalize_content(
@@ -637,7 +629,7 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert before.normalized_hash != after.normalized_hash
 
     def test_non_submit_input_formaction_is_ignored(self) -> None:
         # Only submit/image inputs are real submit controls; a formaction
@@ -654,7 +646,7 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertEqual(before.normalized_hash, after.normalized_hash)
+        assert before.normalized_hash == after.normalized_hash
 
     def test_hidden_and_password_input_values_are_never_emitted(self) -> None:
         # The submit/image label fix must stay scoped to _SUBMIT_INPUT_TYPES:
@@ -667,8 +659,8 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotIn("secret-token", result.text)
-        self.assertNotIn("hunter2", result.text)
+        assert "secret-token" not in result.text
+        assert "hunter2" not in result.text
 
     def test_submit_input_label_change_without_formaction_is_not_silently_missed(
         self,
@@ -690,9 +682,9 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert before.normalized_hash != after.normalized_hash
 
-    def test_image_input_label_change_nested_in_text_without_formaction_is_not_silently_missed(  # noqa: E501
+    def test_image_input_label_change_nested_in_text_without_formaction_is_not_silently_missed(
         self,
     ) -> None:
         # The same label-loss bug also affects a submit/image input reached
@@ -708,7 +700,7 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert before.normalized_hash != after.normalized_hash
 
     def test_button_without_formaction_keeps_existing_line_splitting(self) -> None:
         # A directly visited button with no formaction must fall through to
@@ -724,7 +716,7 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertEqual(wrapped.text, without_button.text)
+        assert wrapped.text == without_button.text
 
     def test_credential_bearing_link_destination_fails_closed(self) -> None:
         # Rejected HTTP(S) destinations must not be omitted or represented by
@@ -737,13 +729,13 @@ class NormalizationTests(unittest.TestCase):
         for destination, secret in cases:
             with self.subTest(destination=destination):
                 source = f'<main><a href="{destination}">Link</a></main>'.encode()
-                with self.assertRaises(MonitorError) as captured:
+                with pytest.raises(MonitorError) as captured:
                     normalize_content(
                         source,
                         content_type="text/html",
                         base_url="https://example.com/page",
                     )
-                self.assertNotIn(secret, str(captured.exception))
+                assert secret not in str(captured.value)
 
     def test_credential_bearing_link_nested_in_query_value_fails_closed(
         self,
@@ -759,13 +751,13 @@ class NormalizationTests(unittest.TestCase):
             "cb%3Faccess_token%3Dsecret123"
         )
         source = f'<main><a href="{destination}">Link</a></main>'.encode()
-        with self.assertRaises(MonitorError) as captured:
+        with pytest.raises(MonitorError) as captured:
             normalize_content(
                 source,
                 content_type="text/html",
                 base_url="https://example.com/page",
             )
-        self.assertNotIn("secret123", str(captured.exception))
+        assert "secret123" not in str(captured.value)
 
     def test_credential_bearing_link_scheme_relative_or_double_encoded_fails_closed(
         self,
@@ -777,22 +769,22 @@ class NormalizationTests(unittest.TestCase):
         # it is fully recoverable and would cross the documented
         # snapshot/model/Slack secret boundary.
         destinations = (
-            "https://example.com/?redirect=%2F%2Fhooks.slack.com%2Fservices"
-            "%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX",
-            "https://example.com/?redirect=https%253A%252F%252Fhooks.slack"
+            ("https://example.com/?redirect=%2F%2Fhooks.slack.com%2Fservices"
+            "%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX"),
+            ("https://example.com/?redirect=https%253A%252F%252Fhooks.slack"
             ".com%252Fservices%252FT00000000%252FB00000000"
-            "%252FXXXXXXXXXXXXXXXXXXXXXXXX",
+            "%252FXXXXXXXXXXXXXXXXXXXXXXXX"),
         )
         for destination in destinations:
             with self.subTest(destination=destination):
                 source = f'<main><a href="{destination}">Link</a></main>'.encode()
-                with self.assertRaises(MonitorError) as captured:
+                with pytest.raises(MonitorError) as captured:
                     normalize_content(
                         source,
                         content_type="text/html",
                         base_url="https://example.com/page",
                     )
-                self.assertNotIn("XXXXXXXXXXXXXXXXXXXXXXXX", str(captured.exception))
+                assert "XXXXXXXXXXXXXXXXXXXXXXXX" not in str(captured.value)
 
     def test_credential_bearing_link_nested_relative_reference_fails_closed(
         self,
@@ -806,20 +798,20 @@ class NormalizationTests(unittest.TestCase):
             "https://example.com/?redirect=%2Fcallback%3Faccess_token%3Dsecret123"
         )
         source = f'<main><a href="{destination}">Link</a></main>'.encode()
-        with self.assertRaises(MonitorError) as captured:
+        with pytest.raises(MonitorError) as captured:
             normalize_content(
                 source,
                 content_type="text/html",
                 base_url="https://example.com/page",
             )
-        self.assertNotIn("secret123", str(captured.exception))
+        assert "secret123" not in str(captured.value)
 
     def test_relative_links_without_base_url_are_not_annotated(self) -> None:
         no_base = normalize_content(
             b'<main><p><a href="/apply-v1">Apply</a></p></main>',
             content_type="text/html",
         )
-        self.assertNotIn("/apply-v1", no_base.text)
+        assert "/apply-v1" not in no_base.text
 
     def test_fragment_only_and_fragment_destination_changes_are_tracked(
         self,
@@ -834,7 +826,7 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertIn("example.com/page#section", same_fragment_only.text)
+        assert "example.com/page#section" in same_fragment_only.text
 
         before = normalize_content(
             b'<main><p><a href="/apply#step1">Apply</a></p></main>',
@@ -846,7 +838,7 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert before.normalized_hash != after.normalized_hash
 
     def test_long_fragment_identity_distinguishes_divergent_tails(self) -> None:
         # canonicalize_fragment_identity truncates the *display* value to
@@ -864,7 +856,7 @@ class NormalizationTests(unittest.TestCase):
             content_type="text/html",
             base_url="https://example.com/page",
         )
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert before.normalized_hash != after.normalized_hash
 
     def test_credential_bearing_link_fragment_fails_closed(self) -> None:
         # OAuth implicit-flow tokens (and similar credentials) can appear in
@@ -872,13 +864,13 @@ class NormalizationTests(unittest.TestCase):
         # credential-bearing query parameter rather than being retained or
         # hashed into a stored artifact.
         source = b'<main><a href="/callback#access_token=secret123">Link</a></main>'
-        with self.assertRaises(MonitorError) as captured:
+        with pytest.raises(MonitorError) as captured:
             normalize_content(
                 source,
                 content_type="text/html",
                 base_url="https://example.com/page",
             )
-        self.assertNotIn("secret123", str(captured.exception))
+        assert "secret123" not in str(captured.value)
 
     def test_credential_bearing_link_nested_in_fragment_value_fails_closed(
         self,
@@ -895,13 +887,13 @@ class NormalizationTests(unittest.TestCase):
             "cb%3Faccess_token%3Dsecret123"
         )
         source = f'<main><a href="{destination}">Link</a></main>'.encode()
-        with self.assertRaises(MonitorError) as captured:
+        with pytest.raises(MonitorError) as captured:
             normalize_content(
                 source,
                 content_type="text/html",
                 base_url="https://example.com/page",
             )
-        self.assertNotIn("secret123", str(captured.exception))
+        assert "secret123" not in str(captured.value)
 
     def test_standalone_deadline_date_is_preserved_not_erased(self) -> None:
         # A date/time-only line is stripped as routine-timestamp noise, but
@@ -917,9 +909,9 @@ class NormalizationTests(unittest.TestCase):
             b"<main><h2>Application deadline</h2><p>2026-09-30</p></main>",
             content_type="text/html",
         )
-        self.assertIn("2026-08-31", before.text)
-        self.assertIn("2026-09-30", after.text)
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert "2026-08-31" in before.text
+        assert "2026-09-30" in after.text
+        assert before.normalized_hash != after.normalized_hash
 
     def test_direct_text_before_and_after_a_block_child_is_not_dropped(self) -> None:
         # An element that mixes its own direct text with a block-level
@@ -933,9 +925,9 @@ class NormalizationTests(unittest.TestCase):
             b"<main>Applications are now closed<div>Details</div></main>",
             content_type="text/html",
         )
-        self.assertNotEqual(open_before.normalized_hash, closed_before.normalized_hash)
-        self.assertIn("Applications are now closed", closed_before.text)
-        self.assertIn("Details", closed_before.text)
+        assert open_before.normalized_hash != closed_before.normalized_hash
+        assert "Applications are now closed" in closed_before.text
+        assert "Details" in closed_before.text
 
         open_after = normalize_content(
             b"<main><div>Details</div>Applications are now open</main>",
@@ -945,9 +937,9 @@ class NormalizationTests(unittest.TestCase):
             b"<main><div>Details</div>Applications are now closed</main>",
             content_type="text/html",
         )
-        self.assertNotEqual(open_after.normalized_hash, closed_after.normalized_hash)
-        self.assertIn("Applications are now closed", closed_after.text)
-        self.assertIn("Details", closed_after.text)
+        assert open_after.normalized_hash != closed_after.normalized_hash
+        assert "Applications are now closed" in closed_after.text
+        assert "Details" in closed_after.text
 
     def test_selectors_tables_ads_and_drift(self) -> None:
         body = b"""
@@ -965,22 +957,22 @@ class NormalizationTests(unittest.TestCase):
             include_selector="main#content",
             exclude_selectors=(".ad",),
         )
-        self.assertIn("Plan | Price", result.text)
-        self.assertIn("Pro | $20", result.text)
-        self.assertNotIn("Buy now", result.text)
-        with self.assertRaisesRegex(MonitorError, "matched no"):
+        assert "Plan | Price" in result.text
+        assert "Pro | $20" in result.text
+        assert "Buy now" not in result.text
+        with pytest.raises(MonitorError, match="matched no"):
             normalize_content(
                 body,
                 content_type="text/html",
                 include_selector=".missing",
             )
-        with self.assertRaisesRegex(MonitorError, "matched no"):
+        with pytest.raises(MonitorError, match="matched no"):
             normalize_content(
                 body,
                 content_type="text/html",
                 exclude_selectors=(".missing",),
             )
-        with self.assertRaisesRegex(MonitorError, "unsupported"):
+        with pytest.raises(MonitorError, match="unsupported"):
             normalize_content(
                 body,
                 content_type="text/html",
@@ -1000,13 +992,13 @@ class NormalizationTests(unittest.TestCase):
         </channel></rss>"""
         first = normalize_content(rss_one, content_type="application/rss+xml")
         second = normalize_content(rss_two, content_type="application/rss+xml")
-        self.assertEqual(first.normalized_hash, second.normalized_hash)
+        assert first.normalized_hash == second.normalized_hash
         updated = normalize_content(
             rss_two.replace(b"Second", b"Second updated"),
             content_type="application/rss+xml",
         )
-        self.assertNotEqual(first.normalized_hash, updated.normalized_hash)
-        self.assertIn("ENTRY 1", first.text)
+        assert first.normalized_hash != updated.normalized_hash
+        assert "ENTRY 1" in first.text
         atom = b"""<?xml version="1.0"?>
         <feed xmlns="http://www.w3.org/2005/Atom">
           <entry><id>tag:example,1</id><title>Atom item</title>
@@ -1015,8 +1007,8 @@ class NormalizationTests(unittest.TestCase):
           </entry>
         </feed>"""
         atom_result = normalize_content(atom, content_type="application/atom+xml")
-        self.assertEqual("atom", atom_result.metadata["feed_kind"])
-        self.assertIn("ENTRY tag:example,1", atom_result.text)
+        assert atom_result.metadata["feed_kind"] == "atom"
+        assert "ENTRY tag:example,1" in atom_result.text
         removed = normalize_content(
             b"""<rss><channel>
               <item><guid>1</guid><title>First</title></item>
@@ -1024,12 +1016,8 @@ class NormalizationTests(unittest.TestCase):
             content_type="application/rss+xml",
         )
         feed_diff = compare_content(first.text, removed.text)
-        self.assertTrue(
-            any(section.kind == "removed" for section in feed_diff.sections)
-        )
-        self.assertTrue(
-            any(section.anchor.startswith("ENTRY 2") for section in feed_diff.sections)
-        )
+        assert any(section.kind == "removed" for section in feed_diff.sections)
+        assert any(section.anchor.startswith("ENTRY 2") for section in feed_diff.sections)
 
     def test_long_feed_entry_ids_keep_full_identity_with_bounded_output(self) -> None:
         # A bare ``stable_id[:1_000]`` makes IDs that differ only after that
@@ -1067,12 +1055,12 @@ class NormalizationTests(unittest.TestCase):
                 before_entry_id = before.text.splitlines()[0].removeprefix("ENTRY ")
                 after_entry_id = after.text.splitlines()[0].removeprefix("ENTRY ")
 
-                self.assertNotEqual(before.normalized_hash, after.normalized_hash)
-                self.assertNotEqual(before_entry_id, after_entry_id)
-                self.assertLessEqual(len(before_entry_id), 1_000)
-                self.assertLessEqual(len(after_entry_id), 1_000)
-                self.assertIn("[sha256:", before_entry_id)
-                self.assertIn("[sha256:", after_entry_id)
+                assert before.normalized_hash != after.normalized_hash
+                assert before_entry_id != after_entry_id
+                assert len(before_entry_id) <= 1000
+                assert len(after_entry_id) <= 1000
+                assert "[sha256:" in before_entry_id
+                assert "[sha256:" in after_entry_id
 
     def test_rss_content_encoded_body_is_captured(self) -> None:
         xml = b"""<?xml version="1.0"?>
@@ -1085,7 +1073,7 @@ class NormalizationTests(unittest.TestCase):
           </item>
         </channel></rss>"""
         text, _ = normalize_feed(xml)
-        self.assertIn("CONTENT Full article body", text)
+        assert "CONTENT Full article body" in text
 
     def test_rss_content_encoded_survives_alongside_description(self) -> None:
         def render(encoded: str) -> str:
@@ -1104,9 +1092,9 @@ class NormalizationTests(unittest.TestCase):
 
         first = render("Original full article body")
         second = render("Edited full article body")
-        self.assertIn("Stable teaser", first)
-        self.assertIn("Original full article body", first)
-        self.assertNotEqual(first, second)
+        assert "Stable teaser" in first
+        assert "Original full article body" in first
+        assert first != second
 
     def test_feed_content_destination_only_change_is_not_silently_missed(
         self,
@@ -1134,8 +1122,8 @@ class NormalizationTests(unittest.TestCase):
 
         before = render("https://example.com/apply-v1")
         after = render("https://example.com/apply-v2")
-        self.assertNotEqual(before, after)
-        self.assertIn("Apply [https://example.com/apply-v1", before)
+        assert before != after
+        assert "Apply [https://example.com/apply-v1" in before
 
     def test_feed_content_relative_link_without_entry_link_fails_closed(
         self,
@@ -1155,7 +1143,7 @@ class NormalizationTests(unittest.TestCase):
               </item>
             </channel></rss>""".encode()
 
-        with self.assertRaisesRegex(MonitorError, "feed_content_relative_link"):
+        with pytest.raises(MonitorError, match="feed_content_relative_link"):
             normalize_feed(render("/apply-v1"))
 
     def test_feed_content_relative_link_resolves_against_channel_link(
@@ -1180,8 +1168,8 @@ class NormalizationTests(unittest.TestCase):
 
         before = render("apply-v1")
         after = render("apply-v2")
-        self.assertNotEqual(before, after)
-        self.assertIn("Apply [https://example.com/jobs/apply-v1", before)
+        assert before != after
+        assert "Apply [https://example.com/jobs/apply-v1" in before
 
     def test_feed_channel_link_change_is_tracked_with_fetched_base_url(
         self,
@@ -1214,9 +1202,9 @@ class NormalizationTests(unittest.TestCase):
 
         before = render("https://example.com/jobs-v1/")
         after = render("https://example.com/jobs-v2/")
-        self.assertNotEqual(before, after)
-        self.assertIn("Apply [https://example.com/jobs-v1/apply", before)
-        self.assertIn("Apply [https://example.com/jobs-v2/apply", after)
+        assert before != after
+        assert "Apply [https://example.com/jobs-v1/apply" in before
+        assert "Apply [https://example.com/jobs-v2/apply" in after
 
     def test_feed_xml_base_only_change_is_not_silently_missed(self) -> None:
         # xml:base overrides the base URI used to resolve relative content
@@ -1240,9 +1228,9 @@ class NormalizationTests(unittest.TestCase):
 
         before = render("https://example.com/v1/")
         after = render("https://example.com/v2/")
-        self.assertNotEqual(before, after)
-        self.assertIn("Apply [https://example.com/v1/apply", before)
-        self.assertIn("Apply [https://example.com/v2/apply", after)
+        assert before != after
+        assert "Apply [https://example.com/v1/apply" in before
+        assert "Apply [https://example.com/v2/apply" in after
 
     def test_feed_xml_base_at_entry_and_content_scope_overrides_feed_level(
         self,
@@ -1270,8 +1258,8 @@ class NormalizationTests(unittest.TestCase):
 
         entry_before = render("https://example.com/entry-v1/", "")
         entry_after = render("https://example.com/entry-v2/", "")
-        self.assertNotEqual(entry_before, entry_after)
-        self.assertIn("Apply [https://example.com/entry-v1/apply", entry_before)
+        assert entry_before != entry_after
+        assert "Apply [https://example.com/entry-v1/apply" in entry_before
 
         content_before = render(
             "https://example.com/entry/", "https://example.com/content-v1/"
@@ -1279,8 +1267,8 @@ class NormalizationTests(unittest.TestCase):
         content_after = render(
             "https://example.com/entry/", "https://example.com/content-v2/"
         )
-        self.assertNotEqual(content_before, content_after)
-        self.assertIn("Apply [https://example.com/content-v1/apply", content_before)
+        assert content_before != content_after
+        assert "Apply [https://example.com/content-v1/apply" in content_before
 
     def test_feed_root_xml_base_resolves_against_fetched_document_url(
         self,
@@ -1304,9 +1292,9 @@ class NormalizationTests(unittest.TestCase):
 
         before, _ = normalize_feed(xml, base_url="https://example.com/v1/feed.xml")
         after, _ = normalize_feed(xml, base_url="https://example.com/v2/feed.xml")
-        self.assertNotEqual(before, after)
-        self.assertIn("Apply [https://example.com/v1/apply", before)
-        self.assertIn("Apply [https://example.com/v2/apply", after)
+        assert before != after
+        assert "Apply [https://example.com/v1/apply" in before
+        assert "Apply [https://example.com/v2/apply" in after
 
     def test_feed_content_link_fragment_destination_change_is_tracked(
         self,
@@ -1331,7 +1319,7 @@ class NormalizationTests(unittest.TestCase):
 
         before = render("apply#step1")
         after = render("apply#step2")
-        self.assertNotEqual(before, after)
+        assert before != after
 
     def test_feed_content_link_credential_fragment_fails_closed(self) -> None:
         xml = b"""<?xml version="1.0"?>
@@ -1344,9 +1332,9 @@ class NormalizationTests(unittest.TestCase):
             <description>&lt;a href="https://example.com/callback#access_token=secret123"&gt;Apply&lt;/a&gt;</description>
           </item>
         </channel></rss>"""
-        with self.assertRaises(MonitorError) as captured:
+        with pytest.raises(MonitorError) as captured:
             normalize_feed(xml)
-        self.assertNotIn("secret123", str(captured.exception))
+        assert "secret123" not in str(captured.value)
 
     def test_feed_content_link_nested_credential_destination_fails_closed(
         self,
@@ -1367,9 +1355,9 @@ class NormalizationTests(unittest.TestCase):
             <description>&lt;a href="{destination}"&gt;Apply&lt;/a&gt;</description>
           </item>
         </channel></rss>""".encode()
-        with self.assertRaises(MonitorError) as captured:
+        with pytest.raises(MonitorError) as captured:
             normalize_feed(xml)
-        self.assertNotIn("secret123", str(captured.exception))
+        assert "secret123" not in str(captured.value)
 
     def test_feed_content_unterminated_anchor_href_is_not_dropped(self) -> None:
         # HTMLParser.close() does not synthesize missing </a> events, so a
@@ -1392,8 +1380,8 @@ class NormalizationTests(unittest.TestCase):
 
         before = render("https://example.com/apply-v1")
         after = render("https://example.com/apply-v2")
-        self.assertIn("apply-v1", before)
-        self.assertNotEqual(before, after)
+        assert "apply-v1" in before
+        assert before != after
 
     def test_atom_xhtml_content_destination_only_change_is_not_missed(
         self,
@@ -1417,8 +1405,8 @@ class NormalizationTests(unittest.TestCase):
 
         before = render("https://example.com/apply-v1")
         after = render("https://example.com/apply-v2")
-        self.assertNotEqual(before, after)
-        self.assertIn("Apply [https://example.com/apply-v1", before)
+        assert before != after
+        assert "Apply [https://example.com/apply-v1" in before
 
     def test_atom_xhtml_descendant_xml_base_change_is_not_missed(self) -> None:
         # XML Base can be overridden on any descendant of the content
@@ -1443,8 +1431,8 @@ class NormalizationTests(unittest.TestCase):
 
         before = render("https://example.com/v1/")
         after = render("https://example.com/v2/")
-        self.assertNotEqual(before, after)
-        self.assertIn("Apply [https://example.com/v1/apply", before)
+        assert before != after
+        assert "Apply [https://example.com/v1/apply" in before
 
     def test_atom_xhtml_anchor_own_xml_base_change_is_not_missed(self) -> None:
         # xml:base can be set on the anchor element itself rather than a
@@ -1465,8 +1453,8 @@ class NormalizationTests(unittest.TestCase):
 
         before = render("https://example.com/v1/")
         after = render("https://example.com/v2/")
-        self.assertNotEqual(before, after)
-        self.assertIn("Apply [https://example.com/v1/apply", before)
+        assert before != after
+        assert "Apply [https://example.com/v1/apply" in before
 
     def test_atom_xhtml_deep_nesting_does_not_raise_recursion_error(self) -> None:
         # _element_link_destinations walks the real XHTML element tree to
@@ -1487,7 +1475,7 @@ class NormalizationTests(unittest.TestCase):
             + b"</content></entry></feed>"
         )
         text, _ = normalize_feed(xml)
-        self.assertIn("Apply [https://example.com/apply", text)
+        assert "Apply [https://example.com/apply" in text
 
     def test_content_link_budget_covers_an_ordinary_large_feed(self) -> None:
         # The link-destination annotation budget is shared across the whole
@@ -1503,9 +1491,9 @@ class NormalizationTests(unittest.TestCase):
         )
         xml = f"<rss><channel>{entries}</channel></rss>".encode()
         text, metadata = normalize_feed(xml)
-        self.assertEqual("1000", metadata["entry_count"])
-        self.assertIn("https://example.com/0", text)
-        self.assertIn("https://example.com/999", text)
+        assert metadata["entry_count"] == "1000"
+        assert "https://example.com/0" in text
+        assert "https://example.com/999" in text
 
     def test_content_link_budget_fails_closed_when_exhausted(self) -> None:
         # A feed with far more embedded link destinations than any
@@ -1519,7 +1507,7 @@ class NormalizationTests(unittest.TestCase):
             "<rss><channel><item><guid>1</guid><title>Post</title>"
             f"<description>{links}</description></item></channel></rss>"
         ).encode()
-        with self.assertRaisesRegex(MonitorError, "feed_too_large"):
+        with pytest.raises(MonitorError, match="feed_too_large"):
             normalize_feed(xml)
 
     def test_atom_prefers_alternate_link_over_self(self) -> None:
@@ -1537,9 +1525,9 @@ class NormalizationTests(unittest.TestCase):
 
         before = render("https://example.com/articles/old")
         after = render("https://example.com/articles/new")
-        self.assertIn("LINK https://example.com/articles/old", before)
-        self.assertNotIn("https://example.com/feed/entry/1", before)
-        self.assertNotEqual(before, after)
+        assert "LINK https://example.com/articles/old" in before
+        assert "https://example.com/feed/entry/1" not in before
+        assert before != after
 
     def test_atom_external_content_source_is_canonicalized_and_captured(self) -> None:
         def render(source: str) -> str:
@@ -1555,8 +1543,8 @@ class NormalizationTests(unittest.TestCase):
 
         before = render("https://EXAMPLE.com:443/external/v1")
         after = render("https://example.com/external/v2")
-        self.assertIn("CONTENT_SRC https://example.com/external/v1", before)
-        self.assertNotEqual(before, after)
+        assert "CONTENT_SRC https://example.com/external/v1" in before
+        assert before != after
 
     def test_atom_content_source_fragment_change_is_tracked(self) -> None:
         # canonicalize_url always strips the fragment, so a content src
@@ -1575,15 +1563,15 @@ class NormalizationTests(unittest.TestCase):
 
         before = render("https://example.com/doc#v1")
         after = render("https://example.com/doc#v2")
-        self.assertIn("CONTENT_SRC https://example.com/doc#v1", before)
-        self.assertNotEqual(before, after)
+        assert "CONTENT_SRC https://example.com/doc#v1" in before
+        assert before != after
 
     def test_atom_relative_external_content_source_is_rejected(self) -> None:
         relative = b"""<feed xmlns="http://www.w3.org/2005/Atom"
             xml:base="https://example.com/">
           <entry><id>tag:example,1</id><content src="external/v1"/></entry>
         </feed>"""
-        with self.assertRaisesRegex(MonitorError, "absolute HTTP"):
+        with pytest.raises(MonitorError, match="absolute HTTP"):
             normalize_feed(relative)
 
         credential_source = b"""<feed xmlns="http://www.w3.org/2005/Atom">
@@ -1591,7 +1579,7 @@ class NormalizationTests(unittest.TestCase):
             <content src="https://example.com/external?token=secret"/>
           </entry>
         </feed>"""
-        with self.assertRaisesRegex(MonitorError, "unsafe external content"):
+        with pytest.raises(MonitorError, match="unsafe external content"):
             normalize_feed(credential_source)
 
     def test_feed_relative_entry_link_is_explicitly_rejected(self) -> None:
@@ -1599,31 +1587,31 @@ class NormalizationTests(unittest.TestCase):
             xml:base="https://example.com/">
           <entry><id>tag:example,1</id><link rel="alternate" href="post/1"/></entry>
         </feed>"""
-        with self.assertRaisesRegex(MonitorError, "absolute HTTP"):
+        with pytest.raises(MonitorError, match="absolute HTTP"):
             normalize_feed(relative)
 
     def test_feed_rejects_entities_malformed_and_type_mismatch(self) -> None:
-        with self.assertRaisesRegex(MonitorError, "DOCTYPE"):
+        with pytest.raises(MonitorError, match="DOCTYPE"):
             normalize_content(
                 b'<?xml version="1.0"?><!DOCTYPE rss [<!ENTITY x "x">]><rss/>',
                 content_type="application/rss+xml",
             )
-        with self.assertRaises(MonitorError):
+        with pytest.raises(MonitorError):
             normalize_content(
                 b"<?xml version='1.0'?><rss><item>",
                 content_type="application/rss+xml",
             )
-        with self.assertRaisesRegex(MonitorError, "does not match"):
+        with pytest.raises(MonitorError, match="does not match"):
             normalize_content(b"%PDF-1.4\n%%EOF", content_type="text/html")
         utf16 = '<?xml version="1.0"?><rss><channel/></rss>'.encode("utf-16")
-        with self.assertRaisesRegex(MonitorError, "UTF-16/32"):
+        with pytest.raises(MonitorError, match="UTF-16/32"):
             normalize_feed(utf16)
         unsafe_link = (
             b"<rss><channel><item><guid>1</guid>"
             b"<link>https://example.com/?to"
             b"ken=fixture</link></item></channel></rss>"
         )
-        with self.assertRaisesRegex(MonitorError, "unsafe link"):
+        with pytest.raises(MonitorError, match="unsafe link"):
             normalize_content(unsafe_link, content_type="application/rss+xml")
 
     def test_html_wide_element_count_is_bounded(self) -> None:
@@ -1632,7 +1620,7 @@ class NormalizationTests(unittest.TestCase):
         # html_normalizer.MAX_NODES and drive excessive memory use in the
         # tree walks. This must fail closed rather than parse unboundedly.
         wide = b"<html><body>" + b"<p>x</p>" * 60_000 + b"</body></html>"
-        with self.assertRaisesRegex(MonitorError, "too many elements"):
+        with pytest.raises(MonitorError, match="too many elements"):
             normalize_content(wide, content_type="text/html")
 
     def test_html_deep_nesting_is_bounded(self) -> None:
@@ -1647,19 +1635,19 @@ class NormalizationTests(unittest.TestCase):
             + b"</div>" * 300
             + b"</body></html>"
         )
-        with self.assertRaisesRegex(MonitorError, "nesting is too deep"):
+        with pytest.raises(MonitorError, match="nesting is too deep"):
             normalize_content(deep, content_type="text/html")
 
     def test_text_pdf_and_pdf_failures(self) -> None:
         pdf = _text_pdf(b"(Hello PDF) Tj")
         result = normalize_content(pdf, content_type="application/pdf")
-        self.assertEqual("pdf", result.kind)
-        self.assertIn("Hello PDF", result.text)
+        assert result.kind == "pdf"
+        assert "Hello PDF" in result.text
         encrypted = b"%PDF-1.4\n1 0 obj << /Encrypt 2 0 R >> endobj\n%%EOF"
-        with self.assertRaisesRegex(MonitorError, "encrypted"):
+        with pytest.raises(MonitorError, match="encrypted"):
             normalize_content(encrypted, content_type="application/pdf")
         image_only = _image_only_pdf()
-        with self.assertRaisesRegex(MonitorError, "image-only"):
+        with pytest.raises(MonitorError, match="image-only"):
             normalize_content(image_only, content_type="application/pdf")
 
     def test_pdf_parser_is_lazy_and_reports_a_missing_capability(self) -> None:
@@ -1678,7 +1666,8 @@ class NormalizationTests(unittest.TestCase):
             level: int = 0,
         ) -> object:
             if name == "pypdf" or name.startswith("pypdf."):
-                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+                msg = f"No module named {name!r}"
+                raise ModuleNotFoundError(msg, name=name)
             return original_import(name, globals, locals, fromlist, level)
 
         with patch("builtins.__import__", new=reject_pypdf):
@@ -1686,8 +1675,8 @@ class NormalizationTests(unittest.TestCase):
                 b"<html><body><main>HTML remains available</main></body></html>",
                 content_type="text/html",
             )
-            self.assertIn("HTML remains available", html.text)
-            with self.assertRaisesRegex(MonitorError, "pdf_parser_unavailable"):
+            assert "HTML remains available" in html.text
+            with pytest.raises(MonitorError, match="pdf_parser_unavailable"):
                 normalize_content(pdf, content_type="application/pdf")
 
     def test_generated_text_pdf_with_filtered_images_is_extracted(self) -> None:
@@ -1734,7 +1723,7 @@ class NormalizationTests(unittest.TestCase):
 
         result = normalize_content(output.getvalue(), content_type="application/pdf")
 
-        self.assertIn("Text with images", result.text)
+        assert "Text with images" in result.text
 
     def test_pdf_image_classification_ignores_nested_and_string_markers(
         self,
@@ -1752,7 +1741,7 @@ class NormalizationTests(unittest.TestCase):
                         extra=marker + b" /Filter /ASCIIHexDecode",
                     )
                 )
-                with self.assertRaisesRegex(MonitorError, "filter"):
+                with pytest.raises(MonitorError, match="filter"):
                     normalize_content(pdf, content_type="application/pdf")
 
     def test_pdf_tj_array_hex_strings_are_not_silently_dropped(self) -> None:
@@ -1762,7 +1751,7 @@ class NormalizationTests(unittest.TestCase):
         # stable even when the hex-encoded content changes.
         mixed = _text_pdf(b"[(Hello ) <576f726c64>] TJ")
         result = normalize_content(mixed, content_type="application/pdf")
-        self.assertIn("Hello World", result.text)
+        assert "Hello World" in result.text
         before = normalize_content(
             _text_pdf(b"[(Total: ) <30303030>] TJ"),
             content_type="application/pdf",
@@ -1771,9 +1760,9 @@ class NormalizationTests(unittest.TestCase):
             _text_pdf(b"[(Total: ) <39393939>] TJ"),
             content_type="application/pdf",
         )
-        self.assertIn("Total: 0000", before.text)
-        self.assertIn("Total: 9999", after.text)
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert "Total: 0000" in before.text
+        assert "Total: 9999" in after.text
+        assert before.normalized_hash != after.normalized_hash
 
     def test_pdf_quote_operators_are_not_silently_dropped(self) -> None:
         # ' (move to next line, show text) and " (set spacing, move to next
@@ -1789,15 +1778,15 @@ class NormalizationTests(unittest.TestCase):
             _text_pdf(b"(Header) Tj (New status) '"),
             content_type="application/pdf",
         )
-        self.assertIn("Old status", before.text)
-        self.assertIn("New status", after.text)
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert "Old status" in before.text
+        assert "New status" in after.text
+        assert before.normalized_hash != after.normalized_hash
 
         double_quote = normalize_content(
             _text_pdf(b'(Header) Tj 0 0 (Quoted status) "'),
             content_type="application/pdf",
         )
-        self.assertIn("Quoted status", double_quote.text)
+        assert "Quoted status" in double_quote.text
 
     def test_pdf_et_inside_a_string_operand_does_not_truncate_the_text_block(
         self,
@@ -1813,9 +1802,9 @@ class NormalizationTests(unittest.TestCase):
             _text_pdf(b"(status ET new) Tj"),
             content_type="application/pdf",
         )
-        self.assertIn("status ET old", before.text)
-        self.assertIn("status ET new", after.text)
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert "status ET old" in before.text
+        assert "status ET new" in after.text
+        assert before.normalized_hash != after.normalized_hash
 
     def test_pdf_et_inside_a_name_token_does_not_truncate_the_text_block(
         self,
@@ -1831,9 +1820,9 @@ class NormalizationTests(unittest.TestCase):
             _text_pdf(b"/ETMarker BMC (New status) Tj EMC"),
             content_type="application/pdf",
         )
-        self.assertIn("Old status", before.text)
-        self.assertIn("New status", after.text)
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert "Old status" in before.text
+        assert "New status" in after.text
+        assert before.normalized_hash != after.normalized_hash
 
     def test_pdf_nested_parens_in_a_string_are_not_silently_dropped(self) -> None:
         # A literal string can contain balanced, unescaped nested parens
@@ -1849,9 +1838,9 @@ class NormalizationTests(unittest.TestCase):
             _text_pdf(b"(Stable) Tj (New (status)) Tj"),
             content_type="application/pdf",
         )
-        self.assertIn("Old (status)", before.text)
-        self.assertIn("New (status)", after.text)
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert "Old (status)" in before.text
+        assert "New (status)" in after.text
+        assert before.normalized_hash != after.normalized_hash
 
     def test_pdf_endstream_inside_a_string_operand_does_not_truncate_the_stream(
         self,
@@ -1875,10 +1864,10 @@ class NormalizationTests(unittest.TestCase):
             _text_pdf(stream(b"New edit")),
             content_type="application/pdf",
         )
-        self.assertIn("Stable", before.text)
-        self.assertIn("Old edit", before.text)
-        self.assertIn("New edit", after.text)
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert "Stable" in before.text
+        assert "Old edit" in before.text
+        assert "New edit" in after.text
+        assert before.normalized_hash != after.normalized_hash
 
     def test_pdf_stream_keyword_inside_a_stream_body_is_not_rescanned(self) -> None:
         body = b"(marker\nstream\ninside a string) Tj"
@@ -1888,11 +1877,11 @@ class NormalizationTests(unittest.TestCase):
             content_type="application/pdf",
         )
 
-        self.assertIn("stream", normalized.text)
+        assert "stream" in normalized.text
 
     def test_pdf_unterminated_string_fails_closed(self) -> None:
         pdf = _pdf(_pdf_stream(1, b"BT (unterminated Tj ET"))
-        with self.assertRaisesRegex(MonitorError, "pdf_malformed|malformed"):
+        with pytest.raises(MonitorError, match="pdf_malformed|malformed"):
             normalize_content(pdf, content_type="application/pdf")
 
     def test_standard_generated_font_pdf_is_extracted(self) -> None:
@@ -1933,8 +1922,8 @@ class NormalizationTests(unittest.TestCase):
         result = normalize_content(
             base64.b64decode(encoded), content_type="application/pdf"
         )
-        self.assertIn("Standard generated PDF", result.text)
-        self.assertIn("Price: 42 USD", result.text)
+        assert "Standard generated PDF" in result.text
+        assert "Price: 42 USD" in result.text
 
     def test_pdf_link_annotation_destination_only_change_is_not_missed(
         self,
@@ -1951,9 +1940,9 @@ class NormalizationTests(unittest.TestCase):
             _text_pdf_with_link(b"(Apply) Tj", uri="https://example.com/apply-v2"),
             content_type="application/pdf",
         )
-        self.assertIn("apply-v1", before.text)
-        self.assertIn("apply-v2", after.text)
-        self.assertNotEqual(before.normalized_hash, after.normalized_hash)
+        assert "apply-v1" in before.text
+        assert "apply-v2" in after.text
+        assert before.normalized_hash != after.normalized_hash
 
     def test_pdf_link_annotation_credential_destination_fails_closed(
         self,
@@ -1961,9 +1950,9 @@ class NormalizationTests(unittest.TestCase):
         pdf = _text_pdf_with_link(
             b"(Apply) Tj", uri="https://example.com/apply?token=secret123"
         )
-        with self.assertRaises(MonitorError) as captured:
+        with pytest.raises(MonitorError) as captured:
             normalize_content(pdf, content_type="application/pdf")
-        self.assertNotIn("secret123", str(captured.exception))
+        assert "secret123" not in str(captured.value)
 
     def test_pdf_link_annotation_nested_credential_destination_fails_closed(
         self,
@@ -1975,15 +1964,15 @@ class NormalizationTests(unittest.TestCase):
             "cb%3Faccess_token%3Dsecret123"
         )
         pdf = _text_pdf_with_link(b"(Apply) Tj", uri=destination)
-        with self.assertRaises(MonitorError) as captured:
+        with pytest.raises(MonitorError) as captured:
             normalize_content(pdf, content_type="application/pdf")
-        self.assertNotIn("secret123", str(captured.exception))
+        assert "secret123" not in str(captured.value)
 
     def test_pdf_link_annotation_non_web_scheme_is_omitted(self) -> None:
         pdf = _text_pdf_with_link(b"(Apply) Tj", uri="mailto:jobs@example.com")
         result = normalize_content(pdf, content_type="application/pdf")
-        self.assertIn("Apply", result.text)
-        self.assertNotIn("jobs@example.com", result.text)
+        assert "Apply" in result.text
+        assert "jobs@example.com" not in result.text
 
     def test_pdf_relative_link_action_fails_closed(self) -> None:
         # A /URI action with no scheme (e.g. "/apply-v1") is a relative
@@ -1992,7 +1981,7 @@ class NormalizationTests(unittest.TestCase):
         # fail closed instead of being silently omitted like a destination
         # change would otherwise go undetected.
         pdf = _text_pdf_with_link(b"(Apply) Tj", uri="/apply-v1")
-        with self.assertRaisesRegex(MonitorError, "pdf_relative_link_action"):
+        with pytest.raises(MonitorError, match="pdf_relative_link_action"):
             normalize_content(pdf, content_type="application/pdf")
 
     def test_pdf_indirect_length_reference_is_resolved(self) -> None:
@@ -2000,14 +1989,14 @@ class NormalizationTests(unittest.TestCase):
         # object holding the bare integer, not just a direct integer.
         pdf = _text_pdf(b"(Indirect length) Tj", indirect_length=True)
         result = normalize_content(pdf, content_type="application/pdf")
-        self.assertIn("Indirect length", result.text)
+        assert "Indirect length" in result.text
 
     def test_pdf_unresolvable_indirect_length_fails_closed(self) -> None:
         body = b"BT (Indirect length) Tj ET"
         pdf = _pdf(
             b"1 0 obj\n<< /Length 3 0 R >>\nstream\n" + body + b"\nendstream\nendobj\n"
         )
-        with self.assertRaisesRegex(MonitorError, "pdf_malformed|malformed"):
+        with pytest.raises(MonitorError, match="pdf_malformed|malformed"):
             normalize_content(pdf, content_type="application/pdf")
 
     def test_pdf_unsupported_filter_streams_are_rejected_not_skipped(self) -> None:
@@ -2030,9 +2019,9 @@ class NormalizationTests(unittest.TestCase):
                 2, b"28546f74616c3a20393939392947", extra=b"/Filter /ASCIIHexDecode"
             ),
         )
-        with self.assertRaisesRegex(MonitorError, "filter"):
+        with pytest.raises(MonitorError, match="filter"):
             normalize_content(before, content_type="application/pdf")
-        with self.assertRaisesRegex(MonitorError, "filter"):
+        with pytest.raises(MonitorError, match="filter"):
             normalize_content(after, content_type="application/pdf")
 
     def test_pdf_filter_beyond_a_fixed_lookbehind_window_is_still_detected(
@@ -2051,7 +2040,7 @@ class NormalizationTests(unittest.TestCase):
                 extra=b"/Filter /ASCIIHexDecode /Extra (" + padding + b")",
             )
         )
-        with self.assertRaisesRegex(MonitorError, "filter"):
+        with pytest.raises(MonitorError, match="filter"):
             normalize_content(pdf, content_type="application/pdf")
 
     def test_pdf_escaped_filter_key_cannot_bypass_decompression_bound(self) -> None:
@@ -2059,14 +2048,14 @@ class NormalizationTests(unittest.TestCase):
         # /Filter. It must be decoded before pypdf can inflate the stream.
         pdf = _escaped_filter_text_pdf(b"x" * 2_048)
 
-        with self.assertRaises(MonitorError) as raised:
+        with pytest.raises(MonitorError) as raised:
             extract_pdf_text(
                 pdf,
                 max_input_bytes=len(pdf),
                 max_decompressed_bytes=100,
             )
 
-        self.assertEqual("pdf_decompressed_too_large", raised.exception.code)
+        assert raised.value.code == "pdf_decompressed_too_large"
 
     def test_pdf_duplicate_filter_keys_fail_closed(self) -> None:
         compressed = zlib.compress(b"BT (bounded) Tj ET")
@@ -2078,25 +2067,22 @@ class NormalizationTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaises(MonitorError) as raised:
+        with pytest.raises(MonitorError) as raised:
             extract_pdf_text(pdf, max_input_bytes=len(pdf))
 
-        self.assertEqual("pdf_malformed", raised.exception.code)
+        assert raised.value.code == "pdf_malformed"
 
     def test_pdf_filter_name_value_is_not_misclassified_as_a_key(self) -> None:
-        self.assertEqual(
-            [],
-            _stream_filters(b"<< /Length 1 /Marker /Filter >>"),
-        )
+        assert _stream_filters(b"<< /Length 1 /Marker /Filter >>") == []
 
     def test_pdf_stream_dictionary_nesting_is_bounded(self) -> None:
         dictionary = b"<< /Length 1 /Metadata " + b"[" * 101 + b"/Value" + b"]" * 101
         dictionary += b" >>"
 
-        with self.assertRaises(MonitorError) as raised:
+        with pytest.raises(MonitorError) as raised:
             _stream_filters(dictionary)
 
-        self.assertEqual("pdf_malformed", raised.exception.code)
+        assert raised.value.code == "pdf_malformed"
 
     def test_pdf_truncated_flate_stream_fails_closed(self) -> None:
         # zlib.decompressobj() commonly returns partial output for truncated
@@ -2105,7 +2091,7 @@ class NormalizationTests(unittest.TestCase):
         compressed = zlib.compress(b"BT (Hello Flate PDF) Tj ET")
         truncated = compressed[:-4]
         pdf = _pdf(_pdf_stream(1, truncated, extra=b"/Filter /FlateDecode"))
-        with self.assertRaisesRegex(MonitorError, "truncated|malformed"):
+        with pytest.raises(MonitorError, match="truncated|malformed"):
             normalize_content(pdf, content_type="application/pdf")
 
     def test_pdf_stream_without_an_enclosing_object_fails_closed(self) -> None:
@@ -2114,7 +2100,7 @@ class NormalizationTests(unittest.TestCase):
         # either way, so this must reject rather than treat it as unfiltered
         # plain content.
         pdf = b"%PDF-1.4\nstream\nBT (Hello) Tj ET\nendstream\n%%EOF"
-        with self.assertRaisesRegex(MonitorError, "pdf_malformed|malformed"):
+        with pytest.raises(MonitorError, match="pdf_malformed|malformed"):
             normalize_content(pdf, content_type="application/pdf")
 
     def test_malformed_font_pdfs_are_rejected_not_mishashed(self) -> None:
@@ -2126,7 +2112,7 @@ class NormalizationTests(unittest.TestCase):
             b"3 0 obj\n<< /Length 20 >>\nstream\n"
             b"BT (Total: 0000) Tj ET\nendstream\nendobj\n%%EOF"
         )
-        with self.assertRaisesRegex(MonitorError, "malformed"):
+        with pytest.raises(MonitorError, match="malformed"):
             normalize_content(to_unicode, content_type="application/pdf")
 
         differences = (
@@ -2134,7 +2120,7 @@ class NormalizationTests(unittest.TestCase):
             b"2 0 obj\n<< /Length 20 >>\nstream\n"
             b"BT (Total: 0000) Tj ET\nendstream\nendobj\n%%EOF"
         )
-        with self.assertRaisesRegex(MonitorError, "malformed"):
+        with pytest.raises(MonitorError, match="malformed"):
             normalize_content(differences, content_type="application/pdf")
 
         named_encoding = (
@@ -2142,7 +2128,7 @@ class NormalizationTests(unittest.TestCase):
             b"2 0 obj\n<< /Length 20 >>\nstream\n"
             b"BT (Total: 0000) Tj ET\nendstream\nendobj\n%%EOF"
         )
-        with self.assertRaisesRegex(MonitorError, "malformed"):
+        with pytest.raises(MonitorError, match="malformed"):
             normalize_content(named_encoding, content_type="application/pdf")
 
         # A PDF name may encode letters with #xx escapes. The prior raw-byte
@@ -2154,7 +2140,7 @@ class NormalizationTests(unittest.TestCase):
             b"<< /Type /F#6fnt /Subtype /Type1 /Base#46ont /Symbol >>\n"
             b"endobj\n" + _pdf_stream(2, b"BT /F1 12 Tf <41> Tj ET") + b"%%EOF"
         )
-        with self.assertRaisesRegex(MonitorError, "malformed"):
+        with pytest.raises(MonitorError, match="malformed"):
             normalize_content(escaped_font_names, content_type="application/pdf")
 
         # A simple font can omit /Encoding and use its built-in encoding.
@@ -2167,7 +2153,7 @@ class NormalizationTests(unittest.TestCase):
                     + _pdf_stream(2, b"BT /F1 12 Tf <41> Tj ET")
                     + b"%%EOF"
                 )
-                with self.assertRaisesRegex(MonitorError, "malformed"):
+                with pytest.raises(MonitorError, match="malformed"):
                     normalize_content(built_in_encoding, content_type="application/pdf")
 
         # A composite (/Type0) font always routes character codes through a
@@ -2177,7 +2163,7 @@ class NormalizationTests(unittest.TestCase):
             b"2 0 obj\n<< /Length 20 >>\nstream\n"
             b"BT (Total: 0000) Tj ET\nendstream\nendobj\n%%EOF"
         )
-        with self.assertRaisesRegex(MonitorError, "malformed"):
+        with pytest.raises(MonitorError, match="malformed"):
             normalize_content(composite_font, content_type="application/pdf")
 
         # A compressed object stream can hide a font/Encoding dictionary,
@@ -2188,7 +2174,7 @@ class NormalizationTests(unittest.TestCase):
             b"2 0 obj\n<< /Length 20 >>\nstream\n"
             b"BT (Total: 0000) Tj ET\nendstream\nendobj\n%%EOF"
         )
-        with self.assertRaisesRegex(MonitorError, "malformed"):
+        with pytest.raises(MonitorError, match="malformed"):
             normalize_content(object_stream, content_type="application/pdf")
 
     def test_xhtml_with_xml_declaration_is_detected_as_html(self) -> None:
@@ -2200,23 +2186,23 @@ class NormalizationTests(unittest.TestCase):
             ),
             content_type="application/xhtml+xml",
         )
-        self.assertEqual("html", result.kind)
-        self.assertIn("Application open", result.text)
+        assert result.kind == "html"
+        assert "Application open" in result.text
 
 
 class DiffTests(unittest.TestCase):
     def test_unchanged_and_first_fetch_short_circuit(self) -> None:
         baseline = compare_content(None, "hello")
-        self.assertEqual("baseline_created", baseline.result)
-        self.assertFalse(baseline.should_summarize)
+        assert baseline.result == "baseline_created"
+        assert not baseline.should_summarize
         unchanged = compare_content("old", "new", previous_hash="a", current_hash="a")
-        self.assertEqual("unchanged", unchanged.result)
-        self.assertEqual((), unchanged.sections)
+        assert unchanged.result == "unchanged"
+        assert unchanged.sections == ()
 
     def test_noise_is_minor_but_important_patterns_are_candidates(self) -> None:
         noise = compare_content("Updated: 2026-07-30", "Updated: 2026-07-31")
-        self.assertEqual("minor", noise.result)
-        self.assertLess(noise.change_score, 35)
+        assert noise.result == "minor"
+        assert noise.change_score < 35
         important_cases = (
             ("Price: $10", "Price: $20"),
             ("Capacity: 10 GB", "Capacity: 20 GB"),
@@ -2227,8 +2213,8 @@ class DiffTests(unittest.TestCase):
         for before, after in important_cases:
             with self.subTest(before=before):
                 result = compare_content(before, after)
-                self.assertEqual("candidate_material", result.result)
-                self.assertTrue(result.should_summarize)
+                assert result.result == "candidate_material"
+                assert result.should_summarize
 
     def test_watch_focus_overrides_a_minor_verdict_outside_fixed_patterns(
         self,
@@ -2240,13 +2226,13 @@ class DiffTests(unittest.TestCase):
         # rather than silently advancing the baseline.
         before, after = "# CEO\nAlice", "# CEO\nBob"
         unfocused = compare_content(before, after)
-        self.assertEqual("minor", unfocused.result)
-        self.assertFalse(unfocused.should_summarize)
+        assert unfocused.result == "minor"
+        assert not unfocused.should_summarize
 
         focused = compare_content(before, after, watch_focus="executive changes")
-        self.assertEqual("candidate_material", focused.result)
-        self.assertTrue(focused.should_summarize)
-        self.assertIn("watch_focus_configured", focused.scoring_reasons)
+        assert focused.result == "candidate_material"
+        assert focused.should_summarize
+        assert "watch_focus_configured" in focused.scoring_reasons
 
         # A change clamped as pure noise (e.g. a bare "last updated" date)
         # must not be forced to candidate_material just because a focus is
@@ -2256,7 +2242,7 @@ class DiffTests(unittest.TestCase):
             "Updated: 2026-07-31",
             watch_focus="executive changes",
         )
-        self.assertEqual("minor", noise.result)
+        assert noise.result == "minor"
 
     def test_watch_focus_rescues_labeled_bare_numeric_noise_clamp(self) -> None:
         # A standalone numeric/date value with no label match against the
@@ -2266,20 +2252,20 @@ class DiffTests(unittest.TestCase):
         # discarded by the generic noise clamp.
         before, after = "# Valuation\n10", "# Valuation\n20"
         unfocused = compare_content(before, after)
-        self.assertEqual("minor", unfocused.result)
-        self.assertIn("noise_only", unfocused.scoring_reasons)
+        assert unfocused.result == "minor"
+        assert "noise_only" in unfocused.scoring_reasons
 
         focused = compare_content(before, after, watch_focus="valuation")
-        self.assertEqual("candidate_material", focused.result)
-        self.assertTrue(focused.should_summarize)
-        self.assertIn("watch_focus_configured", focused.scoring_reasons)
+        assert focused.result == "candidate_material"
+        assert focused.should_summarize
+        assert "watch_focus_configured" in focused.scoring_reasons
 
         # A focus that has nothing to do with this label must not rescue
         # it -- the noise clamp still applies when the focus doesn't match.
         unrelated_focus = compare_content(
             before, after, watch_focus="executive changes"
         )
-        self.assertEqual("minor", unrelated_focus.result)
+        assert unrelated_focus.result == "minor"
 
     def test_watch_focus_matches_short_cjk_terms(self) -> None:
         # A len(term) > 2 filter drops common two-character Japanese
@@ -2289,16 +2275,16 @@ class DiffTests(unittest.TestCase):
         # instead of being silently clamped as noise.
         before, after = "# 株価\n100", "# 株価\n101"
         unfocused = compare_content(before, after)
-        self.assertEqual("minor", unfocused.result)
-        self.assertIn("noise_only", unfocused.scoring_reasons)
+        assert unfocused.result == "minor"
+        assert "noise_only" in unfocused.scoring_reasons
 
         focused = compare_content(before, after, watch_focus="株価")
-        self.assertEqual("candidate_material", focused.result)
-        self.assertTrue(focused.should_summarize)
-        self.assertIn("watch_focus_configured", focused.scoring_reasons)
+        assert focused.result == "candidate_material"
+        assert focused.should_summarize
+        assert "watch_focus_configured" in focused.scoring_reasons
 
         unrelated_focus = compare_content(before, after, watch_focus="為替")
-        self.assertEqual("minor", unrelated_focus.result)
+        assert unrelated_focus.result == "minor"
 
     def test_watch_focus_matches_short_uppercase_acronym(self) -> None:
         # A len(term) > 2 filter also drops common two-letter Latin
@@ -2308,19 +2294,19 @@ class DiffTests(unittest.TestCase):
         # noise.
         before, after = "# AI\n100", "# AI\n101"
         unfocused = compare_content(before, after)
-        self.assertEqual("minor", unfocused.result)
-        self.assertIn("noise_only", unfocused.scoring_reasons)
+        assert unfocused.result == "minor"
+        assert "noise_only" in unfocused.scoring_reasons
 
         focused = compare_content(before, after, watch_focus="AI")
-        self.assertEqual("candidate_material", focused.result)
-        self.assertTrue(focused.should_summarize)
-        self.assertIn("watch_focus_configured", focused.scoring_reasons)
+        assert focused.result == "candidate_material"
+        assert focused.should_summarize
+        assert "watch_focus_configured" in focused.scoring_reasons
 
         lowercase_focus = compare_content(before, after, watch_focus="ai")
-        self.assertEqual("minor", lowercase_focus.result)
+        assert lowercase_focus.result == "minor"
 
         unrelated_focus = compare_content(before, after, watch_focus="HR")
-        self.assertEqual("minor", unrelated_focus.result)
+        assert unrelated_focus.result == "minor"
 
     def test_label_value_split_across_lines_is_still_material(self) -> None:
         # A label and its value are often on separate lines (a heading
@@ -2329,15 +2315,15 @@ class DiffTests(unittest.TestCase):
         # there, and a bare numeric value alone would otherwise be clamped
         # as noise -- both must be covered via the section anchor.
         price = compare_content("# Price\n10", "# Price\n20")
-        self.assertEqual("candidate_material", price.result)
-        self.assertIn("price", price.scoring_reasons)
-        self.assertNotIn("noise_only", price.scoring_reasons)
+        assert price.result == "candidate_material"
+        assert "price" in price.scoring_reasons
+        assert "noise_only" not in price.scoring_reasons
         deadline = compare_content("# Deadline\n2026-01-01", "# Deadline\n2026-02-01")
-        self.assertEqual("candidate_material", deadline.result)
-        self.assertIn("eligibility", deadline.scoring_reasons)
+        assert deadline.result == "candidate_material"
+        assert "eligibility" in deadline.scoring_reasons
         japanese_price = compare_content("# 価格\n1000", "# 価格\n2000")
-        self.assertEqual("candidate_material", japanese_price.result)
-        self.assertIn("price", japanese_price.scoring_reasons)
+        assert japanese_price.result == "candidate_material"
+        assert "price" in japanese_price.scoring_reasons
 
     def test_large_rewrite_and_bounded_output(self) -> None:
         before = "\n".join(f"old line {index}" for index in range(500))
@@ -2347,10 +2333,10 @@ class DiffTests(unittest.TestCase):
             after,
             config=DiffConfig(max_diff_chars=1_000, max_sections=2),
         )
-        self.assertEqual("candidate_material", result.result)
-        self.assertTrue(result.truncated)
+        assert result.result == "candidate_material"
+        assert result.truncated
         rendered = str(result.as_dict())
-        self.assertLess(len(rendered), 3_000)
+        assert len(rendered) < 3000
 
     def test_oversized_input_short_circuits_instead_of_quadratic_diffing(self) -> None:
         before = "\n".join(["shared line"] * 40_000)
@@ -2360,14 +2346,14 @@ class DiffTests(unittest.TestCase):
             before, after, config=DiffConfig(max_diff_lines=20_000)
         )
         elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 2.0)
-        self.assertEqual("candidate_material", result.result)
-        self.assertTrue(result.should_summarize)
-        self.assertTrue(result.truncated)
-        self.assertIn("diff_budget_exceeded", result.scoring_reasons)
-        self.assertTrue(result.budget_exceeded)
-        self.assertTrue(result.as_dict()["budget_exceeded"])
-        self.assertEqual(1, len(result.sections))
+        assert elapsed < 2.0
+        assert result.result == "candidate_material"
+        assert result.should_summarize
+        assert result.truncated
+        assert "diff_budget_exceeded" in result.scoring_reasons
+        assert result.budget_exceeded
+        assert result.as_dict()["budget_exceeded"]
+        assert len(result.sections) == 1
 
     def test_budget_exceeded_is_false_for_ordinary_bounded_truncation(self) -> None:
         before = "\n".join(f"old line {index}" for index in range(500))
@@ -2377,8 +2363,8 @@ class DiffTests(unittest.TestCase):
             after,
             config=DiffConfig(max_diff_chars=1_000, max_sections=2),
         )
-        self.assertTrue(result.truncated)
-        self.assertFalse(result.budget_exceeded)
+        assert result.truncated
+        assert not result.budget_exceeded
 
     def test_repeated_lines_below_the_line_cap_still_short_circuit(self) -> None:
         # Below max_diff_lines, so the existing line-count guard cannot fire;
@@ -2390,9 +2376,9 @@ class DiffTests(unittest.TestCase):
             before, after, config=DiffConfig(max_diff_lines=20_000)
         )
         elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 1.0)
-        self.assertTrue(result.budget_exceeded)
-        self.assertTrue(result.truncated)
+        assert elapsed < 1.0
+        assert result.budget_exceeded
+        assert result.truncated
 
     def test_multi_value_repetition_also_bounded_by_complexity_budget(self) -> None:
         # A different adversarial shape than the single-value case above: ten
@@ -2407,8 +2393,8 @@ class DiffTests(unittest.TestCase):
             config=DiffConfig(max_diff_lines=20_000),
         )
         elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 1.0)
-        self.assertTrue(result.budget_exceeded)
+        assert elapsed < 1.0
+        assert result.budget_exceeded
 
     def test_unique_line_permutation_is_bounded_before_sequence_matcher(self) -> None:
         # Unique lines defeat frequency-based complexity estimates even though
@@ -2422,9 +2408,9 @@ class DiffTests(unittest.TestCase):
             config=DiffConfig(max_diff_lines=20_000),
         )
         elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 1.0)
-        self.assertTrue(result.budget_exceeded)
-        self.assertTrue(result.truncated)
+        assert elapsed < 1.0
+        assert result.budget_exceeded
+        assert result.truncated
 
     def test_ordinary_repetition_stays_under_the_complexity_budget(self) -> None:
         before_lines = (
@@ -2434,8 +2420,8 @@ class DiffTests(unittest.TestCase):
             ["separator"] * 500 + ["Price: $20"] + [f"row {i}" for i in range(500)]
         )
         result = compare_content("\n".join(before_lines), "\n".join(after_lines))
-        self.assertFalse(result.budget_exceeded)
-        self.assertIn("price", result.scoring_reasons)
+        assert not result.budget_exceeded
+        assert "price" in result.scoring_reasons
 
     def test_signal_bearing_section_survives_section_count_truncation(self) -> None:
         before_lines: list[str] = []
@@ -2454,11 +2440,9 @@ class DiffTests(unittest.TestCase):
             "\n".join(after_lines),
             config=DiffConfig(max_sections=30),
         )
-        self.assertTrue(result.truncated)
-        self.assertFalse(result.signal_section_truncated)
-        self.assertTrue(
-            any("Price: $20" in section.after for section in result.sections)
-        )
+        assert result.truncated
+        assert not result.signal_section_truncated
+        assert any("Price: $20" in section.after for section in result.sections)
 
     def test_signal_section_truncated_when_not_all_signals_fit(self) -> None:
         before_lines = []
@@ -2473,8 +2457,8 @@ class DiffTests(unittest.TestCase):
             "\n".join(after_lines),
             config=DiffConfig(max_sections=2),
         )
-        self.assertTrue(result.truncated)
-        self.assertTrue(result.signal_section_truncated)
+        assert result.truncated
+        assert result.signal_section_truncated
 
     def test_signal_section_truncated_when_tail_of_retained_section_is_cut(
         self,
@@ -2494,10 +2478,10 @@ class DiffTests(unittest.TestCase):
             "\n".join(after_lines),
             config=DiffConfig(max_diff_chars=1_500, max_sections=30),
         )
-        self.assertTrue(result.truncated)
-        self.assertTrue(result.signal_section_truncated)
+        assert result.truncated
+        assert result.signal_section_truncated
         for section in result.sections:
-            self.assertNotIn("Price: $999", "\n".join(section.after))
+            assert "Price: $999" not in "\n".join(section.after)
 
     def test_sections_contain_only_changed_lines_plus_separate_context(self) -> None:
         result = compare_content(
@@ -2505,10 +2489,10 @@ class DiffTests(unittest.TestCase):
             "# Product\nPrice $20\nAvailable",
         )
         section = result.sections[0]
-        self.assertEqual(("Price $10",), section.before)
-        self.assertEqual(("Price $20",), section.after)
-        self.assertIn("# Product", section.context)
-        self.assertEqual(16, len(section.section_id))
+        assert section.before == ("Price $10",)
+        assert section.after == ("Price $20",)
+        assert "# Product" in section.context
+        assert len(section.section_id) == 16
 
 
 if __name__ == "__main__":

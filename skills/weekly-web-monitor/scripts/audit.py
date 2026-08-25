@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from errors import MonitorError
 from models import utc_now
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 SENSITIVE_KEY_RE = re.compile(
     r"(?:body|content|credential|html|password|payload|secret|text|token|webhook)",
@@ -53,24 +55,29 @@ def make_audit_record(
     safe_metadata: dict[str, str] = {}
     for key, value in (metadata or {}).items():
         if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key):
+            msg = "audit_invalid"
             raise MonitorError(
-                "audit_invalid", "audit metadata key is not lower snake case"
+                msg, "audit metadata key is not lower snake case"
             )
         if SENSITIVE_KEY_RE.search(key):
+            msg = "audit_sensitive_field"
             raise MonitorError(
-                "audit_sensitive_field",
+                msg,
                 "audit metadata key may contain sensitive content",
             )
         rendered = str(value)
         if len(rendered) > 200:
+            msg = "audit_field_too_long"
             raise MonitorError(
-                "audit_field_too_long", "audit metadata value exceeds 200 characters"
+                msg, "audit metadata value exceeds 200 characters"
             )
         safe_metadata[key] = rendered
     if not re.fullmatch(r"[a-z][a-z0-9_.-]{0,99}", event_type):
-        raise MonitorError("audit_invalid", "audit event_type is invalid")
+        msg = "audit_invalid"
+        raise MonitorError(msg, "audit event_type is invalid")
     if outcome not in {"attempted", "failed", "skipped", "succeeded"}:
-        raise MonitorError("audit_invalid", "audit outcome is invalid")
+        msg = "audit_invalid"
+        raise MonitorError(msg, "audit outcome is invalid")
     return AuditRecord(
         event_type=event_type,
         target_id=target_id,

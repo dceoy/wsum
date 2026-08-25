@@ -5,13 +5,16 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import pathlib
 import re
 import sys
-from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from errors import MonitorError
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 PRICE_RE = re.compile(
     r"(?:[$€£¥￥]\s?\d[\d,.]*|\d[\d,.]*\s?(?:円|usd|eur|gbp|jpy)|"
@@ -63,22 +66,28 @@ class DiffConfig:
 
     def __post_init__(self) -> None:
         if not 0 <= self.minor_threshold < self.high_threshold <= 100:
-            raise MonitorError("invalid_configuration", "diff thresholds are invalid")
+            msg = "invalid_configuration"
+            raise MonitorError(msg, "diff thresholds are invalid")
         if not 1_000 <= self.max_diff_chars <= 100_000:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "max_diff_chars must be 1000-100000"
+                msg, "max_diff_chars must be 1000-100000"
             )
         if not 1 <= self.max_sections <= 100:
-            raise MonitorError("invalid_configuration", "max_sections must be 1-100")
+            msg = "invalid_configuration"
+            raise MonitorError(msg, "max_sections must be 1-100")
         if not 0 <= self.context_lines <= 5:
-            raise MonitorError("invalid_configuration", "context_lines must be 0-5")
+            msg = "invalid_configuration"
+            raise MonitorError(msg, "context_lines must be 0-5")
         if not 1_000 <= self.max_diff_lines <= 200_000:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "max_diff_lines must be 1000-200000"
+                msg, "max_diff_lines must be 1000-200000"
             )
         if not 100_000 <= self.max_diff_complexity <= 50_000_000:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration",
+                msg,
                 "max_diff_complexity must be 100000-50000000",
             )
 
@@ -87,15 +96,17 @@ class DiffConfig:
         allowed = cls.__dataclass_fields__.keys()
         unknown = set(value) - set(allowed)
         if unknown:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration",
+                msg,
                 f"unknown diff configuration: {', '.join(sorted(unknown))}",
             )
         try:
             return cls(**{key: int(raw) for key, raw in value.items()})
         except (TypeError, ValueError) as exc:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "diff configuration values must be integers"
+                msg, "diff configuration values must be integers"
             ) from exc
 
 
@@ -155,7 +166,7 @@ class DiffResult:
 def _anchor(lines: list[str], position: int) -> str:
     for index in range(min(position, len(lines) - 1), -1, -1):
         line = lines[index].strip()
-        if line.startswith("#") or line.startswith("ENTRY "):
+        if line.startswith(("#", "ENTRY ")):
             return line[:300]
     if 0 <= position < len(lines):
         return lines[position][:300]
@@ -504,18 +515,13 @@ def compare_content(
 
 def _main(argv: list[str]) -> int:
     if len(argv) != 3:
-        print("usage: diff.py PREVIOUS CURRENT", file=sys.stderr)
         return 2
     try:
-        with open(argv[1], encoding="utf-8") as previous_stream:
-            previous = previous_stream.read()
-        with open(argv[2], encoding="utf-8") as current_stream:
-            current = current_stream.read()
-        result = compare_content(previous, current)
+        previous = pathlib.Path(argv[1]).read_text(encoding="utf-8")
+        current = pathlib.Path(argv[2]).read_text(encoding="utf-8")
+        compare_content(previous, current)
     except OSError:
-        print(json.dumps({"error": {"code": "input_read_failed", "retryable": False}}))
         return 1
-    print(json.dumps(result.as_dict(), ensure_ascii=False, sort_keys=True))
     return 0
 
 

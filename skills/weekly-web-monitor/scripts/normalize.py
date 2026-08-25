@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import codecs
 import hashlib
-import json
+import pathlib
 import re
 import sys
 import unicodedata
-from collections.abc import Iterable
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from errors import MonitorError
 from feed_normalizer import normalize_feed
 from html_normalizer import normalize_html
 from pdf_normalizer import extract_pdf_text
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 NORMALIZATION_VERSION = "2026-01"
 HASH_ALGORITHM = "sha256"
@@ -40,8 +42,7 @@ class NormalizedContent:
 
 def sniff_content_kind(body: bytes) -> str:
     sample = body[:8_192]
-    if sample.startswith(codecs.BOM_UTF8):
-        sample = sample[len(codecs.BOM_UTF8) :]
+    sample = sample.removeprefix(codecs.BOM_UTF8)
     sample = sample.lstrip()
     lowered = sample.lower()
     if body.startswith(b"%PDF-"):
@@ -61,7 +62,8 @@ def sniff_content_kind(body: bytes) -> str:
         return "html"
     if sample:
         return "text"
-    raise MonitorError("empty_response", "response body is empty")
+    msg = "empty_response"
+    raise MonitorError(msg, "response body is empty")
 
 
 def declared_content_kind(content_type: str) -> str:
@@ -101,8 +103,9 @@ def _decode_strict(body: bytes, codec_name: str) -> str:
     try:
         return body.decode(codec_name)
     except UnicodeDecodeError as exc:
+        msg = "malformed_text"
         raise MonitorError(
-            "malformed_text", "document bytes are not valid for the detected charset"
+            msg, "document bytes are not valid for the detected charset"
         ) from exc
 
 
@@ -134,16 +137,19 @@ def _decode_text(body: bytes, charset: str = "") -> str:
         return _decode_strict(body, "utf-16")
     match = CHARSET_RE.search(body[:4_096])
     if match is None and declared_unsupported:
-        raise MonitorError("unsupported_charset", "document charset is unsupported")
+        msg = "unsupported_charset"
+        raise MonitorError(msg, "document charset is unsupported")
     encoding = match.group(1).decode("ascii") if match else "utf-8"
     try:
         codec = codecs.lookup(encoding)
     except LookupError as exc:
+        msg = "unsupported_charset"
         raise MonitorError(
-            "unsupported_charset", "document charset is unsupported"
+            msg, "document charset is unsupported"
         ) from exc
     if codec.name not in _ALLOWED_CHARSET_CODECS:
-        raise MonitorError("unsupported_charset", "document charset is unsupported")
+        msg = "unsupported_charset"
+        raise MonitorError(msg, "document charset is unsupported")
     return _decode_strict(body, codec.name)
 
 
@@ -155,15 +161,18 @@ def _normalize_plain_text(body: bytes, charset: str = "") -> str:
     ]
     normalized = "\n".join(line for line in lines if line)
     if not normalized:
-        raise MonitorError("empty_extraction", "text extraction produced no content")
+        msg = "empty_extraction"
+        raise MonitorError(msg, "text extraction produced no content")
     return normalized
 
 
 def hash_normalized(kind: str, text: str) -> str:
     if kind not in {"feed", "html", "pdf", "text"}:
-        raise MonitorError("invalid_content", "normalized content kind is invalid")
+        msg = "invalid_content"
+        raise MonitorError(msg, "normalized content kind is invalid")
     if not isinstance(text, str) or not text:
-        raise MonitorError("empty_extraction", "normalized text is empty")
+        msg = "empty_extraction"
+        raise MonitorError(msg, "normalized text is empty")
     return hashlib.sha256(
         f"{NORMALIZATION_VERSION}\n{kind}\n{text}".encode()
     ).hexdigest()
@@ -181,30 +190,32 @@ def normalize_content(
     max_input_bytes: int = 10_000_000,
 ) -> NormalizedContent:
     if not isinstance(body, bytes):
-        raise MonitorError("invalid_content", "content must be bytes")
+        msg = "invalid_content"
+        raise MonitorError(msg, "content must be bytes")
     if not 1_024 <= max_input_bytes <= 50_000_000:
+        msg = "invalid_configuration"
         raise MonitorError(
-            "invalid_configuration", "normalization input limit is invalid"
+            msg, "normalization input limit is invalid"
         )
     if len(body) > max_input_bytes:
+        msg = "response_too_large"
         raise MonitorError(
-            "response_too_large", "content exceeds the normalization input limit"
+            msg, "content exceeds the normalization input limit"
         )
     sniffed = sniff_content_kind(body)
     declared = declared_content_kind(content_type)
     if declared == "unsupported":
+        msg = "unsupported_content_type"
         raise MonitorError(
-            "unsupported_content_type", "declared content type is unsupported"
+            msg, "declared content type is unsupported"
         )
     compatible = (
-        declared == "text"
-        or declared == sniffed
-        or declared == "xml"
-        and sniffed in {"feed", "xml"}
+        declared in {"text", sniffed} or (declared == "xml" and sniffed in {"feed", "xml"})
     )
     if not compatible:
+        msg = "content_type_mismatch"
         raise MonitorError(
-            "content_type_mismatch",
+            msg,
             f"declared {declared} content does not match detected {sniffed} content",
         )
     metadata: dict[str, str] = {}
@@ -213,7 +224,8 @@ def normalize_content(
     elif sniffed == "feed":
         text, metadata = normalize_feed(body, base_url=base_url)
     elif sniffed == "xml":
-        raise MonitorError("feed_unsupported", "XML document is not RSS or Atom")
+        msg = "feed_unsupported"
+        raise MonitorError(msg, "XML document is not RSS or Atom")
     elif sniffed == "html":
         text = normalize_html(
             _decode_text(body, charset),
@@ -237,15 +249,14 @@ def normalize_content(
 
 def _main(argv: list[str]) -> int:
     if len(argv) not in {2, 3}:
-        print("usage: normalize.py INPUT [CONTENT_TYPE]", file=sys.stderr)
         return 2
     try:
-        with open(argv[1], "rb") as stream:
-            result = normalize_content(
+        with pathlib.Path(argv[1]).open("rb") as stream:
+            normalize_content(
                 stream.read(), content_type=argv[2] if len(argv) == 3 else ""
             )
     except (OSError, MonitorError) as exc:
-        error = (
+        (
             exc.as_dict()
             if isinstance(exc, MonitorError)
             else {
@@ -254,9 +265,7 @@ def _main(argv: list[str]) -> int:
                 "retryable": False,
             }
         )
-        print(json.dumps({"error": error}, ensure_ascii=False))
         return 1
-    print(json.dumps(result.as_dict(), ensure_ascii=False, sort_keys=True))
     return 0
 
 

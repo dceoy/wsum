@@ -5,6 +5,7 @@ import unittest
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import support
 from errors import MonitorError
 from fetch_browser import BrowserFetchConfig, fetch_rendered
@@ -205,10 +206,10 @@ class BrowserFetcherTests(unittest.TestCase):
             requests=[FakeRequest("https://example.com")],
         )
         result, context, browser = self.run_fake(page)
-        self.assertIn(b"Rendered", result.body)
-        self.assertEqual("text/html", result.content_type)
-        self.assertTrue(context.closed)
-        self.assertTrue(browser.closed)
+        assert b"Rendered" in result.body
+        assert result.content_type == "text/html"
+        assert context.closed
+        assert browser.closed
 
     def test_final_url_fragment_set_by_page_js_is_canonicalized(self) -> None:
         # Page JavaScript can rewrite `location.hash` after load (e.g. a
@@ -228,11 +229,11 @@ class BrowserFetcherTests(unittest.TestCase):
             requests=[FakeRequest("https://example.com")],
         )
         result, _, _ = self.run_fake(page)
-        self.assertEqual("https://example.com/", result.final_url)
+        assert result.final_url == "https://example.com/"
         state = State.from_mapping(
             {"target_id": "t1", "validated_url": result.final_url}
         )
-        self.assertEqual("https://example.com/", state.validated_url)
+        assert state.validated_url == "https://example.com/"
 
     def test_private_subresource_and_redirect_are_denied(self) -> None:
         for private_url in (
@@ -248,7 +249,7 @@ class BrowserFetcherTests(unittest.TestCase):
             )
             with (
                 self.subTest(private_url=private_url),
-                self.assertRaisesRegex(MonitorError, "non-public"),
+                pytest.raises(MonitorError, match="non-public"),
             ):
                 self.run_fake(page)
 
@@ -258,7 +259,7 @@ class BrowserFetcherTests(unittest.TestCase):
             requests=[FakeRequest("https://example.com")],
             popup_requests=[FakeRequest("http://169.254.169.254/latest/meta-data")],
         )
-        with self.assertRaisesRegex(MonitorError, "non-public"):
+        with pytest.raises(MonitorError, match="non-public"):
             self.run_fake(page)
 
     def test_timeout_request_limit_and_rendered_size_fail(self) -> None:
@@ -267,7 +268,7 @@ class BrowserFetcherTests(unittest.TestCase):
             requests=[FakeRequest("https://example.com")],
             timeout=True,
         )
-        with self.assertRaisesRegex(MonitorError, "timeout"):
+        with pytest.raises(MonitorError, match="timeout"):
             self.run_fake(timeout_page)
         request_page = FakePage(
             html="<html></html>",
@@ -276,7 +277,7 @@ class BrowserFetcherTests(unittest.TestCase):
                 FakeRequest("https://example.com/two"),
             ],
         )
-        with self.assertRaisesRegex(MonitorError, "request limit"):
+        with pytest.raises(MonitorError, match="request limit"):
             self.run_fake(
                 request_page,
                 config=BrowserFetchConfig(
@@ -290,7 +291,7 @@ class BrowserFetcherTests(unittest.TestCase):
             html="<html>" + ("x" * 2_000) + "</html>",
             requests=[FakeRequest("https://example.com")],
         )
-        with self.assertRaisesRegex(MonitorError, "rendered DOM"):
+        with pytest.raises(MonitorError, match="rendered DOM"):
             self.run_fake(
                 large_page,
                 config=BrowserFetchConfig(
@@ -302,7 +303,7 @@ class BrowserFetcherTests(unittest.TestCase):
             )
 
     def test_browser_mode_fails_closed_without_verified_egress_pinning(self) -> None:
-        with self.assertRaisesRegex(MonitorError, "browser_egress_not_verified"):
+        with pytest.raises(MonitorError, match="browser_egress_not_verified"):
             fetch_rendered(
                 "https://example.com",
                 config=BrowserFetchConfig(),
@@ -315,9 +316,7 @@ class BrowserFetcherTests(unittest.TestCase):
                 sys.modules,
                 {"playwright": None, "playwright.sync_api": None},
             ),
-            self.assertRaisesRegex(
-                MonitorError, "browser mode requires the optional Playwright runtime"
-            ),
+            pytest.raises(MonitorError, match="browser mode requires the optional Playwright runtime"),
         ):
             fetch_rendered(
                 "https://example.com",
@@ -330,7 +329,7 @@ class BrowserFetcherTests(unittest.TestCase):
             )
 
     def test_browser_mode_fails_closed_without_verified_memory_bound(self) -> None:
-        with self.assertRaisesRegex(MonitorError, "browser_memory_bound_not_verified"):
+        with pytest.raises(MonitorError, match="browser_memory_bound_not_verified"):
             fetch_rendered(
                 "https://example.com",
                 config=BrowserFetchConfig(verified_egress_pinning=True),
@@ -338,9 +337,7 @@ class BrowserFetcherTests(unittest.TestCase):
             )
 
     def test_browser_mode_fails_closed_without_verified_execution_bound(self) -> None:
-        with self.assertRaisesRegex(
-            MonitorError, "browser_execution_bound_not_verified"
-        ):
+        with pytest.raises(MonitorError, match="browser_execution_bound_not_verified"):
             fetch_rendered(
                 "https://example.com",
                 config=BrowserFetchConfig(

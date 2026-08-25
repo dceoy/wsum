@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 
 from errors import MonitorError
 from network_policy import has_credential_bearing_query
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HASH_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -40,66 +42,75 @@ def validate_timestamp(
     if allow_empty and not value:
         return ""
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except (TypeError, ValueError) as exc:
+        msg = "invalid_record"
         raise MonitorError(
-            "invalid_record", f"{field_name} must be an ISO-8601 timestamp"
+            msg, f"{field_name} must be an ISO-8601 timestamp"
         ) from exc
     if parsed.tzinfo is None:
-        raise MonitorError("invalid_record", f"{field_name} must include a timezone")
+        msg = "invalid_record"
+        raise MonitorError(msg, f"{field_name} must include a timezone")
     return value
 
 
 def validate_http_url(value: str, field_name: str = "url") -> str:
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        msg = "invalid_record"
         raise MonitorError(
-            "invalid_record", f"{field_name} contains control characters"
+            msg, f"{field_name} contains control characters"
         )
     try:
         parsed = urlsplit(value)
         port = parsed.port
     except (TypeError, ValueError) as exc:
-        raise MonitorError("invalid_record", f"{field_name} is malformed") from exc
+        msg = "invalid_record"
+        raise MonitorError(msg, f"{field_name} is malformed") from exc
     if (
         parsed.scheme.lower() not in {"http", "https"}
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
-        or port is not None
-        and not 1 <= port <= 65535
+        or (port is not None
+        and not 1 <= port <= 65535)
     ):
+        msg = "invalid_record"
         raise MonitorError(
-            "invalid_record",
+            msg,
             f"{field_name} must be an HTTP(S) URL without embedded credentials",
         )
     if has_credential_bearing_query(parsed.query, allow_path_relative=True):
+        msg = "invalid_record"
         raise MonitorError(
-            "invalid_record",
+            msg,
             f"{field_name} must not contain credential-like query parameters",
         )
     if parsed.fragment:
+        msg = "invalid_record"
         raise MonitorError(
-            "invalid_record",
+            msg,
             f"{field_name} must not contain a URL fragment",
         )
     host = (parsed.hostname or "").lower()
     decoded_path = unquote(parsed.path)
     if (
-        host == "hooks.slack.com"
-        and decoded_path.startswith("/services/")
-        or host in {"discord.com", "discordapp.com"}
-        and "/api/webhooks/" in decoded_path
+        (host == "hooks.slack.com"
+        and decoded_path.startswith("/services/"))
+        or (host in {"discord.com", "discordapp.com"}
+        and "/api/webhooks/" in decoded_path)
     ):
+        msg = "invalid_record"
         raise MonitorError(
-            "invalid_record", f"{field_name} must not be a webhook credential URL"
+            msg, f"{field_name} must not be a webhook credential URL"
         )
     return value
 
 
 def validate_target_id(value: str) -> str:
     if not isinstance(value, str) or not TARGET_ID_RE.fullmatch(value):
+        msg = "invalid_record"
         raise MonitorError(
-            "invalid_record",
+            msg,
             "target_id must contain only letters, digits, dot, underscore, or hyphen",
         )
     return value
@@ -114,7 +125,8 @@ def _parse_bool(value: Any, field_name: str) -> bool:
             return True
         if normalized in {"false", "0", "no"}:
             return False
-    raise MonitorError("invalid_record", f"{field_name} must be a boolean")
+    msg = "invalid_record"
+    raise MonitorError(msg, f"{field_name} must be a boolean")
 
 
 def _parse_selectors(value: Any) -> tuple[str, ...]:
@@ -127,13 +139,15 @@ def _parse_selectors(value: Any) -> tuple[str, ...]:
     ):
         selectors = tuple(item.strip() for item in value if item.strip())
     else:
+        msg = "invalid_record"
         raise MonitorError(
-            "invalid_record",
+            msg,
             "exclude_selectors must be a comma-separated string or list",
         )
     if len(selectors) > 50 or any(len(item) > 500 for item in selectors):
+        msg = "invalid_record"
         raise MonitorError(
-            "invalid_record", "exclude_selectors exceeds the count or length limit"
+            msg, "exclude_selectors exceeds the count or length limit"
         )
     return selectors
 
@@ -160,14 +174,16 @@ class Target:
             or len(name) > 200
             or any(ord(char) < 32 or ord(char) == 127 for char in name)
         ):
+            msg = "invalid_record"
             raise MonitorError(
-                "invalid_record", f"target {target_id}: name must be 1-200 characters"
+                msg, f"target {target_id}: name must be 1-200 characters"
             )
         url = validate_http_url(str(value.get("url", "")).strip())
         fetch_mode = str(value.get("fetch_mode", "static") or "static").strip().lower()
         if fetch_mode not in FETCH_MODES:
+            msg = "invalid_record"
             raise MonitorError(
-                "invalid_record",
+                msg,
                 f"target {target_id}: fetch_mode must be static or browser",
             )
         include_selector = str(value.get("include_selector", "") or "").strip()
@@ -176,13 +192,15 @@ class Target:
             value.get("notification_group", "default") or "default"
         ).strip()
         if len(include_selector) > 500 or len(watch_focus) > 1_000:
+            msg = "invalid_record"
             raise MonitorError(
-                "invalid_record",
+                msg,
                 f"target {target_id}: selector or watch_focus is too long",
             )
         if not TARGET_ID_RE.fullmatch(notification_group):
+            msg = "invalid_record"
             raise MonitorError(
-                "invalid_record",
+                msg,
                 f"target {target_id}: notification_group has invalid characters",
             )
         return cls(
@@ -221,19 +239,22 @@ class State:
         validate_timestamp(timestamp, "last_checked_at", allow_empty=True)
         normalized_hash = str(value.get("normalized_hash", "") or "").strip().lower()
         if normalized_hash and not HASH_RE.fullmatch(normalized_hash):
+            msg = "invalid_record"
             raise MonitorError(
-                "invalid_record", f"state {target_id}: normalized_hash is invalid"
+                msg, f"state {target_id}: normalized_hash is invalid"
             )
         try:
             failures = int(value.get("consecutive_failures", 0) or 0)
         except (TypeError, ValueError) as exc:
+            msg = "invalid_record"
             raise MonitorError(
-                "invalid_record",
+                msg,
                 f"state {target_id}: consecutive_failures must be an integer",
             ) from exc
         if failures < 0:
+            msg = "invalid_record"
             raise MonitorError(
-                "invalid_record",
+                msg,
                 f"state {target_id}: consecutive_failures cannot be negative",
             )
         etag = str(value.get("etag", "") or "")
@@ -244,8 +265,9 @@ class State:
             or any(ord(char) < 32 or ord(char) == 127 for char in item)
             for item in (etag, last_modified, snapshot_ref)
         ):
+            msg = "invalid_record"
             raise MonitorError(
-                "invalid_record",
+                msg,
                 f"state {target_id}: validator or snapshot reference is invalid",
             )
         validated_url = str(value.get("validated_url", "") or "").strip()
@@ -290,15 +312,19 @@ class RunRecord:
 
     def __post_init__(self) -> None:
         if not self.run_id or len(self.run_id) > 200:
-            raise MonitorError("invalid_record", "run_id is required")
+            msg = "invalid_record"
+            raise MonitorError(msg, "run_id is required")
         validate_target_id(self.target_id)
         if self.result not in RUN_RESULTS:
-            raise MonitorError("invalid_record", "run result is invalid")
+            msg = "invalid_record"
+            raise MonitorError(msg, "run result is invalid")
         if not 0 <= self.change_score <= 100:
-            raise MonitorError("invalid_record", "change_score must be 0-100")
+            msg = "invalid_record"
+            raise MonitorError(msg, "change_score must be 0-100")
         if len(self.summary) > 2_000 or len(self.error_code) > 100:
+            msg = "invalid_record"
             raise MonitorError(
-                "invalid_record", "run summary or error_code is too long"
+                msg, "run summary or error_code is too long"
             )
         validate_timestamp(self.started_at, "started_at")
         validate_timestamp(self.finished_at, "finished_at")
@@ -320,15 +346,19 @@ class NotificationRecord:
 
     def __post_init__(self) -> None:
         if not HASH_RE.fullmatch(self.event_id):
-            raise MonitorError("invalid_record", "event_id must be a SHA-256 digest")
+            msg = "invalid_record"
+            raise MonitorError(msg, "event_id must be a SHA-256 digest")
         validate_target_id(self.target_id)
         if self.status not in NOTIFICATION_STATUSES:
-            raise MonitorError("invalid_record", "notification status is invalid")
+            msg = "invalid_record"
+            raise MonitorError(msg, "notification status is invalid")
         validate_timestamp(self.notified_at, "notified_at", allow_empty=True)
         if self.kind not in {"change", "failure"}:
-            raise MonitorError("invalid_record", "notification kind is invalid")
+            msg = "invalid_record"
+            raise MonitorError(msg, "notification kind is invalid")
         if len(self.last_error) > 200:
-            raise MonitorError("invalid_record", "last_error is too long")
+            msg = "invalid_record"
+            raise MonitorError(msg, "last_error is too long")
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

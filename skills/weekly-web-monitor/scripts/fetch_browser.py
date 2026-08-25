@@ -63,25 +63,30 @@ class BrowserFetchConfig:
 
     def __post_init__(self) -> None:
         if not 1 <= self.timeout_seconds <= 120:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "browser timeout must be 1-120 seconds"
+                msg, "browser timeout must be 1-120 seconds"
             )
         if not 1_024 <= self.max_rendered_bytes <= 50_000_000:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "browser rendered size limit is invalid"
+                msg, "browser rendered size limit is invalid"
             )
         if not 1 <= self.max_requests <= 1_000:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "browser request limit is invalid"
+                msg, "browser request limit is invalid"
             )
         if not 1_024 <= self.max_declared_resource_bytes <= 100_000_000:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration",
+                msg,
                 "browser declared resource size limit is invalid",
             )
         if len(self.allowed_hosts) > 100 or len(self.block_resource_types) > 20:
+            msg = "invalid_configuration"
             raise MonitorError(
-                "invalid_configuration", "browser host or resource policy is too large"
+                msg, "browser host or resource policy is too large"
             )
 
 
@@ -93,23 +98,26 @@ def fetch_rendered(
 ) -> FetchResult:
     active = config or BrowserFetchConfig()
     if not active.verified_egress_pinning:
+        msg = "browser_egress_not_verified"
         raise MonitorError(
-            "browser_egress_not_verified",
+            msg,
             "browser mode is blocked until verified network-level egress "
             "pinning (e.g. an external proxy or --host-resolver-rules) is "
             "configured; see references/security.md",
         )
     if not active.verified_memory_bound:
+        msg = "browser_memory_bound_not_verified"
         raise MonitorError(
-            "browser_memory_bound_not_verified",
+            msg,
             "browser mode is blocked until the browser process runs under a "
             "verified external hard memory limit (e.g. a container/cgroup "
             "memory cap); the rendered-size guard cannot bound Chromium's "
             "own DOM memory before it is measured, see references/security.md",
         )
     if not active.verified_execution_bound:
+        msg = "browser_execution_bound_not_verified"
         raise MonitorError(
-            "browser_execution_bound_not_verified",
+            msg,
             "browser mode is blocked until the browser process runs under a "
             "verified external wall-clock/liveness supervisor; "
             "page.evaluate()/page.content() have no timeout of their own, "
@@ -121,13 +129,14 @@ def fetch_rendered(
         url, allowed_hosts=active.allowed_hosts, resolver=resolver
     )
     try:
-        playwright_sync_api = cast(Any, importlib.import_module("playwright.sync_api"))
+        playwright_sync_api = cast("Any", importlib.import_module("playwright.sync_api"))
         PlaywrightError = playwright_sync_api.Error
         PlaywrightTimeoutError = playwright_sync_api.TimeoutError
         sync_playwright = playwright_sync_api.sync_playwright
     except ImportError as exc:
+        msg = "browser_runtime_unavailable"
         raise MonitorError(
-            "browser_runtime_unavailable",
+            msg,
             "browser mode requires the optional Playwright runtime",
         ) from exc
 
@@ -145,8 +154,8 @@ def fetch_rendered(
                 "--disable-default-apps",
                 "--disable-dev-shm-usage",
                 "--disable-extensions",
-                "--disable-features=InterestFeedContentSuggestions,"
-                "MediaRouter,OptimizationHints,Translate",
+                ("--disable-features=InterestFeedContentSuggestions,"
+                "MediaRouter,OptimizationHints,Translate"),
                 "--disable-sync",
                 "--metrics-recording-only",
                 "--no-first-run",
@@ -197,20 +206,23 @@ def fetch_rendered(
                         )
                 server_address_reader = getattr(response, "server_addr", None)
                 if not callable(server_address_reader):
+                    msg = "browser_peer_unavailable"
                     raise MonitorError(
-                        "browser_peer_unavailable",
+                        msg,
                         "browser runtime does not expose the response peer",
                     )
                 server_address = server_address_reader()
                 if not isinstance(server_address, dict):
+                    msg = "browser_peer_unavailable"
                     raise MonitorError(
-                        "browser_peer_unavailable",
+                        msg,
                         "browser response peer is unavailable",
                     )
                 ip_address = server_address.get("ipAddress")
                 if not isinstance(ip_address, str) or not ip_address:
+                    msg = "browser_peer_unavailable"
                     raise MonitorError(
-                        "browser_peer_unavailable",
+                        msg,
                         "browser response peer is unavailable",
                     )
                 guard.validate_response_peer(response.url, ip_address)
@@ -237,8 +249,9 @@ def fetch_rendered(
             if blocked_error:
                 raise blocked_error
             if response is None:
+                msg = "browser_navigation_failed"
                 raise MonitorError(
-                    "browser_navigation_failed", "browser produced no main response"
+                    msg, "browser produced no main response"
                 )
             validated = guard.validate_request(page.url)
             if response.status >= 400:
@@ -259,13 +272,15 @@ def fetch_rendered(
                 "() => new Blob([document.documentElement.outerHTML]).size"
             )
             if not isinstance(dom_bytes, int) or dom_bytes > active.max_rendered_bytes:
+                msg = "response_too_large"
                 raise MonitorError(
-                    "response_too_large", "rendered DOM exceeds the size limit"
+                    msg, "rendered DOM exceeds the size limit"
                 )
             rendered = page.content().encode("utf-8")
             if len(rendered) > active.max_rendered_bytes:
+                msg = "response_too_large"
                 raise MonitorError(
-                    "response_too_large", "rendered DOM exceeds the size limit"
+                    msg, "rendered DOM exceeds the size limit"
                 )
             return FetchResult(
                 result="fetched",
@@ -281,14 +296,16 @@ def fetch_rendered(
                 body=rendered,
             )
         except PlaywrightTimeoutError as exc:
+            msg = "fetch_timeout"
             raise MonitorError(
-                "fetch_timeout",
+                msg,
                 "browser execution exceeded its timeout",
                 retryable=True,
             ) from exc
         except PlaywrightError as exc:
+            msg = "browser_navigation_failed"
             raise MonitorError(
-                "browser_navigation_failed", "browser navigation failed"
+                msg, "browser navigation failed"
             ) from exc
         finally:
             context.close()

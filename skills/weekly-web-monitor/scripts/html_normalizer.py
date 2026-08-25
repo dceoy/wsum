@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from collections.abc import Iterable, Iterator
 from html.parser import HTMLParser
+from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlsplit
 
 from errors import MonitorError
 from network_policy import canonicalize_fragment_identity, canonicalize_url
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
 
 VOID_TAGS = frozenset(
     {
@@ -170,7 +173,7 @@ class _LinkContext:
 
 
 class Node:
-    __slots__ = ("tag", "attrs", "children", "parent")
+    __slots__ = ("attrs", "children", "parent", "tag")
 
     def __init__(
         self, tag: str, attrs: dict[str, str], parent: Node | None = None
@@ -194,13 +197,15 @@ class _TreeParser(HTMLParser):
         normalized_attrs = {name.lower(): value or "" for name, value in attrs if name}
         self.node_count += 1
         if self.node_count > MAX_NODES:
-            raise MonitorError("html_too_large", "HTML document has too many elements")
+            msg = "html_too_large"
+            raise MonitorError(msg, "HTML document has too many elements")
         node = Node(tag, normalized_attrs, self.current)
         self.current.children.append(node)
         if tag not in VOID_TAGS:
             if self.depth >= MAX_DEPTH:
+                msg = "html_too_large"
                 raise MonitorError(
-                    "html_too_large", "HTML document nesting is too deep"
+                    msg, "HTML document nesting is too deep"
                 )
             self.current = node
             self.depth += 1
@@ -229,7 +234,7 @@ class _TreeParser(HTMLParser):
 
 
 class SimpleSelector:
-    __slots__ = ("tag", "element_id", "classes", "attributes")
+    __slots__ = ("attributes", "classes", "element_id", "tag")
 
     def __init__(
         self,
@@ -261,7 +266,8 @@ class SimpleSelector:
 
 def _parse_simple_selector(value: str) -> SimpleSelector:
     if not value:
-        raise MonitorError("selector_invalid", "selector contains an empty component")
+        msg = "selector_invalid"
+        raise MonitorError(msg, "selector contains an empty component")
     match = SIMPLE_HEAD_RE.match(value)
     assert match is not None
     tag = match.group(0).lower()
@@ -274,12 +280,14 @@ def _parse_simple_selector(value: str) -> SimpleSelector:
         if marker in {"#", "."}:
             name_match = NAME_RE.match(value[position + 1 :])
             if not name_match:
-                raise MonitorError("selector_invalid", "selector name is invalid")
+                msg = "selector_invalid"
+                raise MonitorError(msg, "selector name is invalid")
             name = name_match.group(0)
             if marker == "#":
                 if element_id:
+                    msg = "selector_invalid"
                     raise MonitorError(
-                        "selector_invalid", "selector has more than one id"
+                        msg, "selector has more than one id"
                     )
                 element_id = name
             else:
@@ -289,7 +297,8 @@ def _parse_simple_selector(value: str) -> SimpleSelector:
         if marker == "[":
             end = value.find("]", position + 1)
             if end < 0:
-                raise MonitorError("selector_invalid", "selector attribute is unclosed")
+                msg = "selector_invalid"
+                raise MonitorError(msg, "selector attribute is unclosed")
             expression = value[position + 1 : end].strip()
             if "=" in expression:
                 name, expected = expression.split("=", 1)
@@ -299,28 +308,33 @@ def _parse_simple_selector(value: str) -> SimpleSelector:
                 name, expected = expression.lower(), None
             if (
                 not NAME_RE.fullmatch(name)
-                or expected is not None
-                and len(expected) > 200
+                or (expected is not None
+                and len(expected) > 200)
             ):
-                raise MonitorError("selector_invalid", "selector attribute is invalid")
+                msg = "selector_invalid"
+                raise MonitorError(msg, "selector attribute is invalid")
             attributes.append((name, expected))
             position = end + 1
             continue
+        msg = "selector_invalid"
         raise MonitorError(
-            "selector_invalid",
+            msg,
             "only tag, id, class, attribute, and descendant selectors are supported",
         )
     if not tag and not element_id and not classes and not attributes:
-        raise MonitorError("selector_invalid", "selector component is empty")
+        msg = "selector_invalid"
+        raise MonitorError(msg, "selector component is empty")
     return SimpleSelector(tag, element_id, tuple(classes), tuple(attributes))
 
 
 def parse_selector(value: str) -> tuple[SimpleSelector, ...]:
     if not isinstance(value, str) or not value.strip() or len(value) > 500:
-        raise MonitorError("selector_invalid", "selector is empty or too long")
+        msg = "selector_invalid"
+        raise MonitorError(msg, "selector is empty or too long")
     if any(char in value for char in ",>+~:{}"):
+        msg = "selector_invalid"
         raise MonitorError(
-            "selector_invalid",
+            msg,
             "selector uses unsupported combinators or pseudo-selectors",
         )
     return tuple(_parse_simple_selector(part) for part in value.split())
@@ -430,8 +444,9 @@ def _link_destination(node: Node, attr: str, ctx: _LinkContext) -> str:
             return ""
         raise
     if ctx.remaining <= 0:
+        msg = "html_too_large"
         raise MonitorError(
-            "html_too_large", "HTML document has too many link destinations"
+            msg, "HTML document has too many link destinations"
         )
     ctx.remaining -= 1
     fragment = canonicalize_fragment_identity(urlsplit(resolved).fragment)
@@ -463,8 +478,9 @@ def _document_base_url(root: Node, fetched_url: str) -> str:
         try:
             canonical, _ = canonicalize_url(urljoin(fetched_url, value))
         except ValueError as exc:
+            msg = "network_policy_denied"
             raise MonitorError(
-                "network_policy_denied", "document base URL is malformed"
+                msg, "document base URL is malformed"
             ) from exc
         return canonical
     return fetched_url
@@ -647,29 +663,33 @@ def normalize_html(
     strict_selectors: bool = True,
 ) -> str:
     if not isinstance(html, str):
-        raise MonitorError("html_invalid", "HTML input must be text")
+        msg = "html_invalid"
+        raise MonitorError(msg, "HTML input must be text")
     parser = _TreeParser()
     try:
         parser.feed(html)
         parser.close()
     except (AssertionError, ValueError) as exc:
+        msg = "html_malformed"
         raise MonitorError(
-            "html_malformed", "HTML parser rejected the document"
+            msg, "HTML parser rejected the document"
         ) from exc
 
     roots = [parser.root]
     if include_selector:
         roots = select(parser.root, include_selector)
         if not roots:
+            msg = "selector_no_match"
             raise MonitorError(
-                "selector_no_match", "include_selector matched no elements"
+                msg, "include_selector matched no elements"
             )
     excluded: set[Node] = set()
     for selector in exclude_selectors:
         matches = select(parser.root, selector)
         if strict_selectors and not matches:
+            msg = "selector_no_match"
             raise MonitorError(
-                "selector_no_match", "an exclude_selector matched no elements"
+                msg, "an exclude_selector matched no elements"
             )
         excluded.update(matches)
 
@@ -691,8 +711,8 @@ def normalize_html(
         if (
             not line
             or TIMESTAMP_ONLY_RE.fullmatch(line)
-            or len(line) <= 300
-            and COOKIE_TEXT_RE.search(line)
+            or (len(line) <= 300
+            and COOKIE_TEXT_RE.search(line))
         ):
             continue
         if BOILERPLATE_TEXT_RE.search(line) and line in lines:
@@ -700,7 +720,8 @@ def normalize_html(
         lines.append(line)
     normalized = "\n".join(lines).strip()
     if not normalized:
+        msg = "empty_extraction"
         raise MonitorError(
-            "empty_extraction", "HTML extraction produced no meaningful content"
+            msg, "HTML extraction produced no meaningful content"
         )
     return normalized
