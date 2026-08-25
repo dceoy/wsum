@@ -94,9 +94,7 @@ def _object_map(value: object, label: str) -> dict[str, object]:
     Raises:
         MonitorError: If ``value`` is not an object with string keys.
     """
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         msg = "local_storage_invalid"
         raise MonitorError(msg, f"{label} must be a JSON object")
     return cast("dict[str, object]", value)
@@ -347,9 +345,7 @@ class LocalSnapshotStore:
                 created.
         """
         if not (
-            _MIN_MAX_SNAPSHOT_BYTES
-            <= max_snapshot_bytes
-            <= _MAX_MAX_SNAPSHOT_BYTES
+            _MIN_MAX_SNAPSHOT_BYTES <= max_snapshot_bytes <= _MAX_MAX_SNAPSHOT_BYTES
         ):
             msg = "invalid_configuration"
             raise MonitorError(msg, "snapshot size limit is invalid")
@@ -380,9 +376,7 @@ class LocalSnapshotStore:
         candidate = (self._root / Path(*posix_path.parts)).resolve()
         if candidate != self._root and self._root not in candidate.parents:
             msg = "snapshot_invalid"
-            raise MonitorError(
-                msg, "snapshot path escapes the local runtime directory"
-            )
+            raise MonitorError(msg, "snapshot path escapes the local runtime directory")
         return candidate
 
     @staticmethod
