@@ -1,3 +1,5 @@
+"""Tests for the storage_outbox_replay module."""
+
 from __future__ import annotations
 
 import json
@@ -27,7 +29,10 @@ from tests import support
 
 
 class DriveTests(unittest.TestCase):
+    """Tests for DriveTests."""
+
     def test_snapshot_upload_lookup_and_duplicate_are_idempotent(self) -> None:
+        """Test that snapshot upload lookup and duplicate are idempotent."""
         connector = MemoryDriveConnector()
         store = SnapshotStore(connector)
         content = normalize_content(
@@ -40,6 +45,7 @@ class DriveTests(unittest.TestCase):
         assert content.text == store.load_normalized(reference)
 
     def test_failed_write_and_missing_snapshot_fail_closed(self) -> None:
+        """Test that failed write and missing snapshot fail closed."""
         connector = MemoryDriveConnector()
         connector.fail_upload = True
         store = SnapshotStore(connector)
@@ -58,6 +64,7 @@ class DriveTests(unittest.TestCase):
     def test_diff_artifact_is_versioned_by_previous_hash_on_a_b_c_b_cycle(
         self,
     ) -> None:
+        """Test that diff artifact is versioned by previous hash on a b c b cycle."""
         connector = MemoryDriveConnector()
         store = SnapshotStore(connector)
         content_a = normalize_content(b"<p>A</p>", content_type="text/html")
@@ -94,6 +101,7 @@ class DriveTests(unittest.TestCase):
         assert len(contents) == 2
 
     def test_retention_plan_never_deletes_current_reference(self) -> None:
+        """Test that retention plan never deletes current reference."""
         connector = MemoryDriveConnector()
         store = SnapshotStore(connector)
         references: list[str] = []
@@ -115,6 +123,7 @@ class DriveTests(unittest.TestCase):
         # the oldest snapshot still the active baseline). The whole group --
         # not just the file matching current_ref -- must be retained so its
         # metadata/diff audit artifacts survive alongside normalized.txt.
+        """Test that retention plan retains the entire current reference group."""
         connector = MemoryDriveConnector()
         store = SnapshotStore(connector)
         references: list[str] = []
@@ -144,7 +153,10 @@ class DriveTests(unittest.TestCase):
 
 
 class OutboxTests(unittest.TestCase):
+    """Tests for OutboxTests."""
+
     def test_sheet_parsing_duplicate_detection_and_raw_upsert(self) -> None:
+        """Test that sheet parsing duplicate detection and raw upsert."""
         record = enqueue_record(
             "e" * 64,
             "one",
@@ -158,6 +170,8 @@ class OutboxTests(unittest.TestCase):
             load_outbox([list(OUTBOX_COLUMNS), record.as_row(), record.as_row()])
 
         class Connector:
+            """A fake Drive/Sheets connector used to exercise the tested behavior."""
+
             def __init__(self) -> None:
                 self.values = [list(OUTBOX_COLUMNS)]
                 self.options: list[str] = []
@@ -184,6 +198,7 @@ class OutboxTests(unittest.TestCase):
         # row that merely contains every required column out of order would
         # otherwise load fine and then have the next write silently place
         # values (e.g. status/attempt_count) under the wrong headers.
+        """Test that rejects reordered outbox header columns."""
         reordered = [
             "event_id",
             "target_id",
@@ -206,6 +221,7 @@ class OutboxTests(unittest.TestCase):
             load_outbox([reordered, record.as_row()])
 
     def test_enqueue_success_duplicate_and_retry_states(self) -> None:
+        """Test that enqueue success duplicate and retry states."""
         record = enqueue_record(
             "a" * 64,
             "one",
@@ -262,6 +278,7 @@ class OutboxTests(unittest.TestCase):
             )
 
     def test_dispatch_requires_and_commits_sending_before_delivery(self) -> None:
+        """Test that dispatch requires and commits sending before delivery."""
         record = enqueue_record(
             "f" * 64,
             "one",
@@ -293,6 +310,7 @@ class OutboxTests(unittest.TestCase):
         assert calls == []
 
     def test_ambiguous_failure_remains_sending_after_persist_transition(self) -> None:
+        """Test that ambiguous failure remains sending after persist transition."""
         record = enqueue_record(
             "d" * 64,
             "one",
@@ -317,6 +335,7 @@ class OutboxTests(unittest.TestCase):
         assert result.last_error == "delivery_ambiguous"
 
     def test_poison_and_sending_are_not_delivered(self) -> None:
+        """Test that poison and sending are not delivered."""
         record = enqueue_record(
             "c" * 64,
             "one",
@@ -350,7 +369,10 @@ class OutboxTests(unittest.TestCase):
 
 
 class ReplayAndAuditTests(unittest.TestCase):
+    """Tests for ReplayAndAuditTests."""
+
     def test_replay_validates_hashes_and_expected_diff(self) -> None:
+        """Test that replay validates hashes and expected diff."""
         previous = normalize_content(b"<p>Price $10</p>", content_type="text/html")
         current = normalize_content(b"<p>Price $20</p>", content_type="text/html")
         expected = compare_content(
@@ -376,6 +398,7 @@ class ReplayAndAuditTests(unittest.TestCase):
             replay_manifest(tampered)
 
     def test_audit_rejects_sensitive_fields(self) -> None:
+        """Test that audit rejects sensitive fields."""
         digest = configuration_digest({"threshold": 3})
         record = make_audit_record(
             "configuration_loaded",
@@ -393,6 +416,7 @@ class ReplayAndAuditTests(unittest.TestCase):
             )
 
     def test_schemas_and_gas_dispatcher_are_safe_static_artifacts(self) -> None:
+        """Test that schemas and gas dispatcher are safe static artifacts."""
         schema_dir = (
             support.REPO_ROOT / ".claude" / "skills" / "weekly-web-monitor" / "schemas"
         )
@@ -415,6 +439,7 @@ class ReplayAndAuditTests(unittest.TestCase):
         # since that would leak one team's notification to another team's
         # channel. Only running the real Code.gs through a JS engine (not a
         # Python re-implementation of its logic) proves this.
+        """Test that gas dispatcher poisons the wrong notification group."""
         node = shutil.which("node")
         if not node:
             self.skipTest("node is not available to execute Code.gs")
@@ -513,6 +538,7 @@ console.log(JSON.stringify({{fetchCalls, byEventId}}));
         # it must be poisoned rather than dispatched again. Only running the
         # real Code.gs proves the upfront claimed-event index actually
         # covers "sending", not just "sent".
+        """Test that gas dispatcher treats existing sending row as delivery claim."""
         node = shutil.which("node")
         if not node:
             self.skipTest("node is not available to execute Code.gs")

@@ -1,6 +1,9 @@
+"""Tests for the sheets_models module."""
+
 from __future__ import annotations
 
 import unittest
+from typing import TYPE_CHECKING, Any, Never
 
 import pytest
 from errors import MonitorError
@@ -20,15 +23,24 @@ from sheets import (
     upsert_notification_payload,
 )
 
-from tests import support  # ruff: ignore[unused-import]
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 def table(headers: tuple[str, ...], *rows: list[object]) -> list[list[object]]:
+    """Build a values table with ``headers`` as the first row.
+
+    Returns:
+        The headers row followed by ``rows``.
+    """
     return [list(headers), *rows]
 
 
 class ModelsAndSheetsTests(unittest.TestCase):
+    """Tests for ModelsAndSheetsTests."""
+
     def test_loads_only_enabled_targets(self) -> None:
+        """Test that loads only enabled targets."""
         values = table(
             TARGET_COLUMNS,
             [
@@ -59,6 +71,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
         assert targets[0].exclude_selectors == (".ad", ".nav")
 
     def test_invalid_structure_empty_and_duplicate_ids_fail(self) -> None:
+        """Test that invalid structure empty and duplicate ids fail."""
         with pytest.raises(MonitorError, match="header row"):
             load_enabled_targets([])
         with pytest.raises(MonitorError, match="missing required columns"):
@@ -72,6 +85,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
             load_enabled_targets(duplicate)
 
     def test_rejects_bad_values_and_credential_urls(self) -> None:
+        """Test that rejects bad values and credential urls."""
         base = {
             "target_id": "one",
             "enabled": True,
@@ -92,6 +106,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
         # A fragment such as "#access_token=secret" survives that check and
         # is then copied verbatim into the summary model context and Slack
         # notification text, so fragments must be rejected outright.
+        """Test that rejects url fragments."""
         base = {
             "target_id": "one",
             "enabled": True,
@@ -105,6 +120,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
         # An exact-name denylist misses namespaced signed-URL parameters:
         # a signed target URL would otherwise reach the summary model
         # context and the Slack notification text.
+        """Test that rejects provider prefixed signed url credentials."""
         base = {
             "target_id": "one",
             "enabled": True,
@@ -119,9 +135,8 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "https://bucket.s3.amazonaws.com/key?AWSAccessKeyId=AKIAEXAMPLE",
         )
         for url in signed_urls:
-            with self.subTest(url=url):
-                with pytest.raises(MonitorError, match="credential-like"):
-                    Target.from_mapping({**base, "url": url})
+            with self.subTest(url=url), pytest.raises(MonitorError, match="credential-like"):
+                Target.from_mapping({**base, "url": url})
 
     def test_rejects_credential_bearing_urls_nested_in_query_values(self) -> None:
         # The outer query parameter name (e.g. "redirect") can be benign
@@ -129,6 +144,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
         # credential in its own query or userinfo; that nested URL would
         # otherwise reach the summary model context and Slack notification
         # text unexamined.
+        """Test that rejects credential bearing urls nested in query values."""
         base = {
             "target_id": "one",
             "enabled": True,
@@ -147,9 +163,8 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "cb%23access_token%3Dsecret"),
         )
         for url in nested_urls:
-            with self.subTest(url=url):
-                with pytest.raises(MonitorError, match="credential-like"):
-                    Target.from_mapping({**base, "url": url})
+            with self.subTest(url=url), pytest.raises(MonitorError, match="credential-like"):
+                Target.from_mapping({**base, "url": url})
 
     def test_rejects_nested_webhook_urls_in_query_values(self) -> None:
         # A nested URL's own userinfo/query/fragment were checked, but its
@@ -157,6 +172,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
         # still carry an encoded Slack/Discord webhook URL through
         # unexamined and later reach the summary model context and Slack
         # notification text.
+        """Test that rejects nested webhook urls in query values."""
         base = {
             "target_id": "one",
             "enabled": True,
@@ -170,9 +186,8 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "%2Fapi%2Fwebhooks%2F123456789%2Fabcdef"),
         )
         for url in nested_webhook_urls:
-            with self.subTest(url=url):
-                with pytest.raises(MonitorError, match="credential-like"):
-                    Target.from_mapping({**base, "url": url})
+            with self.subTest(url=url), pytest.raises(MonitorError, match="credential-like"):
+                Target.from_mapping({**base, "url": url})
 
     def test_rejects_nested_webhook_url_carried_in_a_fragment_value(self) -> None:
         # A nested URL's fragment was only checked for sensitive parameter
@@ -180,6 +195,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
         # itself an encoded Slack/Discord webhook URL passed through
         # unexamined; it must now recurse into fragment values the same way
         # it recurses into query values.
+        """Test that rejects nested webhook url carried in a fragment value."""
         base = {
             "target_id": "one",
             "enabled": True,
@@ -199,6 +215,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
         # (rather than "#next=<url>") parsed as a single blank-valued
         # parameter name and _split_nested_url never inspected it, letting
         # a credential-bearing target reach the summary model and Slack.
+        """Test that rejects a fragment that is itself a nested credential url."""
         base = {
             "target_id": "one",
             "enabled": True,
@@ -219,6 +236,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
         # ("//host/...", a network-path reference resolved against the
         # current scheme) or double-encoded nested webhook URL slipped
         # through with the credential fully recoverable.
+        """Test that rejects scheme relative and double encoded nested webhook urls."""
         base = {
             "target_id": "one",
             "enabled": True,
@@ -233,15 +251,15 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "%252FXXXXXXXXXXXXXXXXXXXXXXXX"),
         )
         for url in bypassing_urls:
-            with self.subTest(url=url):
-                with pytest.raises(MonitorError, match="credential-like"):
-                    Target.from_mapping({**base, "url": url})
+            with self.subTest(url=url), pytest.raises(MonitorError, match="credential-like"):
+                Target.from_mapping({**base, "url": url})
 
     def test_malformed_nested_url_in_query_value_does_not_crash(self) -> None:
         # A decoded query value that merely looks like it could be a URL
         # (e.g. an unbalanced IPv6-literal-style host) must not escape as an
         # unhandled ValueError from urlsplit; it should just be treated as
         # an opaque, non-URL value.
+        """Test that malformed nested url in query value does not crash."""
         base = {
             "target_id": "one",
             "enabled": True,
@@ -251,6 +269,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
         Target.from_mapping(base)
 
     def test_exclude_selectors_enforce_count_and_length_bounds(self) -> None:
+        """Test that exclude selectors enforce count and length bounds."""
         base = {
             "target_id": "one",
             "enabled": True,
@@ -263,6 +282,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
             Target.from_mapping({**base, "exclude_selectors": ["." + "a" * 500]})
 
     def test_state_and_notification_queries(self) -> None:
+        """Test that state and notification queries."""
         digest = "a" * 64
         states = load_states(
             table(
@@ -293,6 +313,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
             )
 
     def test_write_payload_generation(self) -> None:
+        """Test that write payload generation."""
         state = State("one")
         assert replace_state_payload(3, state)["range"] == "State!A3:H3"
         run = RunRecord(
@@ -316,6 +337,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
         assert upsert_notification_payload(notification, 4)["range"] == "Notifications!A4:F4"
 
     def test_record_parser_allows_extra_columns_but_not_extra_values(self) -> None:
+        """Test that record parser allows extra columns but not extra values."""
         values = [["id", "extra"], ["one", "x"]]
         assert records_from_values(values, ("id",), "Test")[0]["extra"] == "x"
         with pytest.raises(MonitorError):
@@ -326,6 +348,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
         # row that merely contains every required column out of order would
         # otherwise load fine and then have the next write silently swap
         # values (e.g. etag/last_modified) under the wrong headers.
+        """Test that record parser rejects reordered required columns."""
         digest = "a" * 64
         reordered = table(
             (
@@ -347,16 +370,21 @@ class ModelsAndSheetsTests(unittest.TestCase):
             records_from_values([["extra", "id"], ["x", "one"]], ("id",), "Test")
 
     def test_store_uses_raw_write_semantics_and_idempotent_runs(self) -> None:
+        """Test that store uses raw write semantics and idempotent runs."""
         class Connector:
+            """A fake Sheets connector used to exercise the tested behavior."""
+
             def __init__(self) -> None:
                 self.calls: list[tuple[str, str]] = []
-                self.values = {
+                self.values: dict[str, list[list[Any]]] = {
                     "State!A:H": [list(STATE_COLUMNS)],
                     "Runs!A:H": [list(RUN_COLUMNS)],
                     "Notifications!A:F": [list(NOTIFICATION_COLUMNS)],
                 }
 
-            def read_values(self, spreadsheet_id: str, range_name: str):
+            def read_values(
+                self, spreadsheet_id: str, range_name: str
+            ) -> list[list[Any]]:
                 self.assert_id = spreadsheet_id
                 return self.values[range_name]
 
@@ -364,7 +392,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 self,
                 spreadsheet_id: str,
                 range_name: str,
-                values,
+                values: Sequence[Sequence[Any]],
                 *,
                 value_input_option: str,
             ) -> None:
@@ -375,12 +403,23 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 self,
                 spreadsheet_id: str,
                 range_name: str,
-                values,
+                values: Sequence[Sequence[Any]],
                 *,
                 value_input_option: str,
             ) -> None:
                 del spreadsheet_id, range_name, values
                 self.calls.append(("append", value_input_option))
+
+            def batch_replace_values(
+                self,
+                spreadsheet_id: str,
+                data: Sequence[Mapping[str, Any]],
+                *,
+                value_input_option: str,
+            ) -> Never:
+                del spreadsheet_id, data, value_input_option
+                msg = "batch_replace_values is not used by this test"
+                raise AssertionError(msg)
 
         connector = Connector()
         store = SheetsStore(connector, "runtime-only-id")
@@ -400,25 +439,52 @@ class ModelsAndSheetsTests(unittest.TestCase):
         assert all(option == "RAW" for _, option in connector.calls)
 
     def test_get_run_round_trips_result_and_attempts(self) -> None:
+        """Test that get run round trips result and attempts."""
         class Connector:
-            def __init__(self) -> None:
-                self.values = {"Runs!A:H": [list(RUN_COLUMNS)]}
+            """A fake Sheets connector used to exercise the tested behavior."""
 
-            def read_values(self, spreadsheet_id: str, range_name: str):
+            def __init__(self) -> None:
+                self.values: dict[str, list[list[Any]]] = {"Runs!A:H": [list(RUN_COLUMNS)]}
+
+            def read_values(
+                self, spreadsheet_id: str, range_name: str
+            ) -> list[list[Any]]:
                 del spreadsheet_id
                 return self.values[range_name]
 
             def replace_values(
-                self, spreadsheet_id, range_name, values, *, value_input_option
-            ):
+                self,
+                spreadsheet_id: str,
+                range_name: str,
+                values: Sequence[Sequence[Any]],
+                *,
+                value_input_option: str,
+            ) -> Never:
+                del spreadsheet_id, range_name, values, value_input_option
                 msg = "runs are append-only"
                 raise AssertionError(msg)
 
             def append_values(
-                self, spreadsheet_id, range_name, values, *, value_input_option
-            ):
+                self,
+                spreadsheet_id: str,
+                range_name: str,
+                values: Sequence[Sequence[Any]],
+                *,
+                value_input_option: str,
+            ) -> None:
                 del spreadsheet_id, value_input_option
-                self.values[range_name] += list(values)
+                self.values[range_name] = [*self.values[range_name], *(list(row) for row in values)]
+
+            def batch_replace_values(
+                self,
+                spreadsheet_id: str,
+                data: Sequence[Mapping[str, Any]],
+                *,
+                value_input_option: str,
+            ) -> Never:
+                del spreadsheet_id, data, value_input_option
+                msg = "batch_replace_values is not used by this test"
+                raise AssertionError(msg)
 
         connector = Connector()
         store = SheetsStore(connector, "runtime-only-id")
@@ -438,25 +504,57 @@ class ModelsAndSheetsTests(unittest.TestCase):
         assert run == store.get_run("run-1:one")
 
     def test_notification_round_trips_kind_and_last_error(self) -> None:
+        """Test that notification round trips kind and last error."""
         class Connector:
-            def __init__(self) -> None:
-                self.values = {"Notifications!A:F": [list(NOTIFICATION_COLUMNS)]}
+            """A fake Sheets connector used to exercise the tested behavior."""
 
-            def read_values(self, spreadsheet_id: str, range_name: str):
+            def __init__(self) -> None:
+                self.values: dict[str, list[list[Any]]] = {"Notifications!A:F": [list(NOTIFICATION_COLUMNS)]}
+
+            def read_values(
+                self, spreadsheet_id: str, range_name: str
+            ) -> list[list[Any]]:
                 del spreadsheet_id
                 return self.values[range_name]
 
             def replace_values(
-                self, spreadsheet_id, range_name, values, *, value_input_option
-            ):
-                del spreadsheet_id, value_input_option
-                self.values["Notifications!A:F"] = [list(NOTIFICATION_COLUMNS), *list(values)]
+                self,
+                spreadsheet_id: str,
+                range_name: str,
+                values: Sequence[Sequence[Any]],
+                *,
+                value_input_option: str,
+            ) -> None:
+                del spreadsheet_id, range_name, value_input_option
+                self.values["Notifications!A:F"] = [
+                    list(NOTIFICATION_COLUMNS),
+                    *(list(row) for row in values),
+                ]
 
             def append_values(
-                self, spreadsheet_id, range_name, values, *, value_input_option
-            ):
-                del spreadsheet_id, value_input_option
-                self.values["Notifications!A:F"] += list(values)
+                self,
+                spreadsheet_id: str,
+                range_name: str,
+                values: Sequence[Sequence[Any]],
+                *,
+                value_input_option: str,
+            ) -> None:
+                del spreadsheet_id, range_name, value_input_option
+                self.values["Notifications!A:F"] = [
+                    *self.values["Notifications!A:F"],
+                    *(list(row) for row in values),
+                ]
+
+            def batch_replace_values(
+                self,
+                spreadsheet_id: str,
+                data: Sequence[Mapping[str, Any]],
+                *,
+                value_input_option: str,
+            ) -> Never:
+                del spreadsheet_id, data, value_input_option
+                msg = "batch_replace_values is not used by this test"
+                raise AssertionError(msg)
 
         connector = Connector()
         store = SheetsStore(connector, "runtime-only-id")
@@ -471,26 +569,61 @@ class ModelsAndSheetsTests(unittest.TestCase):
         assert notification == store.get_notification("c" * 64)
 
     def test_notification_batch_uses_one_atomic_raw_connector_call(self) -> None:
+        """Test that notification batch uses one atomic raw connector call."""
         first = NotificationRecord("d" * 64, "one", "pending")
         second = NotificationRecord("e" * 64, "two", "pending")
 
         class Connector:
+            """A fake Sheets connector used to exercise the tested behavior."""
+
             def __init__(self) -> None:
-                self.values = {
+                self.values: dict[str, list[list[Any]]] = {
                     "Notifications!A:F": [
                         list(NOTIFICATION_COLUMNS),
                         [first.event_id, "one", "pending", "", "change", ""],
                         [second.event_id, "two", "pending", "", "change", ""],
                     ]
                 }
-                self.batches = []
+                self.batches: list[
+                    tuple[Sequence[Mapping[str, Any]], str]
+                ] = []
 
-            def read_values(self, spreadsheet_id: str, range_name: str):
+            def read_values(
+                self, spreadsheet_id: str, range_name: str
+            ) -> list[list[Any]]:
                 del spreadsheet_id
                 return self.values[range_name]
 
+            def replace_values(
+                self,
+                spreadsheet_id: str,
+                range_name: str,
+                values: Sequence[Sequence[Any]],
+                *,
+                value_input_option: str,
+            ) -> Never:
+                del spreadsheet_id, range_name, values, value_input_option
+                msg = "replace_values is not used by this test"
+                raise AssertionError(msg)
+
+            def append_values(
+                self,
+                spreadsheet_id: str,
+                range_name: str,
+                values: Sequence[Sequence[Any]],
+                *,
+                value_input_option: str,
+            ) -> Never:
+                del spreadsheet_id, range_name, values, value_input_option
+                msg = "append_values is not used by this test"
+                raise AssertionError(msg)
+
             def batch_replace_values(
-                self, spreadsheet_id, data, *, value_input_option
+                self,
+                spreadsheet_id: str,
+                data: Sequence[Mapping[str, Any]],
+                *,
+                value_input_option: str,
             ) -> None:
                 del spreadsheet_id
                 self.batches.append((data, value_input_option))

@@ -1,3 +1,5 @@
+"""Tests for the network_fetch module."""
+
 from __future__ import annotations
 
 import http.client
@@ -25,6 +27,8 @@ from tests import support
 
 
 class FakeResponse:
+    """A minimal fake `urllib` HTTP response."""
+
     def __init__(
         self,
         status: int = 200,
@@ -52,11 +56,15 @@ class FakeResponse:
 
 
 class FakeSocket:
+    """A fake socket used to exercise connection-level behavior."""
+
     def settimeout(self, timeout: float) -> None:
         self.timeout = timeout
 
 
 class FakeClock:
+    """A fake monotonic clock for deterministic timeout tests."""
+
     def __init__(self) -> None:
         self.now = 0.0
 
@@ -348,6 +356,8 @@ class _RealStalledTLSHandshakeServer:
 
 
 class FakeConnection:
+    """A fake HTTP connection used to exercise fetch_url's transport layer."""
+
     def __init__(self, response: FakeResponse) -> None:
         self.response = response
         self.closed = False
@@ -367,7 +377,10 @@ class FakeConnection:
 
 
 class NetworkPolicyTests(unittest.TestCase):
+    """Tests for NetworkPolicyTests."""
+
     def test_rejects_private_loopback_and_non_http(self) -> None:
+        """Test that rejects private loopback and non http."""
         for url in (
             "http://127.0.0.1/",
             "http://169.254.169.254/latest/meta-data",
@@ -378,6 +391,7 @@ class NetworkPolicyTests(unittest.TestCase):
                 resolve_public_url(url)
 
     def test_detects_dns_rebinding(self) -> None:
+        """Test that detects dns rebinding."""
         answers = iter(
             [
                 [(2, 1, 6, "", ("93.184.216.34", 443))],
@@ -398,6 +412,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # an already-listed name (access-token vs access_token), and common
         # credential params the exact-name/suffix lists did not cover at
         # all (x-api-key, client_secret, auth_token, subscription-key).
+        """Test that detects separator and prefix variants of credential params."""
         for name in (
             "x-api-key",
             "X-API-KEY",
@@ -419,6 +434,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # separator normalization turns into names matching neither the
         # exact-name set nor the narrow signed-URL suffix list, leaving them
         # in target.url on their way into model input and Slack.
+        """Test that detects common oauth token parameter names."""
         for name in (
             "refresh_token",
             "refresh-token",
@@ -434,6 +450,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # parse_qsl decodes "?api%20key=secret" to the name "api key", and
         # dotted spellings such as "x.api.key" are common in nested/JS-style
         # query params; only the underscore form was previously normalized.
+        """Test that detects whitespace and dot separator variants."""
         for name in (
             "api key",
             "API KEY",
@@ -454,6 +471,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # to the name "api key" *through the real URL entry point*, not
         # just as an already-decoded string handed directly to the
         # detector. "+" is the same encoding for a query string.
+        """Test that canonicalize url rejects percent and plus encoded credential names."""
         for query in ("api%20key=secret", "api+key=secret", "x.api.key=secret"):
             with self.subTest(query=query):
                 with pytest.raises(MonitorError, match="credential-like"):
@@ -468,6 +486,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # bare encoded URL rather than "#name=<url>" key/value pairs, so
         # parse_qsl alone would decode it into a single blank-valued name
         # and never hand it to the nested-URL check.
+        """Test that fragment identity rejects a fragment that is itself a nested url."""
         credential_fragment = "https%3A%2F%2Fuser%3Apass%40example.com%2F"
         with pytest.raises(MonitorError, match="credential-like"):
             canonicalize_fragment_identity(credential_fragment)
@@ -486,6 +505,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # "/callback?access_token=secret" -- the common shape of an OAuth
         # redirect target -- was never recursively inspected even though
         # parse_qsl decodes it into the outer "redirect" value intact.
+        """Test that canonicalize url rejects nested relative reference credential."""
         with pytest.raises(MonitorError, match="credential-like"):
             canonicalize_url(
                 "https://example.com/?redirect=%2Fcallback%3Faccess_token%3Dsecret123"
@@ -495,6 +515,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # The relative-reference nested-URL check must not over-flag an
         # ordinary relative redirect target that carries no credential-like
         # query parameter of its own.
+        """Test that canonicalize url allows benign nested relative reference."""
         canonical, _ = canonicalize_url(
             "https://example.com/?redirect=%2Fcallback%3Fpage%3D2"
         )
@@ -509,6 +530,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # of nested reference and walk the bounded recursion depth into a
         # false "credential-like" denial for an ordinary value that just
         # happens to contain several of them.
+        """Test that canonicalize url allows query value with literal question marks."""
         canonical, _ = canonicalize_url(
             "https://example.com/?q=a=1?b=2?c=3?d=4?e=5?f=6?g=7"
         )
@@ -521,6 +543,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # decoded from the outer "redirect" value -- was rejected because
         # split.path == "callback" has no leading slash, leaving the
         # credential in the accepted target URL.
+        """Test that canonicalize url rejects path relative nested url query."""
         with pytest.raises(MonitorError, match="credential-like"):
             canonicalize_url(
                 "https://example.com/?redirect=callback%3Faccess_token%3Dsecret123"
@@ -529,6 +552,7 @@ class NetworkPolicyTests(unittest.TestCase):
     def test_canonicalize_url_rejects_path_relative_nested_url_fragment(self) -> None:
         # Same path-relative gap as above, but the credential is carried
         # after a "#" instead of a "?" in the nested reference.
+        """Test that canonicalize url rejects path relative nested url fragment."""
         with pytest.raises(MonitorError, match="credential-like"):
             canonicalize_url(
                 "https://example.com/?redirect=callback%23access_token%3Dsecret123"
@@ -538,6 +562,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # The path-relative nested-URL check must not over-flag an ordinary
         # path-relative redirect target that carries no credential-like
         # query parameter of its own.
+        """Test that canonicalize url allows benign path relative reference."""
         canonical, _ = canonicalize_url(
             "https://example.com/?redirect=callback%3Fpage%3D2"
         )
@@ -553,6 +578,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # target. A design that only special-cases the outermost call
         # (e.g. gating on recursion depth == 0) would miss this, since the
         # credential is one hop deeper than the outer query.
+        """Test that canonicalize url rejects path relative credential past an absolute hop."""
         with pytest.raises(MonitorError, match="credential-like"):
             canonicalize_url(
                 "https://example.com/?redirect=https%3A%2F%2Fidp.example"
@@ -573,6 +599,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # The literal-question-marks test above still passes because the
         # bounded recursion depth, not a one-hop chain-break, is what stops
         # an ordinary multi-"?" value from recursing unboundedly.
+        """Test that canonicalize url rejects credential behind two path relative hops."""
         with pytest.raises(MonitorError, match="credential-like"):
             canonicalize_url(
                 "https://example.com/?redirect=step1%3Fnext%3Dstep2%253Faccess_"
@@ -585,6 +612,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # Same gap, one hop deeper: nothing about carrying
         # ``allow_path_relative`` forward should special-case exactly two
         # hops.
+        """Test that canonicalize url rejects credential behind three path relative hops."""
         with pytest.raises(MonitorError, match="credential-like"):
             canonicalize_url(
                 "https://example.com/?redirect=step1%253Fnext%253Dstep2%253F"
@@ -602,6 +630,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # "%61ccess_token%3Dabc", which isn't sensitive, so the credential
         # must be found by unquoting the remaining text to a fixed point
         # before the flat sensitive-name scan, not by a one-pass decode.
+        """Test that canonicalize url rejects credential at the depth budget boundary."""
         with pytest.raises(MonitorError, match="credential-like"):
             canonicalize_url(
                 "https://example.com/?redirect=s1%3Fn1%3Ds2%253Fn2%253Ds3"
@@ -615,6 +644,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # of them are credentials; over-flagging permanently rejects a
         # legitimate monitoring target (validate_http_url has no redact
         # path, only reject).
+        """Test that benign key and token named params are not flagged."""
         for name in (
             "sort_key",
             "partition_key",
@@ -628,6 +658,7 @@ class NetworkPolicyTests(unittest.TestCase):
                 assert not is_sensitive_query_name(name)
 
     def test_browser_guard_requires_explicit_hosts(self) -> None:
+        """Test that browser guard requires explicit hosts."""
         guard = BrowserNetworkGuard(
             "https://example.com", resolver=support.public_resolver
         )
@@ -637,7 +668,10 @@ class NetworkPolicyTests(unittest.TestCase):
 
 
 class FetchTests(unittest.TestCase):
+    """Tests for FetchTests."""
+
     def test_304_is_explicit_unchanged_and_sends_validators(self) -> None:
+        """Test that 304 is explicit unchanged and sends validators."""
         response = FakeResponse(304, b"", {"ETag": "new"})
         connection = FakeConnection(response)
         with patch.object(fetch, "_open_connection", return_value=connection):
@@ -653,6 +687,7 @@ class FetchTests(unittest.TestCase):
         assert result.etag == "new"
 
     def test_unexpected_304_and_unsafe_validators_fail(self) -> None:
+        """Test that unexpected 304 and unsafe validators fail."""
         with patch.object(
             fetch,
             "_open_connection",
@@ -667,6 +702,7 @@ class FetchTests(unittest.TestCase):
             )
 
     def test_304_is_rejected_when_validators_could_not_be_bound(self) -> None:
+        """Test that 304 is rejected when validators could not be bound."""
         with patch.object(
             fetch,
             "_open_connection",
@@ -681,6 +717,7 @@ class FetchTests(unittest.TestCase):
             )
 
     def test_redirect_target_is_revalidated(self) -> None:
+        """Test that redirect target is revalidated."""
         response = FakeResponse(302, b"", {"Location": "http://127.0.0.1/admin"})
         with patch.object(
             fetch, "_open_connection", return_value=FakeConnection(response)
@@ -691,6 +728,7 @@ class FetchTests(unittest.TestCase):
             )
 
     def test_validators_bind_to_the_final_url_not_the_origin(self) -> None:
+        """Test that validators bind to the final url not the origin."""
         redirect = FakeConnection(
             FakeResponse(302, b"", {"Location": "https://example.com/final"})
         )
@@ -711,6 +749,7 @@ class FetchTests(unittest.TestCase):
         assert revalidated.request_headers["If-None-Match"] == "old"
 
     def test_response_size_content_type_and_malformed_length_errors(self) -> None:
+        """Test that response size content type and malformed length errors."""
         cases = (
             (
                 FakeResponse(
@@ -771,6 +810,7 @@ class FetchTests(unittest.TestCase):
                 assert code == raised.value.code
 
     def test_unicode_paths_are_percent_encoded_and_tls_cannot_be_disabled(self) -> None:
+        """Test that unicode paths are percent encoded and tls cannot be disabled."""
         connection = FakeConnection(
             FakeResponse(200, b"<p>ok</p>", {"Content-Type": "text/html"})
         )
@@ -791,6 +831,7 @@ class FetchTests(unittest.TestCase):
             )
 
     def test_streamed_oversize_and_timeout_have_stable_codes(self) -> None:
+        """Test that streamed oversize and timeout have stable codes."""
         response = FakeResponse(
             200,
             b"x" * 2_000,
@@ -819,6 +860,7 @@ class FetchTests(unittest.TestCase):
         # This exercises only the loop's own bookkeeping with a fake clock;
         # it does not model http.client's real buffered socket reads, which
         # is covered separately below with a real socket.
+        """Test that slow trickle is stopped by the total deadline."""
         clock = FakeClock()
         response = TrickleResponse(clock, seconds_per_byte=10.0, total_bytes=10_000_000)
         connection = FakeConnection(response)
@@ -852,6 +894,7 @@ class FetchTests(unittest.TestCase):
         # the response body) is still readable. A FakeConnection/FakeSocket
         # never models that, so only a real socket proves a normal fetch
         # survives it.
+        """Test that real socket fetch succeeds when server closes the connection."""
         body = b"<html><body>hello real socket</body></html>"
         server = _RealSlowTrickleServer(body=body, seconds_per_byte=0.0)
         self.addCleanup(server.close)
@@ -869,6 +912,7 @@ class FetchTests(unittest.TestCase):
         assert body == result.body
 
     def test_real_socket_truncated_body_is_rejected_as_malformed(self) -> None:
+        """Test that real socket truncated body is rejected as malformed."""
         server = _RealTruncatedServer(declared_length=100, sent_body=b"short body")
         self.addCleanup(server.close)
         real_connection = http.client.HTTPConnection(
@@ -886,6 +930,7 @@ class FetchTests(unittest.TestCase):
         assert raised.value.retryable
 
     def test_real_socket_body_reset_is_retryable(self) -> None:
+        """Test that real socket body reset is retryable."""
         server = _RealResetServer(sent_body=b"partial body")
         self.addCleanup(server.close)
         real_connection = http.client.HTTPConnection(
@@ -908,6 +953,7 @@ class FetchTests(unittest.TestCase):
         # individual recv comfortably beats the per-op timeout. Only reading
         # via an API bounded to a single underlying recv (read1) lets the
         # deadline be rechecked often enough to bail out promptly.
+        """Test that real socket slow trickle is stopped by the total deadline."""
         server = _RealSlowTrickleServer(body=b"x" * 30, seconds_per_byte=0.3)
         self.addCleanup(server.close)
         real_connection = http.client.HTTPConnection(
@@ -936,6 +982,7 @@ class FetchTests(unittest.TestCase):
         # path: a well-behaved, fast server must still read back exactly
         # as before, proving the per-recv deadline clamp does not itself
         # truncate or corrupt an ordinary successful read.
+        """Test that pinned connection delivers a normal response intact."""
         body = b"<html><body>hello pinned socket</body></html>"
         server = _RealSlowTrickleServer(body=body, seconds_per_byte=0.0)
         self.addCleanup(server.close)
@@ -972,6 +1019,7 @@ class FetchTests(unittest.TestCase):
         # deadline check on every real recv (not just between ``read1()``
         # calls) can bound this. This drives ``_PinnedHTTPConnection``
         # directly since it owns the deadline-checked socket.
+        """Test that pinned connection deadline stops a trickled chunk size line."""
         chunk_size_line = b"a;" + b"x" * 40 + b"\r\n"
         server = _RealSlowTrickleChunkedServer(
             chunk_size_line=chunk_size_line, seconds_per_byte=0.05
@@ -1014,6 +1062,7 @@ class FetchTests(unittest.TestCase):
         # for far longer than what remains of the fetch's total deadline;
         # only clamping each recv's own timeout to the remaining budget
         # bounds it.
+        """Test that pinned connection deadline bounds a complete stall."""
         server = _RealStalledChunkedServer(hold_seconds=5.0)
         self.addCleanup(server.close)
         connection = fetch._PinnedHTTPConnection(
@@ -1049,6 +1098,7 @@ class FetchTests(unittest.TestCase):
         # would block for the server's whole 5s hold. Bailing out near the
         # 0.5s deadline instead proves the handshake itself is bounded by
         # the remaining budget, not the original per-op timeout.
+        """Test that pinned https connection deadline bounds a stalled handshake."""
         server = _RealStalledTLSHandshakeServer(hold_seconds=5.0)
         self.addCleanup(server.close)
         context = ssl.create_default_context()
@@ -1074,6 +1124,7 @@ class FetchTests(unittest.TestCase):
     def test_pinned_https_connection_closes_wrapped_socket_on_handshake_failure(
         self,
     ) -> None:
+        """Test that pinned https connection closes wrapped socket on handshake failure."""
         raw_socket = MagicMock()
         raw_socket.getpeername.return_value = ("93.184.216.34", 443)
         wrapped_socket = MagicMock()
@@ -1105,6 +1156,7 @@ class FetchTests(unittest.TestCase):
         raw_socket.close.assert_not_called()
 
     def test_server_and_rate_limit_are_retryable(self) -> None:
+        """Test that server and rate limit are retryable."""
         for status, code in ((429, "http_rate_limited"), (503, "http_server_error")):
             with (
                 self.subTest(status=status),
@@ -1120,6 +1172,7 @@ class FetchTests(unittest.TestCase):
                 assert raised.value.retryable
 
     def test_charset_is_extracted_from_content_type_for_normalization(self) -> None:
+        """Test that charset is extracted from content type for normalization."""
         connection = FakeConnection(
             FakeResponse(
                 200,
@@ -1133,6 +1186,7 @@ class FetchTests(unittest.TestCase):
         assert result.charset == "Shift_JIS"
 
     def test_slow_initial_dns_resolution_is_bounded_by_the_total_deadline(self) -> None:
+        """Test that slow initial dns resolution is bounded by the total deadline."""
         def slow_resolver(*_: object, **__: object) -> list[tuple]:
             time.sleep(30)
             return [(2, 1, 6, "", ("93.184.216.34", 443))]
@@ -1152,6 +1206,7 @@ class FetchTests(unittest.TestCase):
     def test_slow_redirect_dns_resolution_is_bounded_by_the_total_deadline(
         self,
     ) -> None:
+        """Test that slow redirect dns resolution is bounded by the total deadline."""
         response = FakeResponse(
             302, b"", {"Location": "https://redirect-target.example/"}
         )
@@ -1181,6 +1236,7 @@ class FetchTests(unittest.TestCase):
         assert elapsed < 10.0
 
     def test_repeated_dns_timeouts_keep_resolver_workers_bounded(self) -> None:
+        """Test that repeated dns timeouts keep resolver workers bounded."""
         release = threading.Event()
         pool = fetch._ResolverPool(worker_count=2)
 

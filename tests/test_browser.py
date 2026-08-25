@@ -1,3 +1,5 @@
+"""Tests for the browser module."""
+
 from __future__ import annotations
 
 import sys
@@ -15,20 +17,24 @@ from tests import support
 
 
 class FakePlaywrightError(Exception):
-    pass
+    """A fake `playwright.sync_api.Error` base exception."""
 
 
 class FakePlaywrightTimeoutError(FakePlaywrightError):
-    pass
+    """A fake `playwright.sync_api.TimeoutError`."""
 
 
 @dataclass
 class FakeRequest:
+    """A minimal fake Playwright request."""
+
     url: str
     resource_type: str = "document"
 
 
 class FakeRoute:
+    """A fake Playwright route that records abort/continue calls."""
+
     def __init__(self, request: FakeRequest) -> None:
         self.request = request
         self.aborted = False
@@ -42,6 +48,8 @@ class FakeRoute:
 
 
 class FakeResponse:
+    """A fake Playwright response with a fixed peer address."""
+
     def __init__(
         self,
         url: str,
@@ -59,6 +67,8 @@ class FakeResponse:
 
 
 class FakePopup:
+    """A fake Playwright popup page that replays its own requests on close."""
+
     def __init__(self, requests: list[FakeRequest], context: "FakeContext") -> None:
         self.requests = requests
         self.context = context
@@ -80,6 +90,8 @@ class FakePopup:
 
 
 class FakePage:
+    """A fake Playwright page that replays canned requests and responses."""
+
     def __init__(
         self,
         *,
@@ -125,6 +137,8 @@ class FakePage:
 
 
 class FakeContext:
+    """A fake Playwright browser context wrapping a single FakePage."""
+
     def __init__(self, page: FakePage) -> None:
         self.page = page
         self.closed = False
@@ -146,6 +160,8 @@ class FakeContext:
 
 
 class FakeBrowser:
+    """A fake Playwright browser wrapping a single FakeContext."""
+
     def __init__(self, context: FakeContext) -> None:
         self.context = context
         self.closed = False
@@ -158,6 +174,8 @@ class FakeBrowser:
 
 
 class FakePlaywrightManager:
+    """A fake `sync_playwright()` context manager."""
+
     def __init__(self, browser: FakeBrowser) -> None:
         self.playwright = SimpleNamespace(
             chromium=SimpleNamespace(launch=lambda **_: browser)
@@ -181,6 +199,8 @@ def playwright_modules(browser: FakeBrowser) -> dict[str, ModuleType]:
 
 
 class BrowserFetcherTests(unittest.TestCase):
+    """Tests for BrowserFetcherTests."""
+
     def run_fake(
         self,
         page: FakePage,
@@ -203,6 +223,7 @@ class BrowserFetcherTests(unittest.TestCase):
         return result, context, browser
 
     def test_client_rendered_content_and_ephemeral_cleanup(self) -> None:
+        """Test that client rendered content and ephemeral cleanup."""
         page = FakePage(
             html="<html><body><main>Rendered</main></body></html>",
             requests=[FakeRequest("https://example.com")],
@@ -220,7 +241,10 @@ class BrowserFetcherTests(unittest.TestCase):
         # fragment, so persisting the raw `page.url` as `validated_url`
         # would make State round-trip fail on the very next run. The
         # canonical URL returned by the SSRF guard strips the fragment.
+        """Test that final url fragment set by page js is canonicalized."""
         class FragmentPage(FakePage):
+            """A FakePage variant whose final URL carries a fragment."""
+
             def goto(self, url: str, **kwargs: object) -> FakeResponse:
                 response = super().goto(url, **kwargs)
                 self.url = f"{url}#result"
@@ -238,6 +262,7 @@ class BrowserFetcherTests(unittest.TestCase):
         assert state.validated_url == "https://example.com/"
 
     def test_private_subresource_and_redirect_are_denied(self) -> None:
+        """Test that private subresource and redirect are denied."""
         for private_url in (
             "http://127.0.0.1/admin",
             "http://169.254.169.254/latest/meta-data",
@@ -256,6 +281,7 @@ class BrowserFetcherTests(unittest.TestCase):
                 self.run_fake(page)
 
     def test_popup_with_private_initial_url_is_denied(self) -> None:
+        """Test that popup with private initial url is denied."""
         page = FakePage(
             html="<html></html>",
             requests=[FakeRequest("https://example.com")],
@@ -265,6 +291,7 @@ class BrowserFetcherTests(unittest.TestCase):
             self.run_fake(page)
 
     def test_timeout_request_limit_and_rendered_size_fail(self) -> None:
+        """Test that timeout request limit and rendered size fail."""
         timeout_page = FakePage(
             html="<html></html>",
             requests=[FakeRequest("https://example.com")],
@@ -305,6 +332,7 @@ class BrowserFetcherTests(unittest.TestCase):
             )
 
     def test_browser_mode_fails_closed_without_verified_egress_pinning(self) -> None:
+        """Test that browser mode fails closed without verified egress pinning."""
         with pytest.raises(MonitorError, match="browser_egress_not_verified"):
             fetch_rendered(
                 "https://example.com",
@@ -313,6 +341,7 @@ class BrowserFetcherTests(unittest.TestCase):
             )
 
     def test_browser_mode_reports_missing_optional_runtime(self) -> None:
+        """Test that browser mode reports missing optional runtime."""
         with (
             patch.dict(
                 sys.modules,
@@ -331,6 +360,7 @@ class BrowserFetcherTests(unittest.TestCase):
             )
 
     def test_browser_mode_fails_closed_without_verified_memory_bound(self) -> None:
+        """Test that browser mode fails closed without verified memory bound."""
         with pytest.raises(MonitorError, match="browser_memory_bound_not_verified"):
             fetch_rendered(
                 "https://example.com",
@@ -339,6 +369,7 @@ class BrowserFetcherTests(unittest.TestCase):
             )
 
     def test_browser_mode_fails_closed_without_verified_execution_bound(self) -> None:
+        """Test that browser mode fails closed without verified execution bound."""
         with pytest.raises(MonitorError, match="browser_execution_bound_not_verified"):
             fetch_rendered(
                 "https://example.com",

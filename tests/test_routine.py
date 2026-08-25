@@ -1,3 +1,5 @@
+"""Tests for the routine module."""
+
 from __future__ import annotations
 
 import unittest
@@ -21,8 +23,6 @@ from normalize import normalize_content
 from notifications import change_event_id, failure_event_id
 from retry import RetryConfig
 from routine import RoutineConfig, WeeklyMonitorRoutine
-
-from tests import support  # ruff: ignore[unused-import]
 
 
 def make_target(target_id: str = "one", group: str = "default") -> Target:
@@ -68,6 +68,8 @@ def paragraphs_response(paragraphs: list[str]) -> FixtureResponse:
 
 
 class NonMaterialSummary:
+    """A summary client stub that always returns a non-material result."""
+
     def summarize(self, request):
         return {
             "material": False,
@@ -81,7 +83,10 @@ class NonMaterialSummary:
 
 
 class RoutineTests(unittest.TestCase):
+    """Tests for RoutineTests."""
+
     def setUp(self) -> None:
+        """Test that setUp."""
         self.target = make_target()
         self.store = MemoryOperationalStore([self.target])
         self.drive_connector = MemoryDriveConnector()
@@ -114,6 +119,7 @@ class RoutineTests(unittest.TestCase):
         return routine.run(run_id=run_id), fetcher
 
     def test_baseline_material_notification_then_unchanged_and_cleanup(self) -> None:
+        """Test that baseline material notification then unchanged and cleanup."""
         baseline, first_fetcher = self.run_cycle(response(1000), "run-1")
         assert baseline.metrics.baseline == 1
         assert len(self.slack.messages) == 0
@@ -143,6 +149,7 @@ class RoutineTests(unittest.TestCase):
         # legitimately reuses the same "suppressed" delivery outcome status.
         # Conflating the two used to report a material change as "notified"
         # even though deliver_grouped never called Slack for it.
+        """Test that operator suppressed change advances baseline without notified result."""
         self.run_cycle(response(1000), "run-1")
         fixture = response(1200)
         normalized = normalize_content(
@@ -172,6 +179,7 @@ class RoutineTests(unittest.TestCase):
         assert normalized.normalized_hash == self.store.states["one"].normalized_hash
 
     def test_failed_notification_preserves_baseline_and_retries_safely(self) -> None:
+        """Test that failed notification preserves baseline and retries safely."""
         self.run_cycle(response(1000), "run-1")
         baseline_hash = self.store.states["one"].normalized_hash
         failing_slack = MemorySlackConnector(["default"])
@@ -184,6 +192,7 @@ class RoutineTests(unittest.TestCase):
         assert baseline_hash != self.store.states["one"].normalized_hash
 
     def test_retry_failure_alert_and_recovery(self) -> None:
+        """Test that retry failure alert and recovery."""
         transient = MonitorError("fetch_timeout", "fixture timeout", retryable=True)
         for index in range(1, 4):
             result, fetcher = self.run_cycle(
@@ -200,6 +209,7 @@ class RoutineTests(unittest.TestCase):
         assert self.store.states["one"].consecutive_failures == 0
 
     def test_suppressed_failure_alert_is_preserved_and_not_retried(self) -> None:
+        """Test that suppressed failure alert is preserved and not retried."""
         transient = MonitorError("fetch_timeout", "fixture timeout", retryable=True)
         for index in range(1, 3):
             self.run_cycle(
@@ -236,11 +246,14 @@ class RoutineTests(unittest.TestCase):
         # transient read failure that a naive fix would paper over by
         # persisting the empty placeholder State and destroying the
         # existing baseline.
+        """Test that transient state read failure does not wipe existing baseline."""
         self.run_cycle(response(1000), "run-1")
         baseline_hash = self.store.states["one"].normalized_hash
         assert baseline_hash
 
         class FlakyStateStore(MemoryOperationalStore):
+            """A state store stub that fails a configurable number of times."""
+
             def __init__(self, targets, states) -> None:
                 super().__init__(targets)
                 self.states = states
@@ -282,11 +295,14 @@ class RoutineTests(unittest.TestCase):
         # retry. The run must still complete (not raise out of
         # _process_target) and the real State row must be left completely
         # untouched rather than replaced with the empty placeholder.
+        """Test that persistent state read failure still records run without state write."""
         self.run_cycle(response(1000), "run-1")
         baseline_hash = self.store.states["one"].normalized_hash
         assert baseline_hash
 
         class AlwaysFailingStateStore(MemoryOperationalStore):
+            """A state store stub whose writes always fail."""
+
             def __init__(self, targets, states) -> None:
                 super().__init__(targets)
                 self.states = states
@@ -321,9 +337,12 @@ class RoutineTests(unittest.TestCase):
         # retry with the same run_id finds a terminal Run to replay (safe)
         # or an advanced State with no matching Run (silently drops the
         # outcome the State change was based on). Run must land first.
+        """Test that run is written before state on success."""
         calls: list[str] = []
 
         class RecordingStore(MemoryOperationalStore):
+            """A state store stub that records every write it receives."""
+
             def append_run(self, run) -> None:
                 calls.append("append_run")
                 super().append_run(run)
@@ -354,10 +373,13 @@ class RoutineTests(unittest.TestCase):
         # success row survives) but still replace_state with a reverted,
         # failure-incremented baseline behind a Run that already says
         # success. State must be left exactly as it was instead.
+        """Test that partial commit does not revert state behind a committed run."""
         self.run_cycle(response(1000), "run-1")
         baseline_state = self.store.states["one"]
 
         class PartialCommitStore(MemoryOperationalStore):
+            """A state store stub that fails partway through a batch commit."""
+
             def __init__(self, targets, states, runs) -> None:
                 super().__init__(targets)
                 self.states = states
@@ -391,6 +413,7 @@ class RoutineTests(unittest.TestCase):
         assert baseline_state == store.states["one"]
 
     def test_failure_alert_waits_for_durable_failure_state(self) -> None:
+        """Test that failure alert waits for durable failure state."""
         transient = MonitorError("fetch_timeout", "fixture timeout", retryable=True)
         for index in range(1, 3):
             self.run_cycle(
@@ -401,6 +424,8 @@ class RoutineTests(unittest.TestCase):
         assert self.store.states["one"].consecutive_failures == 2
 
         class FailingStateStore(MemoryOperationalStore):
+            """A state store stub whose reads always fail."""
+
             def replace_state(self, state) -> None:
                 del state
                 msg = "state_write_failed"
@@ -432,6 +457,7 @@ class RoutineTests(unittest.TestCase):
         assert store.notifications == {}
 
     def test_one_target_failure_does_not_abort_other_targets(self) -> None:
+        """Test that one target failure does not abort other targets."""
         targets = [make_target("good"), make_target("bad")]
         store = MemoryOperationalStore(targets)
         fetcher = FixtureFetcher(
@@ -456,6 +482,7 @@ class RoutineTests(unittest.TestCase):
         assert {"good", "bad"} == set(store.states)
 
     def test_same_run_id_is_idempotent_in_fixture_store(self) -> None:
+        """Test that same run id is idempotent in fixture store."""
         self.run_cycle(response(1000), "stable")
         assert len(self.store.runs) == 1
         baseline_state = self.store.states["one"]
@@ -466,6 +493,7 @@ class RoutineTests(unittest.TestCase):
         assert baseline_state == self.store.states["one"]
 
     def test_invalid_caller_run_id_fails_before_target_side_effects(self) -> None:
+        """Test that invalid caller run id fails before target side effects."""
         longest = make_target("x" * 128)
         store = MemoryOperationalStore([self.target, longest])
         fetcher = FixtureFetcher(
@@ -496,7 +524,10 @@ class RoutineTests(unittest.TestCase):
         assert store.audit == []
 
     def test_audit_sink_failure_does_not_change_primary_result(self) -> None:
+        """Test that audit sink failure does not change primary result."""
         class FailingAudit:
+            """An audit sink stub whose writes always fail."""
+
             def append_audit(self, record) -> None:
                 del record
                 raise RuntimeError
@@ -515,6 +546,7 @@ class RoutineTests(unittest.TestCase):
         assert "one" in self.store.states
 
     def test_outbox_is_a_mutually_exclusive_delivery_backend(self) -> None:
+        """Test that outbox is a mutually exclusive delivery backend."""
         def outbox_cycle(price: int, run_id: str):
             routine = WeeklyMonitorRoutine(
                 store=self.store,
@@ -545,9 +577,12 @@ class RoutineTests(unittest.TestCase):
             )
 
     def test_summary_connector_attempts_are_recorded_with_fetch_attempt(self) -> None:
+        """Test that summary connector attempts are recorded with fetch attempt."""
         self.run_cycle(response(1000), "summary-1")
 
         class FailingSummary:
+            """A summary client stub whose calls always fail."""
+
             def summarize(self, request):
                 del request
                 msg = "connector_unavailable"
@@ -574,7 +609,10 @@ class RoutineTests(unittest.TestCase):
         assert [attempt.error_code for attempt in result.runs[0].attempts] == ["", "connector_unavailable", "connector_unavailable"]
 
     def test_oversized_diff_fails_closed_instead_of_advancing_baseline(self) -> None:
+        """Test that oversized diff fails closed instead of advancing baseline."""
         class UnreachableSummary:
+            """A summary client stub that fails the test if invoked."""
+
             def summarize(self, request):
                 msg = (
                     "synthetic budget-exceeded evidence must never reach a "
@@ -628,6 +666,7 @@ class RoutineTests(unittest.TestCase):
         # truncates under a small max_sections, but the price section is
         # prioritized into the retained evidence, so a genuine non-material
         # verdict from the model is trusted and the baseline still advances.
+        """Test that non material over ordinary truncation still advances baseline."""
         baseline_paragraphs = [
             "Price: ¥10" if index == 35 else f"Note {index} original"
             for index in range(40)
@@ -681,6 +720,7 @@ class RoutineTests(unittest.TestCase):
         # and truncation still drops sections the model never saw. A
         # non-material verdict over that incomplete evidence must not be
         # trusted just because no *recognized* pattern was cut.
+        """Test that truncated non signal sections with non material verdict fail closed."""
         baseline_paragraphs = []
         changed_paragraphs = []
         for index in range(5):
@@ -734,6 +774,7 @@ class RoutineTests(unittest.TestCase):
         # non-material verdict cannot be trusted to advance the baseline.
         # Anchor paragraphs between each price keep them as distinct diff
         # opcodes instead of collapsing into a single contiguous replace.
+        """Test that truncated signal sections with non material verdict fail closed."""
         baseline_paragraphs = []
         changed_paragraphs = []
         for index in range(5):
