@@ -12,6 +12,7 @@ import unittest
 import zlib
 from io import BytesIO, StringIO
 from pathlib import Path
+from typing import IO, TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
@@ -32,6 +33,9 @@ from pypdf.generic import (
     RectangleObject,
     StreamObject,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 def _pdf_stream(number: int, body: bytes, *, extra: bytes = b"") -> bytes:
@@ -57,7 +61,11 @@ def _pdf(*objects: bytes) -> bytes:
 
 
 def _escaped_filter_text_pdf(text: bytes) -> bytes:
-    """Build a valid one-page PDF whose Flate filter key uses a name escape."""
+    """Build a valid one-page PDF whose Flate filter key uses a name escape.
+
+    Returns:
+        The raw PDF file bytes.
+    """
     compressed = zlib.compress(b"BT /F1 12 Tf (" + text + b") Tj ET")
     objects = (
         b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -97,7 +105,7 @@ def _escaped_filter_text_pdf(text: bytes) -> bytes:
 class _IndirectLengthStreamObject(StreamObject):
     """A writer stream whose /Length remains an indirect reference."""
 
-    def write_to_stream(self, stream: BytesIO, encryption_key: object = None) -> None:
+    def write_to_stream(self, stream: IO[Any], encryption_key: object = None) -> None:
         del encryption_key
         DictionaryObject.write_to_stream(self, stream)
         stream.write(b"\nstream\n")
@@ -106,7 +114,11 @@ class _IndirectLengthStreamObject(StreamObject):
 
 
 def _text_pdf(content: bytes, *, indirect_length: bool = False) -> bytes:
-    """Build a valid, one-page PDF containing the supplied text operators."""
+    """Build a valid, one-page PDF containing the supplied text operators.
+
+    Returns:
+        The raw PDF file bytes.
+    """
     writer = PdfWriter()
     page = writer.add_blank_page(width=300, height=200)
     font = DictionaryObject(
@@ -141,7 +153,11 @@ def _text_pdf(content: bytes, *, indirect_length: bool = False) -> bytes:
 
 
 def _text_pdf_with_link(content: bytes, *, uri: str) -> bytes:
-    """Build a valid, one-page text PDF with a link annotation on the page."""
+    """Build a valid, one-page text PDF with a link annotation on the page.
+
+    Returns:
+        The raw PDF file bytes.
+    """
     writer = PdfWriter()
     page = writer.add_blank_page(width=300, height=200)
     font = DictionaryObject(
@@ -171,7 +187,11 @@ def _text_pdf_with_link(content: bytes, *, uri: str) -> bytes:
 
 
 def _image_only_pdf() -> bytes:
-    """Build a valid page that contains only an image XObject."""
+    """Build a valid page that contains only an image XObject.
+
+    Returns:
+        The raw PDF file bytes.
+    """
     writer = PdfWriter()
     page = writer.add_blank_page(width=300, height=200)
     image = StreamObject()
@@ -276,7 +296,10 @@ class NormalizationTests(unittest.TestCase):
             b"</channel></rss>"
         )
         assert normalize_content(bom_feed, content_type="application/rss+xml").kind == "feed"
-        plain = normalize_content("ＡＢＣ".encode(), content_type="text/plain")
+        plain = normalize_content(
+            "ＡＢＣ".encode(),  # ruff: ignore[ambiguous-unicode-character-string] -- deliberately fullwidth
+            content_type="text/plain",
+        )
         assert plain.text == "ABC"
 
     def test_article_header_title_change_is_not_silently_missed(self) -> None:
@@ -1731,25 +1754,25 @@ class NormalizationTests(unittest.TestCase):
             normalize_content(image_only, content_type="application/pdf")
 
     def test_pdf_parser_is_lazy_and_reports_a_missing_capability(self) -> None:
+        """Test that pdf parser is lazy and reports a missing capability."""
         # HTML-only callers must not need pypdf just because normalize.py
         # imports the PDF normalizer. A PDF request should instead return a
         # stable, actionable error when the optional runtime capability is
         # absent.
-        """Test that pdf parser is lazy and reports a missing capability."""
         pdf = _text_pdf(b"(Parser capability) Tj")
         original_import = builtins.__import__
 
         def reject_pypdf(
             name: str,
-            globals: object = None,
-            locals: object = None,
-            fromlist: object = (),
+            globals_ns: Mapping[str, object] | None = None,
+            locals_ns: Mapping[str, object] | None = None,
+            fromlist: Sequence[str] | None = (),
             level: int = 0,
         ) -> object:
             if name == "pypdf" or name.startswith("pypdf."):
                 msg = f"No module named {name!r}"
                 raise ModuleNotFoundError(msg, name=name)
-            return original_import(name, globals, locals, fromlist, level)
+            return original_import(name, globals_ns, locals_ns, fromlist, level)
 
         with patch("builtins.__import__", new=reject_pypdf):
             html = normalize_content(
@@ -1972,7 +1995,7 @@ class NormalizationTests(unittest.TestCase):
     def test_pdf_unterminated_string_fails_closed(self) -> None:
         """Test that pdf unterminated string fails closed."""
         pdf = _pdf(_pdf_stream(1, b"BT (unterminated Tj ET"))
-        with pytest.raises(MonitorError, match="pdf_malformed|malformed"):
+        with pytest.raises(MonitorError, match=r"pdf_malformed|malformed"):
             normalize_content(pdf, content_type="application/pdf")
 
     def test_standard_generated_font_pdf_is_extracted(self) -> None:
@@ -2095,7 +2118,7 @@ class NormalizationTests(unittest.TestCase):
         pdf = _pdf(
             b"1 0 obj\n<< /Length 3 0 R >>\nstream\n" + body + b"\nendstream\nendobj\n"
         )
-        with pytest.raises(MonitorError, match="pdf_malformed|malformed"):
+        with pytest.raises(MonitorError, match=r"pdf_malformed|malformed"):
             normalize_content(pdf, content_type="application/pdf")
 
     def test_pdf_unsupported_filter_streams_are_rejected_not_skipped(self) -> None:
@@ -2197,7 +2220,7 @@ class NormalizationTests(unittest.TestCase):
         compressed = zlib.compress(b"BT (Hello Flate PDF) Tj ET")
         truncated = compressed[:-4]
         pdf = _pdf(_pdf_stream(1, truncated, extra=b"/Filter /FlateDecode"))
-        with pytest.raises(MonitorError, match="truncated|malformed"):
+        with pytest.raises(MonitorError, match=r"truncated|malformed"):
             normalize_content(pdf, content_type="application/pdf")
 
     def test_pdf_stream_without_an_enclosing_object_fails_closed(self) -> None:
@@ -2207,7 +2230,7 @@ class NormalizationTests(unittest.TestCase):
         # plain content.
         """Test that pdf stream without an enclosing object fails closed."""
         pdf = b"%PDF-1.4\nstream\nBT (Hello) Tj ET\nendstream\n%%EOF"
-        with pytest.raises(MonitorError, match="pdf_malformed|malformed"):
+        with pytest.raises(MonitorError, match=r"pdf_malformed|malformed"):
             normalize_content(pdf, content_type="application/pdf")
 
     def test_malformed_font_pdfs_are_rejected_not_mishashed(self) -> None:
@@ -2572,13 +2595,11 @@ class DiffTests(unittest.TestCase):
 
     def test_signal_section_truncated_when_not_all_signals_fit(self) -> None:
         """Test that signal section truncated when not all signals fit."""
-        before_lines = []
-        after_lines = []
+        before_lines: list[str] = []
+        after_lines: list[str] = []
         for index in range(5):
-            before_lines.append(f"anchor {index}")
-            after_lines.append(f"anchor {index}")
-            before_lines.append(f"Price: ${100 + index}")
-            after_lines.append(f"Price: ${200 + index}")
+            before_lines.extend([f"anchor {index}", f"Price: ${100 + index}"])
+            after_lines.extend([f"anchor {index}", f"Price: ${200 + index}"])
         result = compare_content(
             "\n".join(before_lines),
             "\n".join(after_lines),
