@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 from errors import MonitorError
@@ -248,7 +248,6 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self._allowed_addresses = allowed_addresses
         self._deadline = deadline
         self._source_address: tuple[str, int] | None = None
-        self._ssl_context = context
 
     def connect(self) -> None:
         raw_socket = _connect_pinned_socket(
@@ -266,8 +265,9 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
             # and driven separately under the same deadline, since it bypasses
             # this socket's recv overrides entirely (see
             # ``_do_handshake_with_deadline``).
-            self._ssl_context.sslsocket_class = _DeadlineSSLSocket
-            wrapped = self._ssl_context.wrap_socket(
+            ssl_context = cast(ssl.SSLContext, self._context)  # pyright: ignore[reportAttributeAccessIssue]
+            ssl_context.sslsocket_class = _DeadlineSSLSocket
+            wrapped = ssl_context.wrap_socket(
                 raw_socket, server_hostname=self.host, do_handshake_on_connect=False
             )
             if wrapped is None:
