@@ -32,7 +32,8 @@ exclude = [".venv"]
 select = ["E", "F", "I", "B", "S", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101"]
+"skills/weekly-web-monitor/scripts/html_normalizer.py" = ["S101"]
+"tests/**/*.py" = ["E501", "S101", "S603", "UP037"]
 
 [tool.pyright]
 exclude = [".venv"]
