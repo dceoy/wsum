@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from errors import MonitorError
 from models import Attempt, NotificationRecord, RunRecord, State, Target
@@ -54,13 +54,17 @@ NOTIFICATION_COLUMNS = (
     "last_error",
 )
 
+_FIRST_DATA_ROW = 2
+
 
 class SheetsConnector(Protocol):
     """Minimal least-privilege connector surface required by SheetsStore."""
 
     def read_values(
         self, spreadsheet_id: str, range_name: str
-    ) -> Sequence[Sequence[Any]]: ...
+    ) -> Sequence[Sequence[Any]]:
+        """Return the raw values in ``range_name``."""
+        ...
 
     def replace_values(
         self,
@@ -69,7 +73,9 @@ class SheetsConnector(Protocol):
         values: Sequence[Sequence[Any]],
         *,
         value_input_option: str,
-    ) -> None: ...
+    ) -> None:
+        """Replace the values in ``range_name`` with ``values``."""
+        ...
 
     def append_values(
         self,
@@ -78,7 +84,9 @@ class SheetsConnector(Protocol):
         values: Sequence[Sequence[Any]],
         *,
         value_input_option: str,
-    ) -> None: ...
+    ) -> None:
+        """Append ``values`` as new rows to ``range_name``."""
+        ...
 
     def batch_replace_values(
         self,
@@ -92,7 +100,23 @@ class SheetsConnector(Protocol):
 
 
 def _normalize_table(values: Sequence[Sequence[Any]], sheet: str) -> list[list[Any]]:
-    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+    """Validate and copy ``values`` into a plain two-dimensional list.
+
+    Returns:
+        The copied table.
+
+    Raises:
+        MonitorError: If ``values`` or any of its rows is not an array.
+    """
+    if not isinstance(
+        values, Sequence
+    ) or isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+        # values ultimately originates from an untrusted Sheets API
+        # response; callers may pass a non-conforming value at runtime
+        # despite the declared type, so this check stays load-bearing.
+        values,
+        (str, bytes),
+    ):
         msg = "sheet_invalid_structure"
         raise MonitorError(
             msg,
@@ -100,7 +124,11 @@ def _normalize_table(values: Sequence[Sequence[Any]], sheet: str) -> list[list[A
         )
     table: list[list[Any]] = []
     for row in values:
-        if not isinstance(row, Sequence) or isinstance(row, (str, bytes)):
+        if not isinstance(
+            row, Sequence
+        ) or isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            row, (str, bytes)
+        ):
             msg = "sheet_invalid_structure"
             raise MonitorError(
                 msg, f"{sheet}: every row must be an array"
@@ -116,6 +144,17 @@ def records_from_values(
     *,
     allow_empty: bool = True,
 ) -> list[dict[str, Any]]:
+    """Parse a sheet's values into header-keyed records.
+
+    Returns:
+        One dict per data row, keyed by header, plus a ``_row_number``
+        key giving its 1-based sheet row.
+
+    Raises:
+        MonitorError: If the sheet is empty (when disallowed), its
+            headers are malformed or missing required columns, or a row
+            has too many values.
+    """
     table = _normalize_table(values, sheet)
     if not table:
         if allow_empty:
@@ -146,7 +185,7 @@ def records_from_values(
         )
     records: list[dict[str, Any]] = []
     for row_number, raw_row in enumerate(table[1:], start=2):
-        if not raw_row or all(str(value).strip() == "" for value in raw_row):
+        if not raw_row or all(not str(value).strip() for value in raw_row):
             continue
         if len(raw_row) > len(headers):
             msg = "sheet_invalid_row"
@@ -163,6 +202,15 @@ def records_from_values(
 def _ensure_unique(
     records: Iterable[Mapping[str, Any]], key: str, sheet: str
 ) -> list[Mapping[str, Any]]:
+    """Validate that every record's ``key`` is present and unique.
+
+    Returns:
+        ``records``, unchanged.
+
+    Raises:
+        MonitorError: If any record is missing ``key`` or duplicates a
+            previous record's value.
+    """
     result: list[Mapping[str, Any]] = []
     seen: set[str] = set()
     for record in records:
@@ -184,6 +232,11 @@ def _ensure_unique(
 
 
 def load_enabled_targets(values: Sequence[Sequence[Any]]) -> list[Target]:
+    """Parse and return only the enabled targets from the Targets sheet.
+
+    Returns:
+        The enabled targets.
+    """
     records = _ensure_unique(
         records_from_values(values, TARGET_COLUMNS, "Targets", allow_empty=False),
         "target_id",
@@ -194,6 +247,11 @@ def load_enabled_targets(values: Sequence[Sequence[Any]]) -> list[Target]:
 
 
 def load_states(values: Sequence[Sequence[Any]]) -> dict[str, tuple[int, State]]:
+    """Parse the State sheet into a mapping of target_id to (row, state).
+
+    Returns:
+        A mapping of target_id to (1-based sheet row, state).
+    """
     records = _ensure_unique(
         records_from_values(values, STATE_COLUMNS, "State", allow_empty=False),
         "target_id",
@@ -209,6 +267,11 @@ def load_states(values: Sequence[Sequence[Any]]) -> dict[str, tuple[int, State]]
 def load_notifications(
     values: Sequence[Sequence[Any]],
 ) -> dict[str, tuple[int, NotificationRecord]]:
+    """Parse the Notifications sheet into a mapping keyed by event_id.
+
+    Returns:
+        A mapping of event_id to (1-based sheet row, record).
+    """
     records = _ensure_unique(
         records_from_values(
             values, NOTIFICATION_COLUMNS, "Notifications", allow_empty=False
@@ -231,11 +294,18 @@ def load_notifications(
 
 
 def state_row(state: State) -> list[Any]:
+    """Return ``state`` as a State sheet row, in column order."""
     value = state.as_dict()
     return [value[column] for column in STATE_COLUMNS]
 
 
 def run_row(run: RunRecord) -> list[Any]:
+    """Return ``run`` as a Runs sheet row, in column order.
+
+    Returns:
+        The row, with ``attempts`` folded into the ``summary`` cell as
+        JSON when present.
+    """
     value = run.as_dict()
     summary = value["summary"]
     if value["attempts"]:
@@ -248,25 +318,44 @@ def run_row(run: RunRecord) -> list[Any]:
     return [value[column] for column in RUN_COLUMNS]
 
 
+def _parse_folded_summary(raw_summary: str) -> tuple[str, tuple[Attempt, ...]]:
+    """Unfold a Runs sheet ``summary`` cell into (text, attempts).
+
+    Returns:
+        The plain summary text and any JSON-folded attempts; falls back to
+        ``(raw_summary, ())`` if it is not a JSON-folded attempts payload.
+    """
+    try:
+        parsed: object = json.loads(raw_summary)
+    except json.JSONDecodeError:
+        return raw_summary, ()
+    if not isinstance(parsed, dict):
+        return raw_summary, ()
+    parsed = cast("dict[str, Any]", parsed)
+    raw_attempts = parsed.get("attempts")
+    if not isinstance(raw_attempts, list):
+        return raw_summary, ()
+    attempts = tuple(
+        Attempt(
+            int(item["number"]),
+            str(item["result"]),
+            str(item.get("error_code", "")),
+        )
+        for item in cast("list[Mapping[str, Any]]", raw_attempts)
+    )
+    return str(parsed.get("text", "")), attempts
+
+
 def run_record_from_row(record: Mapping[str, Any]) -> RunRecord:
+    """Parse one Runs sheet record back into a RunRecord.
+
+    Returns:
+        The parsed run record, with any JSON-folded attempts restored.
+    """
     raw_summary = str(record.get("summary", ""))
-    summary = raw_summary
-    attempts: tuple[Attempt, ...] = ()
-    if raw_summary:
-        try:
-            parsed = json.loads(raw_summary)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict) and isinstance(parsed.get("attempts"), list):
-            summary = str(parsed.get("text", ""))
-            attempts = tuple(
-                Attempt(
-                    int(item["number"]),
-                    str(item["result"]),
-                    str(item.get("error_code", "")),
-                )
-                for item in parsed["attempts"]
-            )
+    summary, attempts = (
+        _parse_folded_summary(raw_summary) if raw_summary else (raw_summary, ())
+    )
     return RunRecord(
         run_id=str(record["run_id"]).strip(),
         target_id=str(record["target_id"]).strip(),
@@ -281,12 +370,21 @@ def run_record_from_row(record: Mapping[str, Any]) -> RunRecord:
 
 
 def notification_row(notification: NotificationRecord) -> list[Any]:
+    """Return ``notification`` as a Notifications sheet row, in column order."""
     value = asdict(notification)
     return [value[column] for column in NOTIFICATION_COLUMNS]
 
 
 def replace_state_payload(row_number: int, state: State) -> dict[str, Any]:
-    if row_number < 2:
+    """Build the range/values payload to replace an existing State row.
+
+    Returns:
+        The connector payload.
+
+    Raises:
+        MonitorError: If ``row_number`` is below the first data row.
+    """
+    if row_number < _FIRST_DATA_ROW:
         msg = "sheet_invalid_row"
         raise MonitorError(msg, "State row_number must be at least 2")
     return {
@@ -296,20 +394,39 @@ def replace_state_payload(row_number: int, state: State) -> dict[str, Any]:
 
 
 def append_state_payload(state: State) -> dict[str, Any]:
+    """Build the range/values payload to append a new State row.
+
+    Returns:
+        The connector payload.
+    """
     return {"range": "State!A:H", "values": [state_row(state)]}
 
 
 def append_run_payload(run: RunRecord) -> dict[str, Any]:
+    """Build the range/values payload to append a new Runs row.
+
+    Returns:
+        The connector payload.
+    """
     return {"range": "Runs!A:H", "values": [run_row(run)]}
 
 
 def upsert_notification_payload(
     notification: NotificationRecord, row_number: int | None = None
 ) -> dict[str, Any]:
+    """Build the payload to append or replace one Notifications row.
+
+    Returns:
+        The connector payload, appending if ``row_number`` is ``None`` and
+        replacing otherwise.
+
+    Raises:
+        MonitorError: If ``row_number`` is below the first data row.
+    """
     row = notification_row(notification)
     if row_number is None:
         return {"range": "Notifications!A:F", "values": [row], "mode": "append"}
-    if row_number < 2:
+    if row_number < _FIRST_DATA_ROW:
         msg = "sheet_invalid_row"
         raise MonitorError(
             msg, "Notifications row_number must be at least 2"
@@ -325,6 +442,11 @@ class SheetsStore:
     """Operational store that delegates all I/O to an injected connector."""
 
     def __init__(self, connector: SheetsConnector, spreadsheet_id: str) -> None:
+        """Bind this store to a Sheets connector and spreadsheet.
+
+        Raises:
+            MonitorError: If ``spreadsheet_id`` is empty.
+        """
         if not spreadsheet_id:
             msg = "connector_configuration_missing"
             raise MonitorError(
@@ -335,20 +457,32 @@ class SheetsStore:
         self._spreadsheet_id = spreadsheet_id
 
     def load_enabled_targets(self) -> list[Target]:
+        """Read and return the enabled targets from the Targets sheet.
+
+        Returns:
+            The enabled targets.
+        """
         return load_enabled_targets(
             self._connector.read_values(self._spreadsheet_id, "Targets!A:I")
         )
 
     def _states(self) -> dict[str, tuple[int, State]]:
+        """Reload every state from the sheet, keyed by target ID.
+
+        Returns:
+            A mapping of target_id to (1-based sheet row, state).
+        """
         return load_states(
             self._connector.read_values(self._spreadsheet_id, "State!A:H")
         )
 
     def get_state(self, target_id: str) -> State | None:
+        """Return the stored state for ``target_id``, if any."""
         record = self._states().get(target_id)
         return record[1] if record else None
 
     def replace_state(self, state: State) -> None:
+        """Insert or replace the stored state for its target, via a RAW write."""
         existing = self._states().get(state.target_id)
         payload = (
             replace_state_payload(existing[0], state)
@@ -371,6 +505,7 @@ class SheetsStore:
             )
 
     def get_run(self, run_id: str) -> RunRecord | None:
+        """Return the stored run record for ``run_id``, if any."""
         values = self._connector.read_values(self._spreadsheet_id, "Runs!A:H")
         records = records_from_values(values, RUN_COLUMNS, "Runs", allow_empty=False)
         for record in records:
@@ -379,6 +514,7 @@ class SheetsStore:
         return None
 
     def append_run(self, run: RunRecord) -> None:
+        """Idempotently append a run record, keyed by run_id."""
         values = self._connector.read_values(self._spreadsheet_id, "Runs!A:H")
         existing = records_from_values(values, RUN_COLUMNS, "Runs", allow_empty=False)
         if any(str(record["run_id"]).strip() == run.run_id for record in existing):
@@ -392,11 +528,13 @@ class SheetsStore:
         )
 
     def get_notification(self, event_id: str) -> NotificationRecord | None:
+        """Return the stored notification record for ``event_id``, if any."""
         values = self._connector.read_values(self._spreadsheet_id, "Notifications!A:F")
         record = load_notifications(values).get(event_id)
         return record[1] if record else None
 
     def upsert_notification(self, notification: NotificationRecord) -> None:
+        """Insert or update a single notification record, via a RAW write."""
         existing = load_notifications(
             self._connector.read_values(self._spreadsheet_id, "Notifications!A:F")
         ).get(notification.event_id)
@@ -418,6 +556,11 @@ class SheetsStore:
     def upsert_notifications_atomically(
         self, notifications: Sequence[NotificationRecord]
     ) -> None:
+        """Insert or update all ``notifications`` as a single atomic batch.
+
+        Raises:
+            MonitorError: If ``notifications`` contains a duplicate event_id.
+        """
         if not notifications:
             return
         event_ids = [item.event_id for item in notifications]
