@@ -18,21 +18,112 @@ exclude-newer = "1 week"
 
 [dependency-groups]
 dev = [
+  "ruff >= 0.15.18",
+  "pyright >= 1.1.410",
   "pytest >= 9.1.1",
   "pytest-cov >= 7.1.0",
-  "ruff >= 0.15.18",
 ]
 
 [tool.ruff]
 line-length = 88
-exclude = [".venv"]
+exclude = ["build", ".venv", ".agents", ".claude"]
+preview = true
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "S", "UP"]
+select = [
+  "F",
+  "E",
+  "W",
+  "C90",
+  "I",
+  "N",
+  "D",
+  "UP",
+  "S",
+  "B",
+  "C4",
+  "SIM",
+  "ARG",
+  "PD",
+  "PLC",
+  "PLE",
+  "PLR",
+  "PLW",
+  "FLY",
+  "NPY",
+  "PERF",
+  "FURB",
+  "RUF",
+  "YTT",
+  "ANN",
+  "ASYNC",
+  "BLE",
+  "FBT",
+  "A",
+  "COM",
+  "DTZ",
+  "T10",
+  "DJ",
+  "EM",
+  "EXE",
+  "FA",
+  "ISC",
+  "ICN",
+  "LOG",
+  "G",
+  "INP",
+  "PIE",
+  "T20",
+  "PYI",
+  "PT",
+  "Q",
+  "RSE",
+  "SLF",
+  "SLOT",
+  "TID",
+  "TCH",
+  "INT",
+  "PTH",
+  "TD",
+  "FIX",
+  "ERA",
+  "PGH",
+  "TRY",
+  "FAST",
+  "AIR",
+  "DOC",
+]
+ignore = [
+  "COM812",
+  "FBT001",
+  "FBT002",
+]
 
 [tool.ruff.lint.per-file-ignores]
-"skills/weekly-web-monitor/scripts/html_normalizer.py" = ["S101"]
-"tests/**/*.py" = ["E501", "S101", "S603", "UP037"]
+"tests/**/*.py" = [
+  "DOC201",
+  "DOC501",
+  "PLC2701",
+  "PLR0904",
+  "PLR2004",
+  "PLR6301",
+  "S101",
+  "S106",
+  "SLF001",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.pylint]
+max-args = 10
+max-public-methods = 40
+
+[tool.pyright]
+exclude = ["build", ".venv", ".agents", ".claude"]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "strict"
 
 [tool.pytest.ini_options]
 addopts = [
