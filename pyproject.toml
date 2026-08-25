@@ -89,27 +89,28 @@ select = [
   "DOC",      # pydoclint (DOC)
 ]
 ignore = [
-  "missing-trailing-comma",
-  "boolean-type-hint-positional-argument",
-  "boolean-default-value-positional-argument",
+  "COM812",  # missing-trailing-comma (conflicts with the formatter)
+  "FBT001",  # boolean-type-hint-positional-argument
+  "FBT002",  # boolean-default-value-positional-argument
+  # RUF201 (rule-codes-in-selectors) would otherwise rewrite the codes above
+  # (and per-file-ignores below) back to diagnostic names; this repo
+  # deliberately keeps short rule codes for ignore/per-file-ignores.
+  "RUF201",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"skills/weekly-web-monitor/scripts/html_normalizer.py" = ["assert"]
+"skills/weekly-web-monitor/scripts/html_normalizer.py" = ["S101"]
 "tests/**/*.py" = [
-  "line-too-long",
-  "assert",                              # Use of assert (acceptable in tests)
-  "subprocess-without-shell-equals-true",
-  "quoted-annotation",
-  "ANN",                                 # flake8-annotations (relaxed in tests)
-  "D",                                   # pydocstyle (relaxed in tests)
-  "DOC",                                 # pydoclint (relaxed in tests)
-  "import-private-name",
-  "too-many-public-methods",
-  "magic-value-comparison",
-  "no-self-use",
-  "hardcoded-password-func-arg",
-  "private-member-access",
+  "E501",    # line-too-long
+  "S101",    # assert (use of assert is acceptable in tests)
+  "S603",    # subprocess-without-shell-equals-true
+  "UP037",   # quoted-annotation
+  "PLC2701", # import-private-name
+  "PLR0904", # too-many-public-methods
+  "PLR2004", # magic-value-comparison
+  "PLR6301", # no-self-use
+  "S106",    # hardcoded-password-func-arg
+  "SLF001",  # private-member-access
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -120,13 +121,11 @@ max-args = 10
 max-public-methods = 40
 
 [tool.pyright]
-include = ["skills/weekly-web-monitor/scripts", "tests"]
 exclude = ["build", ".venv", ".agents", ".claude"]
 extraPaths = ["skills/weekly-web-monitor/scripts"]
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "strict"
-reportMissingTypeStubs = false
 
 [tool.pytest.ini_options]
 addopts = [

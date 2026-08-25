@@ -74,17 +74,22 @@ def run_fixture(value: dict[str, Any]) -> dict[str, Any]:
 def main(argv: list[str]) -> int:
     """Run the CLI entry point: load the fixture named in ``argv[1]`` and run it.
 
+    On success, writes the JSON-encoded :func:`run_fixture` result to
+    stdout. On a handled failure, writes ``{"error": ...}`` to stdout
+    instead. Incorrect usage writes a usage message to stderr.
+
     Returns:
         0 on success, 1 if the fixture is invalid or the run fails, 2 for
         incorrect CLI usage.
     """
     if len(argv) != _EXPECTED_ARGC:
+        sys.stderr.write("usage: dry_run.py FIXTURE_JSON\n")
         return 2
     try:
         value = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
-        run_fixture(value)
+        result = run_fixture(value)
     except (OSError, ValueError, KeyError, TypeError, MonitorError) as exc:
-        (
+        error = (
             exc.as_dict()
             if isinstance(exc, MonitorError)
             else {
@@ -93,7 +98,11 @@ def main(argv: list[str]) -> int:
                 "retryable": False,
             }
         )
+        json.dump({"error": error}, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
         return 1
+    json.dump(result, sys.stdout, ensure_ascii=False, sort_keys=True)
+    sys.stdout.write("\n")
     return 0
 
 
