@@ -50,9 +50,7 @@ def _target_records() -> list[dict[str, object]]:
 
 def _write_targets(root: Path) -> None:
     """Write the local target fixtures to ``targets.json``."""
-    (root / "targets.json").write_text(
-        json.dumps(_target_records()), encoding="utf-8"
-    )
+    (root / "targets.json").write_text(json.dumps(_target_records()), encoding="utf-8")
 
 
 def _run_record(*, summary: str = "") -> RunRecord:
@@ -87,9 +85,7 @@ def _notification(event_id: str) -> NotificationRecord:
     )
 
 
-def _normalized(
-    text: str = "hello\n", digest: str = "a" * 64
-) -> NormalizedContent:
+def _normalized(text: str = "hello\n", digest: str = "a" * 64) -> NormalizedContent:
     """Build one normalized text fixture with a caller-controlled hash.
 
     Returns:
@@ -167,9 +163,7 @@ class LocalOperationalStoreTest(unittest.TestCase):
 
         targets = _target_records()
         targets.append(targets[0].copy())
-        (self.root / "targets.json").write_text(
-            json.dumps(targets), encoding="utf-8"
-        )
+        (self.root / "targets.json").write_text(json.dumps(targets), encoding="utf-8")
         with pytest.raises(MonitorError) as duplicate:
             store.load_enabled_targets()
         assert duplicate.value.code == "local_storage_invalid"
