@@ -601,10 +601,8 @@ class WeeklyMonitorRoutine:
                         attempts,
                     )
                     return self._persist_success(next_state, run)
-                raw_path = workspace / "response.bin"
-                raw_path.write_bytes(fetched.body)
                 normalized = normalize_content(
-                    raw_path.read_bytes(),
+                    fetched.body,
                     content_type=fetched.content_type,
                     charset=fetched.charset,
                     base_url=fetched.final_url,
