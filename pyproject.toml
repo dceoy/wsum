@@ -127,6 +127,22 @@ venvPath = "."
 venv = ".venv"
 typeCheckingMode = "strict"
 
+[[tool.pyright.executionEnvironments]]
+# The test suite deliberately does white-box testing of internal helpers
+# (e.g. `_main`, `_PinnedHTTPConnection`, `_add_object`) -- the same
+# already-established policy as ruff's SLF001 (private-member-access)
+# relaxation for tests in [tool.ruff.lint.per-file-ignores] above.
+root = "tests"
+extraPaths = [".", "skills/weekly-web-monitor/scripts"]
+reportPrivateUsage = false
+
+[[tool.pyright.executionEnvironments]]
+# Explicit fallback environment for every other file (declaring any
+# executionEnvironments makes pyright require one; without this, files
+# outside `tests` would silently stop inheriting `extraPaths` above).
+root = "."
+extraPaths = ["skills/weekly-web-monitor/scripts"]
+
 [tool.pytest.ini_options]
 addopts = [
   "--cov=skills/weekly-web-monitor/scripts",
