@@ -2,14 +2,60 @@
 name = "wsum"
 version = "0.1.0"
 description = "Deterministic connector-backed weekly website update monitoring"
-requires-python = ">=3.11"
-license = {text = "MIT"}
-dependencies = ["pypdf>=6,<7"]
+authors = [{name = "dceoy", email = "dceoy@users.noreply.github.com"}]
+maintainers = [{name = "dceoy", email = "dceoy@users.noreply.github.com"}]
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">= 3.11, < 3.15"
+dependencies = ["pypdf >= 6, < 7"]
+
+[project.urls]
+Repository = "https://github.com/dceoy/wsum.git"
+
+[tool.uv]
+exclude-newer = "1 week"
+
+[dependency-groups]
+dev = [
+  "pyright >= 1.1.410",
+  "pytest >= 9.1.1",
+  "pytest-cov >= 7.1.0",
+  "ruff >= 0.15.18",
+]
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+exclude = [".venv"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "S", "UP"]
-ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.pyright]
+exclude = [".venv"]
+extraPaths = ["skills/weekly-web-monitor/scripts"]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+addopts = [
+  "--cov",
+  "--cov-branch",
+  "--capture=no",
+]
+pythonpath = ["."]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+minversion = "6.0"
+
+[tool.coverage.run]
+omit = ["tests/**"]
+
+[tool.coverage.report]
+show_missing = true
