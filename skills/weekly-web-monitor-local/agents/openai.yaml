@@ -1,0 +1,4 @@
+interface:
+  display_name: "Weekly Web Monitor (Local)"
+  short_description: "Monitor website changes with local persistence"
+  default_prompt: "Use $weekly-web-monitor-local to run a safe weekly website change check with local filesystem persistence."

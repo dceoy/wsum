@@ -1,0 +1,4 @@
+interface:
+  display_name: "Weekly Web Monitor (Google Drive)"
+  short_description: "Monitor website changes with Google persistence"
+  default_prompt: "Use $weekly-web-monitor-google-drive to run a safe weekly website change check with Google Sheets and Drive persistence."
