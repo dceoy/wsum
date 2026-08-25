@@ -18,7 +18,6 @@ exclude-newer = "1 week"
 
 [dependency-groups]
 dev = [
-  "pyright >= 1.1.410",
   "pytest >= 9.1.1",
   "pytest-cov >= 7.1.0",
   "ruff >= 0.15.18",
@@ -34,13 +33,6 @@ select = ["E", "F", "I", "B", "S", "UP"]
 [tool.ruff.lint.per-file-ignores]
 "skills/weekly-web-monitor/scripts/html_normalizer.py" = ["S101"]
 "tests/**/*.py" = ["E501", "S101", "S603", "UP037"]
-
-[tool.pyright]
-exclude = [".venv"]
-extraPaths = ["skills/weekly-web-monitor/scripts"]
-venvPath = "."
-venv = ".venv"
-typeCheckingMode = "basic"
 
 [tool.pytest.ini_options]
 addopts = [
