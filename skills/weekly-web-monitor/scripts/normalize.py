@@ -24,9 +24,14 @@ NORMALIZATION_VERSION = "2026-01"
 HASH_ALGORITHM = "sha256"
 CHARSET_RE = re.compile(rb"""charset\s*=\s*["']?\s*([A-Za-z0-9._-]+)""", re.IGNORECASE)
 
+_MIN_INPUT_BYTES = 1_024
+_MAX_INPUT_BYTES = 50_000_000
+
 
 @dataclass(frozen=True, slots=True)
 class NormalizedContent:
+    """A validated, versioned, content-hashed normalization result."""
+
     kind: str
     text: str
     normalized_hash: str
@@ -35,6 +40,12 @@ class NormalizedContent:
     metadata: dict[str, str]
 
     def as_dict(self, *, include_text: bool = True) -> dict[str, Any]:
+        """Return a JSON-serializable representation of this content.
+
+        Returns:
+            The record's fields, minus ``text`` when ``include_text`` is
+            false (e.g. for audit metadata that must stay content-free).
+        """
         value = asdict(self)
         if not include_text:
             value.pop("text")
@@ -42,6 +53,14 @@ class NormalizedContent:
 
 
 def sniff_content_kind(body: bytes) -> str:
+    """Detect a document's kind (pdf/feed/html/xml/text) from its bytes.
+
+    Returns:
+        One of ``"pdf"``, ``"feed"``, ``"html"``, ``"xml"``, ``"text"``.
+
+    Raises:
+        MonitorError: If ``body`` is empty.
+    """
     sample = body[:8_192]
     sample = sample.removeprefix(codecs.BOM_UTF8)
     sample = sample.lstrip()
@@ -68,6 +87,12 @@ def sniff_content_kind(body: bytes) -> str:
 
 
 def declared_content_kind(content_type: str) -> str:
+    """Map an HTTP Content-Type header to a normalization kind.
+
+    Returns:
+        One of ``"pdf"``, ``"feed"``, ``"html"``, ``"xml"``, ``"text"``, or
+        ``"unsupported"``.
+    """
     normalized = content_type.split(";", 1)[0].strip().lower()
     if normalized == "application/pdf":
         return "pdf"
@@ -168,10 +193,25 @@ def _normalize_plain_text(body: bytes, charset: str = "") -> str:
 
 
 def hash_normalized(kind: str, text: str) -> str:
+    """Compute the versioned SHA-256 hash of normalized content.
+
+    Returns:
+        The hex-encoded digest of ``kind`` and ``text`` under the current
+        :data:`NORMALIZATION_VERSION`.
+
+    Raises:
+        MonitorError: If ``kind`` is invalid or ``text`` is empty.
+    """
     if kind not in {"feed", "html", "pdf", "text"}:
         msg = "invalid_content"
         raise MonitorError(msg, "normalized content kind is invalid")
-    if not isinstance(text, str) or not text:
+    if (
+        not isinstance(text, str)  # pyright: ignore[reportUnnecessaryIsInstance]
+        # text ultimately originates from extraction/decoding helpers whose
+        # own contracts are not statically enforced across module
+        # boundaries; this stays a load-bearing runtime check.
+        or not text
+    ):
         msg = "empty_extraction"
         raise MonitorError(msg, "normalized text is empty")
     return hashlib.sha256(
@@ -190,10 +230,24 @@ def normalize_content(
     strict_selectors: bool = True,
     max_input_bytes: int = 10_000_000,
 ) -> NormalizedContent:
-    if not isinstance(body, bytes):
+    """Detect, decode, extract, and hash ``body`` into normalized content.
+
+    Returns:
+        The validated, versioned, hashed normalization result.
+
+    Raises:
+        MonitorError: If ``body`` is not bytes, exceeds the input size
+            limit, its declared and detected content types mismatch, its
+            declared type is unsupported, or extraction/decoding fails.
+    """
+    if not isinstance(
+        body, bytes
+    ):  # pyright: ignore[reportUnnecessaryIsInstance]
+        # body ultimately originates from an untrusted HTTP fetch; callers
+        # may pass a non-bytes value at runtime despite the declared type.
         msg = "invalid_content"
         raise MonitorError(msg, "content must be bytes")
-    if not 1_024 <= max_input_bytes <= 50_000_000:
+    if not _MIN_INPUT_BYTES <= max_input_bytes <= _MAX_INPUT_BYTES:
         msg = "invalid_configuration"
         raise MonitorError(
             msg, "normalization input limit is invalid"
@@ -210,8 +264,8 @@ def normalize_content(
         raise MonitorError(
             msg, "declared content type is unsupported"
         )
-    compatible = (
-        declared in {"text", sniffed} or (declared == "xml" and sniffed in {"feed", "xml"})
+    compatible = declared in {"text", sniffed} or (
+        declared == "xml" and sniffed in {"feed", "xml"}
     )
     if not compatible:
         msg = "content_type_mismatch"
@@ -267,10 +321,10 @@ def _main(argv: list[str]) -> int:
         sys.stderr.write("usage: normalize.py INPUT [CONTENT_TYPE]\n")
         return 2
     try:
-        with pathlib.Path(argv[1]).open("rb") as stream:
-            result = normalize_content(
-                stream.read(), content_type=argv[2] if len(argv) == _MAX_ARGC else ""
-            )
+        result = normalize_content(
+            pathlib.Path(argv[1]).read_bytes(),
+            content_type=argv[2] if len(argv) == _MAX_ARGC else "",
+        )
     except (OSError, MonitorError) as exc:
         error = (
             exc.as_dict()
