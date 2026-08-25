@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from diff import DiffConfig
@@ -18,14 +19,24 @@ from memory_adapters import (
     MemoryOperationalStore,
     MemorySlackConnector,
 )
-from models import NotificationRecord, Target
+from models import NotificationRecord, RunRecord, State, Target
 from normalize import normalize_content
 from notifications import change_event_id, failure_event_id
 from retry import RetryConfig
-from routine import RoutineConfig, WeeklyMonitorRoutine
+from routine import RoutineConfig, RoutineResult, WeeklyMonitorRoutine
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from audit import AuditRecord
 
 
 def make_target(target_id: str = "one", group: str = "default") -> Target:
+    """Build a static-fetch target for the given ID and notification group.
+
+    Returns:
+        The constructed target.
+    """
     return Target.from_mapping(
         {
             "target_id": target_id,
@@ -42,6 +53,11 @@ def make_target(target_id: str = "one", group: str = "default") -> Target:
 
 
 def response(price: int) -> FixtureResponse:
+    """Build a fixture HTML response showing the given price.
+
+    Returns:
+        The constructed fixture response.
+    """
     return FixtureResponse(
         (
             "<html><body><main><h1>Product</h1>"
@@ -52,6 +68,11 @@ def response(price: int) -> FixtureResponse:
 
 
 def many_lines_response(line_count: int) -> FixtureResponse:
+    """Build a fixture HTML response with `line_count` paragraph lines.
+
+    Returns:
+        The constructed fixture response.
+    """
     body = "".join(f"<p>Line {index}</p>" for index in range(line_count))
     return FixtureResponse(
         f"<html><body><main><h1>Product</h1>{body}</main></body></html>".encode(),
@@ -60,6 +81,11 @@ def many_lines_response(line_count: int) -> FixtureResponse:
 
 
 def paragraphs_response(paragraphs: list[str]) -> FixtureResponse:
+    """Build a fixture HTML response with one paragraph per item.
+
+    Returns:
+        The constructed fixture response.
+    """
     body = "".join(f"<p>{text}</p>" for text in paragraphs)
     return FixtureResponse(
         f"<html><body><main><h1>Product</h1>{body}</main></body></html>".encode(),
@@ -70,7 +96,12 @@ def paragraphs_response(paragraphs: list[str]) -> FixtureResponse:
 class NonMaterialSummary:
     """A summary client stub that always returns a non-material result."""
 
-    def summarize(self, request):
+    def summarize(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Return a fixed non-material summary derived from `request`.
+
+        Returns:
+            The stub summary response.
+        """
         return {
             "material": False,
             "significance": request["deterministic_assessment"]["significance"],
@@ -86,7 +117,7 @@ class RoutineTests(unittest.TestCase):
     """Tests for RoutineTests."""
 
     def setUp(self) -> None:
-        """Test that setUp."""
+        """Build a fresh target, store, snapshots, and Slack connector."""
         self.target = make_target()
         self.store = MemoryOperationalStore([self.target])
         self.drive_connector = MemoryDriveConnector()
@@ -100,7 +131,12 @@ class RoutineTests(unittest.TestCase):
         *,
         slack: MemorySlackConnector | None = None,
         retry: RetryConfig | None = None,
-    ):
+    ) -> tuple[RoutineResult, FixtureFetcher]:
+        """Run one routine cycle against a single fixture response.
+
+        Returns:
+            The routine's result, and the fetcher used to produce it.
+        """
         fetcher = FixtureFetcher({"one": fixture})
         routine = WeeklyMonitorRoutine(
             store=self.store,
@@ -254,12 +290,23 @@ class RoutineTests(unittest.TestCase):
         class FlakyStateStore(MemoryOperationalStore):
             """A state store stub that fails a configurable number of times."""
 
-            def __init__(self, targets, states) -> None:
+            def __init__(
+                self, targets: Sequence[Target], states: dict[str, State]
+            ) -> None:
+                """Seed the store with `targets` and a pre-populated `states` map."""
                 super().__init__(targets)
                 self.states = states
                 self.get_state_calls = 0
 
-            def get_state(self, target_id):
+            def get_state(self, target_id: str) -> State | None:
+                """Fail the first call, then delegate to the real lookup.
+
+                Returns:
+                    The target's state, once no longer simulating a failure.
+
+                Raises:
+                    MonitorError: On the first call only.
+                """
                 self.get_state_calls += 1
                 if self.get_state_calls == 1:
                     msg = "state_read_failed"
@@ -303,11 +350,20 @@ class RoutineTests(unittest.TestCase):
         class AlwaysFailingStateStore(MemoryOperationalStore):
             """A state store stub whose writes always fail."""
 
-            def __init__(self, targets, states) -> None:
+            def __init__(
+                self, targets: Sequence[Target], states: dict[str, State]
+            ) -> None:
+                """Seed the store with `targets` and a pre-populated `states` map."""
                 super().__init__(targets)
                 self.states = states
 
-            def get_state(self, target_id):
+            def get_state(self, target_id: str) -> State | None:
+                """Always fail, simulating a persistently unavailable store.
+
+                Raises:
+                    MonitorError: Always, to simulate the persistent failure.
+                """
+                del target_id
                 msg = "state_read_failed"
                 raise MonitorError(msg, "simulated persistent failure")
 
@@ -343,11 +399,13 @@ class RoutineTests(unittest.TestCase):
         class RecordingStore(MemoryOperationalStore):
             """A state store stub that records every write it receives."""
 
-            def append_run(self, run) -> None:
+            def append_run(self, run: RunRecord) -> None:
+                """Record the call, then delegate to the real append."""
                 calls.append("append_run")
                 super().append_run(run)
 
-            def replace_state(self, state) -> None:
+            def replace_state(self, state: State) -> None:
+                """Record the call, then delegate to the real replace."""
                 calls.append("replace_state")
                 super().replace_state(state)
 
@@ -380,13 +438,24 @@ class RoutineTests(unittest.TestCase):
         class PartialCommitStore(MemoryOperationalStore):
             """A state store stub that fails partway through a batch commit."""
 
-            def __init__(self, targets, states, runs) -> None:
+            def __init__(
+                self,
+                targets: Sequence[Target],
+                states: dict[str, State],
+                runs: dict[str, RunRecord],
+            ) -> None:
+                """Seed the store with pre-populated `states` and `runs` maps."""
                 super().__init__(targets)
                 self.states = states
                 self.runs = runs
                 self.replace_state_calls = 0
 
-            def replace_state(self, state) -> None:
+            def replace_state(self, state: State) -> None:
+                """Fail the first call, then delegate to the real replace.
+
+                Raises:
+                    MonitorError: On the first call only.
+                """
                 self.replace_state_calls += 1
                 if self.replace_state_calls == 1:
                     msg = "state_write_failed"
@@ -426,7 +495,12 @@ class RoutineTests(unittest.TestCase):
         class FailingStateStore(MemoryOperationalStore):
             """A state store stub whose reads always fail."""
 
-            def replace_state(self, state) -> None:
+            def replace_state(self, state: State) -> None:
+                """Always fail, simulating a persistently unavailable store.
+
+                Raises:
+                    MonitorError: Always, to simulate the write failure.
+                """
                 del state
                 msg = "state_write_failed"
                 raise MonitorError(msg, "simulated write failure")
@@ -512,9 +586,11 @@ class RoutineTests(unittest.TestCase):
 
         invalid_run_ids = ("", "line\nbreak", "r" * 72, 123)
         for invalid_run_id in invalid_run_ids:
-            with self.subTest(run_id=invalid_run_id):
-                with pytest.raises(MonitorError, match="run_id"):
-                    routine.run(run_id=invalid_run_id)  # type: ignore[arg-type]
+            with (
+                self.subTest(run_id=invalid_run_id),
+                pytest.raises(MonitorError, match="run_id"),
+            ):
+                routine.run(run_id=invalid_run_id)  # type: ignore[arg-type]
 
         assert dict(fetcher.calls) == {}
         assert slack.messages == []
@@ -528,7 +604,12 @@ class RoutineTests(unittest.TestCase):
         class FailingAudit:
             """An audit sink stub whose writes always fail."""
 
-            def append_audit(self, record) -> None:
+            def append_audit(self, record: AuditRecord) -> None:
+                """Always fail, simulating a persistently unavailable sink.
+
+                Raises:
+                    RuntimeError: Always, to simulate the write failure.
+                """
                 del record
                 raise RuntimeError
 
@@ -547,7 +628,12 @@ class RoutineTests(unittest.TestCase):
 
     def test_outbox_is_a_mutually_exclusive_delivery_backend(self) -> None:
         """Test that outbox is a mutually exclusive delivery backend."""
-        def outbox_cycle(price: int, run_id: str):
+        def outbox_cycle(price: int, run_id: str) -> RoutineResult:
+            """Run one outbox-delivery-mode cycle for the given price.
+
+            Returns:
+                The routine's result.
+            """
             routine = WeeklyMonitorRoutine(
                 store=self.store,
                 snapshots=self.snapshots,
@@ -583,7 +669,12 @@ class RoutineTests(unittest.TestCase):
         class FailingSummary:
             """A summary client stub whose calls always fail."""
 
-            def summarize(self, request):
+            def summarize(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+                """Always fail, simulating a persistently unavailable connector.
+
+                Raises:
+                    MonitorError: Always, to simulate the connector failure.
+                """
                 del request
                 msg = "connector_unavailable"
                 raise MonitorError(
@@ -613,7 +704,13 @@ class RoutineTests(unittest.TestCase):
         class UnreachableSummary:
             """A summary client stub that fails the test if invoked."""
 
-            def summarize(self, request):
+            def summarize(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+                """Fail the test, since this must never be invoked.
+
+                Raises:
+                    AssertionError: Always; being called at all is the failure.
+                """
+                del request
                 msg = (
                     "synthetic budget-exceeded evidence must never reach a "
                     "summary model"
@@ -721,14 +818,17 @@ class RoutineTests(unittest.TestCase):
         # non-material verdict over that incomplete evidence must not be
         # trusted just because no *recognized* pattern was cut.
         """Test that truncated non signal sections with non material verdict fail closed."""
-        baseline_paragraphs = []
-        changed_paragraphs = []
+        baseline_paragraphs: list[str] = []
+        changed_paragraphs: list[str] = []
         for index in range(5):
-            baseline_paragraphs.append(f"Anchor {index}")
-            changed_paragraphs.append(f"Anchor {index}")
-            baseline_paragraphs.append(f"Note {index} original text here")
-            changed_paragraphs.append(
-                f"Note {index} completely different content now present"
+            baseline_paragraphs.extend(
+                [f"Anchor {index}", f"Note {index} original text here"]
+            )
+            changed_paragraphs.extend(
+                [
+                    f"Anchor {index}",
+                    f"Note {index} completely different content now present",
+                ]
             )
         routine_config = RoutineConfig(
             max_concurrency=2,
@@ -775,13 +875,15 @@ class RoutineTests(unittest.TestCase):
         # Anchor paragraphs between each price keep them as distinct diff
         # opcodes instead of collapsing into a single contiguous replace.
         """Test that truncated signal sections with non material verdict fail closed."""
-        baseline_paragraphs = []
-        changed_paragraphs = []
+        baseline_paragraphs: list[str] = []
+        changed_paragraphs: list[str] = []
         for index in range(5):
-            baseline_paragraphs.append(f"Anchor {index}")
-            changed_paragraphs.append(f"Anchor {index}")
-            baseline_paragraphs.append(f"Price: ¥{100 + index}")
-            changed_paragraphs.append(f"Price: ¥{200 + index}")
+            baseline_paragraphs.extend(
+                [f"Anchor {index}", f"Price: ¥{100 + index}"]
+            )
+            changed_paragraphs.extend(
+                [f"Anchor {index}", f"Price: ¥{200 + index}"]
+            )
         routine_config = RoutineConfig(
             max_concurrency=2,
             retry=RetryConfig(),
