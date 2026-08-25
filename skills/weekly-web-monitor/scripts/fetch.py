@@ -12,13 +12,12 @@ import sys
 import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
-from pathlib import Path
 from time import monotonic
 from typing import Any, cast
 from urllib.parse import urlsplit
 
 from errors import MonitorError
+from models import utc_now
 from network_policy import (
     ResolvedTarget,
     Resolver,
@@ -283,10 +282,6 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
             # handshake or the post-handshake peer check fails.
             (wrapped if wrapped is not None else raw_socket).close()
             raise
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _request_path(url: str) -> str:
@@ -605,7 +600,7 @@ def fetch_url(
                         response.getheader("Last-Modified", last_modified),
                         "Last-Modified",
                     ),
-                    fetched_at=_utc_now(),
+                    fetched_at=utc_now(),
                     redirect_count=redirects,
                 )
             if not 200 <= status <= 299:
@@ -699,7 +694,7 @@ def fetch_url(
                 last_modified=_safe_validator(
                     response.getheader("Last-Modified", ""), "Last-Modified"
                 ),
-                fetched_at=_utc_now(),
+                fetched_at=utc_now(),
                 redirect_count=redirects,
                 body=b"".join(chunks),
             )
@@ -719,24 +714,6 @@ def fetch_url(
             ) from exc
         finally:
             connection.close()
-
-
-def fetch_to_workspace(
-    url: str,
-    workspace: Path,
-    **kwargs: Any,
-) -> tuple[FetchResult, Path | None]:
-    workspace = workspace.resolve()
-    if not workspace.is_dir():
-        raise MonitorError(
-            "workspace_invalid", "ephemeral workspace must already be a directory"
-        )
-    result = fetch_url(url, **kwargs)
-    if not result.body:
-        return result, None
-    output = workspace / "response.bin"
-    output.write_bytes(result.body)
-    return result, output
 
 
 def _main(argv: list[str]) -> int:
