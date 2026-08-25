@@ -7,7 +7,9 @@ import hashlib
 import re
 import unicodedata
 import zlib
+from collections.abc import Callable
 from io import BytesIO
+from typing import Any
 from urllib.parse import urlsplit
 
 from errors import MonitorError
@@ -653,7 +655,7 @@ def _page_link_destinations(page: object, budget: _PdfLinkBudget) -> list[str]:
     return lines
 
 
-def _load_pdf_reader() -> tuple[object, type[Exception]]:
+def _load_pdf_reader() -> tuple[Callable[..., Any], type[Exception]]:
     """Load the optional parser only when a PDF actually needs normalization."""
     try:
         from pypdf import PdfReader

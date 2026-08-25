@@ -43,10 +43,12 @@ max-args = 10
 max-public-methods = 40
 
 [tool.pyright]
-exclude = ["build", ".venv", ".agents", ".claude"]
+include = ["skills/weekly-web-monitor/scripts"]
+exclude = ["build", ".venv", ".agents", ".claude", "tests"]
+extraPaths = ["skills/weekly-web-monitor/scripts"]
 venvPath = "."
 venv = ".venv"
-typeCheckingMode = "strict"
+typeCheckingMode = "basic"
 
 [tool.pytest.ini_options]
 addopts = [

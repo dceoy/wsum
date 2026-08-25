@@ -6,7 +6,9 @@ import hashlib
 import re
 import unicodedata
 import xml.etree.ElementTree as ET
+from collections.abc import Iterator
 from html.parser import HTMLParser
+from typing import cast
 from urllib.parse import urljoin, urlsplit
 
 from errors import MonitorError
@@ -389,7 +391,8 @@ def normalize_feed(
         element_count = 0
         for offset in range(0, len(xml), 65_536):
             parser.feed(xml[offset : offset + 65_536])
-            for _, element in parser.read_events():
+            events = cast(Iterator[tuple[str, ET.Element]], parser.read_events())
+            for _, element in events:
                 if root is None:
                     root = element
                 element_count += 1

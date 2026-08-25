@@ -309,6 +309,26 @@ class BrowserFetcherTests(unittest.TestCase):
                 resolver=support.public_resolver,
             )
 
+    def test_browser_mode_reports_missing_optional_runtime(self) -> None:
+        with (
+            patch.dict(
+                sys.modules,
+                {"playwright": None, "playwright.sync_api": None},
+            ),
+            self.assertRaisesRegex(
+                MonitorError, "browser mode requires the optional Playwright runtime"
+            ),
+        ):
+            fetch_rendered(
+                "https://example.com",
+                config=BrowserFetchConfig(
+                    verified_egress_pinning=True,
+                    verified_memory_bound=True,
+                    verified_execution_bound=True,
+                ),
+                resolver=support.public_resolver,
+            )
+
     def test_browser_mode_fails_closed_without_verified_memory_bound(self) -> None:
         with self.assertRaisesRegex(MonitorError, "browser_memory_bound_not_verified"):
             fetch_rendered(
