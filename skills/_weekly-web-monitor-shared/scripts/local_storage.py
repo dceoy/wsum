@@ -435,11 +435,7 @@ class LocalSnapshotStore:
             temp.unlink(missing_ok=True)
 
     def _ensure_file(self, relative: str, content: bytes) -> None:
-        """Idempotently persist one content-addressed snapshot artifact.
-
-        Raises:
-            MonitorError: If an existing artifact differs or the write fails.
-        """
+        """Idempotently persist one content-addressed snapshot artifact."""
         path = self._resolve_relative(relative)
         if self._existing_file_matches(path, content):
             return
