@@ -203,7 +203,7 @@ def _parse_selectors(value: object) -> tuple[str, ...]:
         MonitorError: If ``value`` has the wrong shape, or exceeds the
             selector count or per-selector length limit.
     """
-    if not value:
+    if value is None or value == "":  # ruff: ignore[compare-to-empty-string] -- preserve invalid falsy values
         return ()
     if isinstance(value, str):
         selectors = tuple(part.strip() for part in value.split(",") if part.strip())

@@ -309,6 +309,17 @@ class ModelsAndSheetsTests(unittest.TestCase):
         with pytest.raises(MonitorError, match="count or length limit"):
             Target.from_mapping({**base, "exclude_selectors": ["." + "a" * 500]})
 
+    def test_rejects_falsy_non_selector_values(self) -> None:
+        """Test that falsy non-selector values remain invalid."""
+        base = {
+            "target_id": "one",
+            "enabled": True,
+            "name": "One",
+            "url": "https://example.com",
+        }
+        with pytest.raises(MonitorError, match="comma-separated string or list"):
+            Target.from_mapping({**base, "exclude_selectors": False})
+
     def test_state_and_notification_queries(self) -> None:
         """Test that state and notification queries."""
         digest = "a" * 64

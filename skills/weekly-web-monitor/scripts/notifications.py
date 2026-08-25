@@ -45,11 +45,11 @@ class SlackConnector(Protocol):
         ...
 
 
-class ConfirmedDeliveryFailureError(MonitorError):
+class ConfirmedDeliveryFailure(MonitorError):  # ruff: ignore[error-suffix-on-exception-name] -- public connector API
     """The connector confirms that Slack did not accept the message."""
 
 
-class AmbiguousDeliveryFailureError(MonitorError):
+class AmbiguousDeliveryFailure(MonitorError):  # ruff: ignore[error-suffix-on-exception-name] -- public connector API
     """The connector cannot determine whether Slack accepted the message."""
 
 
@@ -265,14 +265,14 @@ def _send_chunk(
         The connector's delivery reference for the sent chunk.
 
     Raises:
-        AmbiguousDeliveryFailureError: If the connector accepted the send
+        AmbiguousDeliveryFailure: If the connector accepted the send
             but returned no delivery reference.
     """
     message = _format_group(chunk, maximum)
     delivery_ref = connector.send_message(group, message)
     if not delivery_ref:
         msg = "notification_send_failed"
-        raise AmbiguousDeliveryFailureError(
+        raise AmbiguousDeliveryFailure(
             msg,
             "Slack connector returned no delivery reference",
         )
@@ -294,7 +294,7 @@ def _deliver_chunk(
     """
     try:
         delivery_ref = _send_chunk(group, chunk, connector, max_message_chars)
-    except ConfirmedDeliveryFailureError as exc:
+    except ConfirmedDeliveryFailure as exc:
         code = exc.code
         failed_records = [
             NotificationRecord(
