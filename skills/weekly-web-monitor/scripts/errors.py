@@ -20,9 +20,11 @@ class MonitorError(Exception):
     details: dict[str, Any] | None = None
 
     def __str__(self) -> str:
+        """Return the ``"code: message"`` rendering used in logs and CLI output."""
         return f"{self.code}: {self.message}"
 
     def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation of this error."""
         result: dict[str, Any] = {
             "code": self.code,
             "message": self.message,
@@ -47,6 +49,7 @@ RETRYABLE_ERROR_CODES = frozenset(
 
 
 def is_retryable_error(error: BaseException) -> bool:
+    """Return whether ``error`` represents a monitoring failure worth retrying."""
     return isinstance(error, MonitorError) and (
         error.retryable or error.code in RETRYABLE_ERROR_CODES
     )

@@ -14,31 +14,57 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+_MIN_MAX_ATTEMPTS = 1
+_MAX_MAX_ATTEMPTS = 5
+_MIN_INITIAL_DELAY_SECONDS = 0
+_MAX_INITIAL_DELAY_SECONDS = 60
+_MIN_BACKOFF_MULTIPLIER = 1
+_MAX_BACKOFF_MULTIPLIER = 10
+_MIN_MAX_DELAY_SECONDS = 0
+_MAX_MAX_DELAY_SECONDS = 300
+
 
 @dataclass(frozen=True, slots=True)
 class RetryConfig:
+    """Bounds for :func:`run_with_retry`'s attempt count and backoff delay."""
+
     max_attempts: int = 3
     initial_delay_seconds: float = 1.0
     backoff_multiplier: float = 2.0
     max_delay_seconds: float = 10.0
 
     def __post_init__(self) -> None:
-        if not 1 <= self.max_attempts <= 5:
+        """Validate that every bound falls within its allowed range.
+
+        Raises:
+            MonitorError: If any field is outside its allowed range.
+        """
+        if not _MIN_MAX_ATTEMPTS <= self.max_attempts <= _MAX_MAX_ATTEMPTS:
             msg = "invalid_configuration"
             raise MonitorError(
                 msg, "max_attempts must be between 1 and 5"
             )
-        if not 0 <= self.initial_delay_seconds <= 60:
+        if not (
+            _MIN_INITIAL_DELAY_SECONDS
+            <= self.initial_delay_seconds
+            <= _MAX_INITIAL_DELAY_SECONDS
+        ):
             msg = "invalid_configuration"
             raise MonitorError(
                 msg, "initial retry delay is invalid"
             )
-        if not 1 <= self.backoff_multiplier <= 10:
+        if not (
+            _MIN_BACKOFF_MULTIPLIER
+            <= self.backoff_multiplier
+            <= _MAX_BACKOFF_MULTIPLIER
+        ):
             msg = "invalid_configuration"
             raise MonitorError(
                 msg, "retry backoff multiplier is invalid"
             )
-        if not 0 <= self.max_delay_seconds <= 300:
+        if not (
+            _MIN_MAX_DELAY_SECONDS <= self.max_delay_seconds <= _MAX_MAX_DELAY_SECONDS
+        ):
             msg = "invalid_configuration"
             raise MonitorError(
                 msg, "maximum retry delay is invalid"
@@ -47,6 +73,8 @@ class RetryConfig:
 
 @dataclass(frozen=True, slots=True)
 class RetryResult(Generic[T]):
+    """The successful value of a retried operation and its attempt history."""
+
     value: T
     attempts: tuple[Attempt, ...]
 
@@ -57,6 +85,18 @@ def run_with_retry(
     config: RetryConfig | None = None,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> RetryResult[T]:
+    """Run ``operation``, retrying retryable ``MonitorError`` failures with backoff.
+
+    Returns:
+        The operation's successful :class:`RetryResult`, including the record
+        of every attempt made.
+
+    Raises:
+        MonitorError: If ``operation`` fails and either the failure is not
+            retryable or the configured attempt budget is exhausted.
+        AssertionError: Never raised in practice; guards against the retry
+            loop falling through without returning or raising.
+    """
     active = config or RetryConfig()
     attempts: list[Attempt] = []
     delay = active.initial_delay_seconds

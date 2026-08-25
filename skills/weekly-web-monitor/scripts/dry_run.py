@@ -20,8 +20,17 @@ from memory_adapters import (
 from models import Target
 from routine import RoutineConfig, WeeklyMonitorRoutine
 
+_EXPECTED_ARGC = 2
+
 
 def run_fixture(value: dict[str, Any]) -> dict[str, Any]:
+    """Replay one or more monitor cycles against an in-memory fixture.
+
+    Returns:
+        A summary containing each cycle's run result, the Slack messages that
+        would have been sent, the resulting state target IDs, and the audit
+        record count.
+    """
     targets = [Target.from_mapping(item) for item in value["targets"]]
     store = MemoryOperationalStore(targets)
     drive_connector = MemoryDriveConnector()
@@ -63,7 +72,13 @@ def run_fixture(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
+    """Run the CLI entry point: load the fixture named in ``argv[1]`` and run it.
+
+    Returns:
+        0 on success, 1 if the fixture is invalid or the run fails, 2 for
+        incorrect CLI usage.
+    """
+    if len(argv) != _EXPECTED_ARGC:
         return 2
     try:
         value = json.loads(Path(argv[1]).read_text(encoding="utf-8"))

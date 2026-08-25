@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class RunMetrics:
+    """Aggregate run-outcome counters for a batch of monitor runs."""
+
     checked: int = 0
     unchanged: int = 0
     baseline: int = 0
@@ -22,6 +24,7 @@ class RunMetrics:
     failed: int = 0
 
     def as_dict(self) -> dict[str, int]:
+        """Return the counters as a plain ``str -> int`` mapping."""
         return {
             "checked": self.checked,
             "unchanged": self.unchanged,
@@ -34,6 +37,11 @@ class RunMetrics:
 
 
 def calculate_metrics(runs: Iterable[RunRecord]) -> RunMetrics:
+    """Summarize a collection of run records into aggregate counters.
+
+    Returns:
+        A :class:`RunMetrics` with per-outcome counts across ``runs``.
+    """
     records = list(runs)
     return RunMetrics(
         checked=len(records),

@@ -23,6 +23,16 @@ text and cite section_id plus exact before/after evidence for every material cla
 
 
 def build_summary_request(target: Target, diff: DiffResult) -> dict[str, Any]:
+    """Build the bounded model input for summarizing a candidate material diff.
+
+    Returns:
+        The request payload passed to the summarization model, containing only
+        the target metadata and the diff's changed sections.
+
+    Raises:
+        MonitorError: If ``diff`` is not a candidate for summarization or has
+            no changed sections.
+    """
     if not diff.should_summarize:
         msg = "summary_not_required"
         raise MonitorError(
