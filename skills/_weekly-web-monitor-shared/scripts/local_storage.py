@@ -30,6 +30,28 @@ _MAX_METADATA_BYTES = 10_000_000
 _MIN_MAX_SNAPSHOT_BYTES = 1_024
 _MAX_MAX_SNAPSHOT_BYTES = 50_000_000
 _MAX_SNAPSHOT_REF_LENGTH = 1_000
+_SNAPSHOT_REF_PART_COUNT = 4
+
+
+def _read_bytes(
+    path: Path,
+    code: str,
+    message: str,
+    *,
+    retryable: bool = False,
+) -> bytes:
+    """Read a local file while translating filesystem failures.
+
+    Returns:
+        The file bytes.
+
+    Raises:
+        MonitorError: If the file cannot be read.
+    """
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise MonitorError(code, message, retryable=retryable) from exc
 
 
 def _load_json(path: Path, default: object) -> object:
@@ -47,13 +69,12 @@ def _load_json(path: Path, default: object) -> object:
     if path.is_symlink() or not path.is_file():
         msg = "local_storage_invalid"
         raise MonitorError(msg, "local storage path must be a regular file")
-    try:
-        payload = path.read_bytes()
-    except OSError as exc:
-        msg = "local_storage_io"
-        raise MonitorError(
-            msg, "local storage file could not be read", retryable=True
-        ) from exc
+    payload = _read_bytes(
+        path,
+        "local_storage_io",
+        "local storage file could not be read",
+        retryable=True,
+    )
     if len(payload) > _MAX_METADATA_BYTES:
         msg = "local_storage_invalid"
         raise MonitorError(msg, "local storage metadata exceeds the size limit")
@@ -73,7 +94,9 @@ def _object_map(value: object, label: str) -> dict[str, object]:
     Raises:
         MonitorError: If ``value`` is not an object with string keys.
     """
-    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+    if not isinstance(value, dict) or not all(
+        isinstance(key, str) for key in value
+    ):
         msg = "local_storage_invalid"
         raise MonitorError(msg, f"{label} must be a JSON object")
     return cast("dict[str, object]", value)
@@ -323,7 +346,11 @@ class LocalSnapshotStore:
             MonitorError: If the size limit is invalid or ``root`` cannot be
                 created.
         """
-        if not _MIN_MAX_SNAPSHOT_BYTES <= max_snapshot_bytes <= _MAX_MAX_SNAPSHOT_BYTES:
+        if not (
+            _MIN_MAX_SNAPSHOT_BYTES
+            <= max_snapshot_bytes
+            <= _MAX_MAX_SNAPSHOT_BYTES
+        ):
             msg = "invalid_configuration"
             raise MonitorError(msg, "snapshot size limit is invalid")
         try:
@@ -353,8 +380,59 @@ class LocalSnapshotStore:
         candidate = (self._root / Path(*posix_path.parts)).resolve()
         if candidate != self._root and self._root not in candidate.parents:
             msg = "snapshot_invalid"
-            raise MonitorError(msg, "snapshot path escapes the local runtime directory")
+            raise MonitorError(
+                msg, "snapshot path escapes the local runtime directory"
+            )
         return candidate
+
+    @staticmethod
+    def _existing_file_matches(path: Path, content: bytes) -> bool:
+        """Validate an existing artifact and compare its bytes.
+
+        Returns:
+            ``True`` when ``path`` already stores ``content``; ``False`` when
+            the path does not exist.
+
+        Raises:
+            MonitorError: If an existing path is not a regular file, cannot be
+                read, or contains different bytes.
+        """
+        if not path.exists():
+            return False
+        if path.is_symlink() or not path.is_file():
+            msg = "snapshot_invalid"
+            raise MonitorError(msg, "snapshot artifact is not a regular file")
+        existing = _read_bytes(
+            path,
+            "local_storage_io",
+            "local snapshot could not be read",
+            retryable=True,
+        )
+        if existing != content:
+            msg = "snapshot_collision"
+            raise MonitorError(msg, "snapshot path already contains different content")
+        return True
+
+    @staticmethod
+    def _write_new_file(path: Path, content: bytes) -> None:
+        """Write a new snapshot artifact by atomic rename.
+
+        Raises:
+            MonitorError: If the filesystem write fails.
+        """
+        temp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp.write_bytes(content)
+            temp.chmod(0o600)
+            temp.replace(path)
+        except OSError as exc:
+            msg = "local_storage_io"
+            raise MonitorError(
+                msg, "local snapshot could not be written", retryable=True
+            ) from exc
+        finally:
+            temp.unlink(missing_ok=True)
 
     def _ensure_file(self, relative: str, content: bytes) -> None:
         """Idempotently persist one content-addressed snapshot artifact.
@@ -363,32 +441,9 @@ class LocalSnapshotStore:
             MonitorError: If an existing artifact differs or the write fails.
         """
         path = self._resolve_relative(relative)
-        try:
-            if path.exists():
-                if path.is_symlink() or not path.is_file():
-                    msg = "snapshot_invalid"
-                    raise MonitorError(msg, "snapshot artifact is not a regular file")
-                if path.read_bytes() != content:
-                    msg = "snapshot_collision"
-                    raise MonitorError(
-                        msg, "snapshot path already contains different content"
-                    )
-                return
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-            try:
-                temp.write_bytes(content)
-                temp.chmod(0o600)
-                temp.replace(path)
-            finally:
-                temp.unlink(missing_ok=True)
-        except MonitorError:
-            raise
-        except OSError as exc:
-            msg = "local_storage_io"
-            raise MonitorError(
-                msg, "local snapshot could not be written", retryable=True
-            ) from exc
+        if self._existing_file_matches(path, content):
+            return
+        self._write_new_file(path, content)
 
     def save(
         self,
@@ -444,7 +499,7 @@ class LocalSnapshotStore:
             raise MonitorError(msg, "snapshot reference is missing")
         parts = PurePosixPath(snapshot_ref).parts
         if (
-            len(parts) != 4
+            len(parts) != _SNAPSHOT_REF_PART_COUNT
             or parts[0] != "snapshots"
             or parts[3] != "normalized.txt"
             or not HASH_RE.fullmatch(parts[2])
@@ -453,18 +508,14 @@ class LocalSnapshotStore:
             raise MonitorError(msg, "snapshot reference is invalid")
         validate_target_id(parts[1])
         path = self._resolve_relative(snapshot_ref)
-        try:
-            if path.is_symlink() or not path.is_file():
-                msg = "snapshot_missing"
-                raise MonitorError(msg, "stored normalized snapshot is missing")
-            content = path.read_bytes()
-        except MonitorError:
-            raise
-        except OSError as exc:
+        if path.is_symlink() or not path.is_file():
             msg = "snapshot_missing"
-            raise MonitorError(
-                msg, "stored normalized snapshot could not be loaded"
-            ) from exc
+            raise MonitorError(msg, "stored normalized snapshot is missing")
+        content = _read_bytes(
+            path,
+            "snapshot_missing",
+            "stored normalized snapshot could not be loaded",
+        )
         if len(content) > self._max_snapshot_bytes:
             msg = "snapshot_too_large"
             raise MonitorError(msg, "stored snapshot exceeds the size limit")
