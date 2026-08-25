@@ -193,9 +193,7 @@ class SnapshotStore:
             (
                 digest
                 for digest, group in ordered
-                if any(
-                    str(file.get("file_ref", "")) == current_ref for file in group
-                )
+                if any(str(file.get("file_ref", "")) == current_ref for file in group)
             ),
             None,
         )

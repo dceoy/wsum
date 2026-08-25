@@ -530,9 +530,7 @@ def _validate_streams(pdf: bytes, limit: int) -> bool:
         # cannot be trusted, and scanning ahead for the next literal
         # "endstream" bytes instead would reintroduce the exact
         # false-boundary risk this /Length-based parse exists to avoid.
-        end_match = re.match(
-            rb"\r?\n?endstream\b", pdf[data_end : data_end + 16]
-        )
+        end_match = re.match(rb"\r?\n?endstream\b", pdf[data_end : data_end + 16])
         if end_match is None:
             raise MonitorError(
                 "pdf_malformed",

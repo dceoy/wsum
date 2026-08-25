@@ -413,10 +413,14 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 del spreadsheet_id
                 return self.values[range_name]
 
-            def replace_values(self, spreadsheet_id, range_name, values, *, value_input_option):
+            def replace_values(
+                self, spreadsheet_id, range_name, values, *, value_input_option
+            ):
                 raise AssertionError("runs are append-only")
 
-            def append_values(self, spreadsheet_id, range_name, values, *, value_input_option):
+            def append_values(
+                self, spreadsheet_id, range_name, values, *, value_input_option
+            ):
                 del spreadsheet_id, value_input_option
                 self.values[range_name] = self.values[range_name] + list(values)
 
@@ -446,13 +450,17 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 del spreadsheet_id
                 return self.values[range_name]
 
-            def replace_values(self, spreadsheet_id, range_name, values, *, value_input_option):
+            def replace_values(
+                self, spreadsheet_id, range_name, values, *, value_input_option
+            ):
                 del spreadsheet_id, value_input_option
-                self.values["Notifications!A:F"] = [
-                    list(NOTIFICATION_COLUMNS)
-                ] + list(values)
+                self.values["Notifications!A:F"] = [list(NOTIFICATION_COLUMNS)] + list(
+                    values
+                )
 
-            def append_values(self, spreadsheet_id, range_name, values, *, value_input_option):
+            def append_values(
+                self, spreadsheet_id, range_name, values, *, value_input_option
+            ):
                 del spreadsheet_id, value_input_option
                 self.values["Notifications!A:F"] = self.values[
                     "Notifications!A:F"
@@ -520,6 +528,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
             ["Notifications!A2:F2", "Notifications!A3:F3"],
             [item["range"] for item in data],
         )
+
 
 if __name__ == "__main__":
     unittest.main()

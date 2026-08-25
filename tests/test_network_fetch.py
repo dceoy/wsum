@@ -486,8 +486,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # parse_qsl decodes it into the outer "redirect" value intact.
         with self.assertRaisesRegex(MonitorError, "credential-like"):
             canonicalize_url(
-                "https://example.com/?redirect=%2Fcallback%3Faccess_token"
-                "%3Dsecret123"
+                "https://example.com/?redirect=%2Fcallback%3Faccess_token%3Dsecret123"
             )
 
     def test_canonicalize_url_allows_benign_nested_relative_reference(self) -> None:
@@ -526,8 +525,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # credential in the accepted target URL.
         with self.assertRaisesRegex(MonitorError, "credential-like"):
             canonicalize_url(
-                "https://example.com/?redirect=callback%3Faccess_token"
-                "%3Dsecret123"
+                "https://example.com/?redirect=callback%3Faccess_token%3Dsecret123"
             )
 
     def test_canonicalize_url_rejects_path_relative_nested_url_fragment(self) -> None:
@@ -535,8 +533,7 @@ class NetworkPolicyTests(unittest.TestCase):
         # after a "#" instead of a "?" in the nested reference.
         with self.assertRaisesRegex(MonitorError, "credential-like"):
             canonicalize_url(
-                "https://example.com/?redirect=callback%23access_token"
-                "%3Dsecret123"
+                "https://example.com/?redirect=callback%23access_token%3Dsecret123"
             )
 
     def test_canonicalize_url_allows_benign_path_relative_reference(self) -> None:
@@ -546,9 +543,7 @@ class NetworkPolicyTests(unittest.TestCase):
         canonical, _ = canonicalize_url(
             "https://example.com/?redirect=callback%3Fpage%3D2"
         )
-        self.assertEqual(
-            canonical, "https://example.com/?redirect=callback%3Fpage%3D2"
-        )
+        self.assertEqual(canonical, "https://example.com/?redirect=callback%3Fpage%3D2")
 
     def test_canonicalize_url_rejects_path_relative_credential_past_an_absolute_hop(
         self,

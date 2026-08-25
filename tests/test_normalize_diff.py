@@ -354,7 +354,7 @@ class NormalizationTests(unittest.TestCase):
         # A genuine social-share widget remains boilerplate and is still
         # stripped.
         share_widget = normalize_content(
-            b'<html><body><main><p>Body text.</p>'
+            b"<html><body><main><p>Body text.</p>"
             b'<div class="social-share">Share this</div>'
             b"</main></body></html>",
             content_type="text/html",
@@ -645,14 +645,12 @@ class NormalizationTests(unittest.TestCase):
         # annotated (which would otherwise mask a real content change under
         # noise, or worse, misrepresent the digest as destination-relevant).
         before = normalize_content(
-            b'<main>Status text<input type="text" formaction="/apply-v1">'
-            b"</main>",
+            b'<main>Status text<input type="text" formaction="/apply-v1"></main>',
             content_type="text/html",
             base_url="https://example.com/page",
         )
         after = normalize_content(
-            b'<main>Status text<input type="text" formaction="/apply-v2">'
-            b"</main>",
+            b'<main>Status text<input type="text" formaction="/apply-v2"></main>',
             content_type="text/html",
             base_url="https://example.com/page",
         )
@@ -805,8 +803,7 @@ class NormalizationTests(unittest.TestCase):
         # redirect target -- reached the normalized link destination
         # unexamined even though its query carries the credential.
         destination = (
-            "https://example.com/?redirect=%2Fcallback%3Faccess_token"
-            "%3Dsecret123"
+            "https://example.com/?redirect=%2Fcallback%3Faccess_token%3Dsecret123"
         )
         source = f'<main><a href="{destination}">Link</a></main>'.encode()
         with self.assertRaises(MonitorError) as captured:
@@ -1283,9 +1280,7 @@ class NormalizationTests(unittest.TestCase):
             "https://example.com/entry/", "https://example.com/content-v2/"
         )
         self.assertNotEqual(content_before, content_after)
-        self.assertIn(
-            "Apply [https://example.com/content-v1/apply", content_before
-        )
+        self.assertIn("Apply [https://example.com/content-v1/apply", content_before)
 
     def test_feed_root_xml_base_resolves_against_fetched_document_url(
         self,
@@ -1683,9 +1678,7 @@ class NormalizationTests(unittest.TestCase):
             level: int = 0,
         ) -> object:
             if name == "pypdf" or name.startswith("pypdf."):
-                raise ModuleNotFoundError(
-                    f"No module named {name!r}", name=name
-                )
+                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
             return original_import(name, globals, locals, fromlist, level)
 
         with patch("builtins.__import__", new=reject_pypdf):
@@ -1871,8 +1864,7 @@ class NormalizationTests(unittest.TestCase):
         # changes -- would be silently dropped from the normalized hash.
         def stream(edit: bytes) -> bytes:
             return (
-                b"(marker\nendstream inside a string) Tj "
-                b"(Stable) Tj (" + edit + b") Tj"
+                b"(marker\nendstream inside a string) Tj (Stable) Tj (" + edit + b") Tj"
             )
 
         before = normalize_content(
@@ -2160,9 +2152,7 @@ class NormalizationTests(unittest.TestCase):
         escaped_font_names = (
             b"%PDF-1.4\n1 0 obj\n"
             b"<< /Type /F#6fnt /Subtype /Type1 /Base#46ont /Symbol >>\n"
-            b"endobj\n"
-            + _pdf_stream(2, b"BT /F1 12 Tf <41> Tj ET")
-            + b"%%EOF"
+            b"endobj\n" + _pdf_stream(2, b"BT /F1 12 Tf <41> Tj ET") + b"%%EOF"
         )
         with self.assertRaisesRegex(MonitorError, "malformed"):
             normalize_content(escaped_font_names, content_type="application/pdf")

@@ -192,9 +192,7 @@ def _changed_char_ratio(
     return min(1.0, changed / denominator)
 
 
-CJK_RE = re.compile(
-    r"[぀-ヿ㐀-䶿一-鿿豈-﫿ｦ-ﾟ]"
-)
+CJK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿ｦ-ﾟ]")
 
 
 def _watch_focus_terms(watch_focus: str) -> tuple[re.Pattern[str], ...]:
@@ -457,9 +455,7 @@ def compare_content(
         # A signal-bearing section only counts as preserved if it was kept in
         # full; one retained but cut mid-section (partial_ids) may be missing
         # the very content that made it signal-bearing.
-        fully_retained_ids = {
-            section.section_id for section in sections
-        } - partial_ids
+        fully_retained_ids = {section.section_id for section in sections} - partial_ids
         if signal_ids - fully_retained_ids:
             reasons = (*reasons, "material_signal_truncated")
     result = "minor" if score < active.minor_threshold else "candidate_material"
@@ -484,8 +480,7 @@ def compare_content(
             # deterministically and only override the clamp on a hit.
             terms = _watch_focus_terms(watch_focus)
             if terms and any(
-                _watch_focus_matches_section(section, terms)
-                for section in raw_sections
+                _watch_focus_matches_section(section, terms) for section in raw_sections
             ):
                 result = "candidate_material"
                 reasons = (*reasons, "watch_focus_configured")

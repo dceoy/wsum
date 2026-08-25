@@ -149,9 +149,7 @@ class _ContentTextParser(HTMLParser):
             )
             self._anchor_hrefs.append(href)
 
-    def handle_startendtag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
         if tag.lower() == "a":
             self._close_anchor()
@@ -257,9 +255,7 @@ def _all_text_with_links(
         # all of them.
         child_base = _xml_base_scope(child, base_url)
         value = "".join(child.itertext())
-        cleaned = (
-            _clean_with_links(value, child_base, budget) if value.strip() else ""
-        )
+        cleaned = _clean_with_links(value, child_base, budget) if value.strip() else ""
         structural = [
             f"[{destination}]"
             for destination in _element_link_destinations(child, child_base, budget)
