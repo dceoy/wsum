@@ -464,7 +464,7 @@ class ReplayAndAuditTests(unittest.TestCase):
     def test_schemas_and_gas_dispatcher_are_safe_static_artifacts(self) -> None:
         """Test that schemas and gas dispatcher are safe static artifacts."""
         schema_dir = (
-            support.REPO_ROOT / ".claude" / "skills" / "weekly-web-monitor" / "schemas"
+            support.REPO_ROOT / "skills" / "_weekly-web-monitor-shared" / "schemas"
         )
         schemas = list(schema_dir.glob("*.json"))
         assert len(schemas) >= 10
