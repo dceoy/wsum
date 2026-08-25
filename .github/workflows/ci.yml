@@ -30,8 +30,6 @@ jobs:
     with:
       package-path: .
       runs-on: ubuntu-slim
-      use-pyright: false
-      use-ruff-format: false
   python-test:
     permissions:
       contents: read
