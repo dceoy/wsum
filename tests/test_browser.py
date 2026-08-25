@@ -6,14 +6,18 @@ import sys
 import unittest
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 from errors import MonitorError
-from fetch_browser import BrowserFetchConfig, fetch_rendered
+from fetch_browser import BrowserFetchConfig, FetchResult, fetch_rendered
 from models import State
 
 from tests import support
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class FakePlaywrightError(Exception):
@@ -36,14 +40,17 @@ class FakeRoute:
     """A fake Playwright route that records abort/continue calls."""
 
     def __init__(self, request: FakeRequest) -> None:
+        """Track a single incoming request."""
         self.request = request
         self.aborted = False
         self.continued = False
 
     def abort(self, _: str) -> None:
+        """Record that this route was aborted."""
         self.aborted = True
 
     def continue_(self) -> None:
+        """Record that this route was continued."""
         self.continued = True
 
 
@@ -57,12 +64,14 @@ class FakeResponse:
         headers: dict[str, str] | None = None,
         peer: str = "93.184.216.34",
     ) -> None:
+        """Build a fake response with the given status, headers, and peer."""
         self.url = url
         self.status = status
         self.headers = headers or {}
         self.peer = peer
 
     def server_addr(self) -> dict[str, str]:
+        """Return the fake TCP peer address for this response."""
         return {"ipAddress": self.peer, "port": "443"}
 
 
@@ -70,11 +79,13 @@ class FakePopup:
     """A fake Playwright popup page that replays its own requests on close."""
 
     def __init__(self, requests: list[FakeRequest], context: "FakeContext") -> None:
+        """Track the requests this popup will replay on close."""
         self.requests = requests
         self.context = context
         self.closed = False
 
     def close(self) -> None:
+        """Close the popup, replaying its requests through the parent context."""
         self.closed = True
         # A real popup's initial request is issued by Chromium as soon as the
         # popup target is created, independent of when Playwright's "popup"
@@ -82,6 +93,7 @@ class FakePopup:
         # context-level handlers before close() is observed.
         for request in self.requests:
             route = FakeRoute(request)
+            assert self.context.route_handler is not None
             self.context.route_handler(route)
             if not route.aborted and "response" in self.context.handlers:
                 self.context.handlers["response"](
@@ -100,18 +112,29 @@ class FakePage:
         timeout: bool = False,
         popup_requests: list[FakeRequest] | None = None,
     ) -> None:
+        """Build a fake page that replays ``requests`` on navigation."""
         self.html = html
         self.requests = requests
         self.timeout = timeout
         self.popup_requests = popup_requests or []
-        self.handlers: dict[str, object] = {}
+        self.handlers: dict[str, Callable[..., object]] = {}
         self.context: "FakeContext | None" = None
         self.url = requests[0].url
 
-    def on(self, event: str, handler) -> None:
+    def on(self, event: str, handler: Callable[..., object]) -> None:
+        """Register an event handler."""
         self.handlers[event] = handler
 
     def goto(self, url: str, **_: object) -> FakeResponse:
+        """Navigate to ``url``, replaying canned requests, responses, and popups.
+
+        Returns:
+            The final fake response for the navigation.
+
+        Raises:
+            FakePlaywrightTimeoutError: If this page was built with
+                ``timeout=True``.
+        """
         self.url = url
         if self.timeout:
             raise FakePlaywrightTimeoutError
@@ -130,9 +153,11 @@ class FakePage:
         return FakeResponse(url, headers={"etag": "fixture"})
 
     def content(self) -> str:
+        """Return the fake page's rendered HTML."""
         return self.html
 
     def evaluate(self, _script: str) -> int:
+        """Return the fake byte-length evaluation result."""
         return len(self.html.encode("utf-8"))
 
 
@@ -140,22 +165,27 @@ class FakeContext:
     """A fake Playwright browser context wrapping a single FakePage."""
 
     def __init__(self, page: FakePage) -> None:
+        """Wrap ``page`` in a fake browser context."""
         self.page = page
         self.closed = False
-        self.handlers: dict[str, object] = {}
-        self.route_handler = None
+        self.handlers: dict[str, Callable[..., object]] = {}
+        self.route_handler: Callable[[FakeRoute], None] | None = None
 
-    def route(self, _: str, handler) -> None:
+    def route(self, _: str, handler: Callable[[FakeRoute], None]) -> None:
+        """Register the route interception handler."""
         self.route_handler = handler
 
-    def on(self, event: str, handler) -> None:
+    def on(self, event: str, handler: Callable[..., object]) -> None:
+        """Register an event handler."""
         self.handlers[event] = handler
 
     def new_page(self) -> FakePage:
+        """Return this context's single fake page."""
         self.page.context = self
         return self.page
 
     def close(self) -> None:
+        """Mark this context as closed."""
         self.closed = True
 
 
@@ -163,13 +193,16 @@ class FakeBrowser:
     """A fake Playwright browser wrapping a single FakeContext."""
 
     def __init__(self, context: FakeContext) -> None:
+        """Wrap ``context`` in a fake browser."""
         self.context = context
         self.closed = False
 
     def new_context(self, **_: object) -> FakeContext:
+        """Return this browser's single fake context."""
         return self.context
 
     def close(self) -> None:
+        """Mark this browser as closed."""
         self.closed = True
 
 
@@ -177,24 +210,37 @@ class FakePlaywrightManager:
     """A fake `sync_playwright()` context manager."""
 
     def __init__(self, browser: FakeBrowser) -> None:
-        self.playwright = SimpleNamespace(
-            chromium=SimpleNamespace(launch=lambda **_: browser)
-        )
+        """Wrap ``browser`` behind a fake ``sync_playwright()`` chromium launcher."""
+        def launch(**_kwargs: object) -> FakeBrowser:
+            return browser
 
-    def __enter__(self):
+        self.playwright = SimpleNamespace(chromium=SimpleNamespace(launch=launch))
+
+    def __enter__(self) -> SimpleNamespace:
+        """Return the fake playwright namespace."""
         return self.playwright
 
     def __exit__(self, *_: object) -> None:
+        """No-op context manager exit."""
         return None
 
 
 def playwright_modules(browser: FakeBrowser) -> dict[str, ModuleType]:
+    """Build fake `playwright`/`playwright.sync_api` modules wrapping ``browser``.
+
+    Returns:
+        A ``sys.modules``-style mapping of the fake module names to modules.
+    """
     package = ModuleType("playwright")
     sync_api = ModuleType("playwright.sync_api")
-    sync_api.Error = FakePlaywrightError
-    sync_api.TimeoutError = FakePlaywrightTimeoutError
-    sync_api.sync_playwright = lambda: FakePlaywrightManager(browser)
-    package.sync_api = sync_api
+
+    def sync_playwright() -> FakePlaywrightManager:
+        return FakePlaywrightManager(browser)
+
+    setattr(sync_api, "Error", FakePlaywrightError)  # ruff: ignore[set-attr-with-constant]
+    setattr(sync_api, "TimeoutError", FakePlaywrightTimeoutError)  # ruff: ignore[set-attr-with-constant]
+    setattr(sync_api, "sync_playwright", sync_playwright)  # ruff: ignore[set-attr-with-constant]
+    setattr(package, "sync_api", sync_api)  # ruff: ignore[set-attr-with-constant]
     return {"playwright": package, "playwright.sync_api": sync_api}
 
 
@@ -206,7 +252,13 @@ class BrowserFetcherTests(unittest.TestCase):
         page: FakePage,
         *,
         config: BrowserFetchConfig | None = None,
-    ):
+    ) -> tuple[FetchResult, FakeContext, FakeBrowser]:
+        """Run fetch_rendered against a fake browser stack and return its outputs.
+
+        Returns:
+            A tuple of (fetch_rendered's result, the fake context, the fake
+            browser).
+        """
         context = FakeContext(page)
         browser = FakeBrowser(context)
         active_config = config or BrowserFetchConfig(

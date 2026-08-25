@@ -8,6 +8,7 @@ import re
 import socket
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import (
     SplitResult,
     parse_qsl,
@@ -20,7 +21,7 @@ from urllib.parse import (
 
 from errors import MonitorError
 
-Resolver = Callable[..., Sequence[tuple]]
+Resolver = Callable[..., Sequence[tuple[Any, ...]]]
 
 _SENSITIVE_QUERY_NAMES = frozenset(
     {
