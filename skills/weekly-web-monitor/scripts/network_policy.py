@@ -8,7 +8,7 @@ import re
 import socket
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import (
     SplitResult,
     parse_qsl,
@@ -57,6 +57,16 @@ _SENSITIVE_QUERY_SUFFIXES = (
 _SEPARATOR_RUN = re.compile(r"[\s._-]+")
 _MAX_NESTED_URL_DEPTH = 5
 
+_MIN_PRINTABLE_CODEPOINT = 32
+_DEL_CODEPOINT = 127
+_MAX_URL_LENGTH = 4_096
+_MAX_HOST_LENGTH = 253
+_MAX_HOST_LABEL_LENGTH = 63
+_MIN_PORT = 1
+_MAX_PORT = 65535
+_HTTPS_DEFAULT_PORT = 443
+_HTTP_DEFAULT_PORT = 80
+
 
 def is_sensitive_query_name(name: str) -> bool:
     """True for exact credential names and provider-prefixed signed-URL params.
@@ -71,6 +81,10 @@ def is_sensitive_query_name(name: str) -> bool:
     hyphen form the set happens to spell out. ``parse_qsl`` decodes
     ``%20`` to a literal space, so this also covers percent-encoded
     separators without any extra decoding step.
+
+    Returns:
+        Whether ``name`` is a recognized credential/signature query
+        parameter name.
     """
     normalized = _SEPARATOR_RUN.sub("-", name.strip().lower())
     if normalized in _SENSITIVE_QUERY_NAMES:
@@ -80,6 +94,8 @@ def is_sensitive_query_name(name: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedTarget:
+    """A URL that has been canonicalized and DNS-resolved to public addresses."""
+
     url: str
     scheme: str
     host: str
@@ -88,14 +104,33 @@ class ResolvedTarget:
 
     @property
     def origin(self) -> tuple[str, str, int]:
+        """The (scheme, host, port) tuple identifying this origin."""
         return self.scheme, self.host, self.port
 
 
-def _deny(message: str) -> MonitorError:
-    return MonitorError("network_policy_denied", message)
+def _deny(message: str, *, cause: BaseException | None = None) -> NoReturn:
+    """Raise a deny-by-default MonitorError with ``message``.
+
+    Chains onto ``cause`` when given, matching what a plain
+    ``raise ... from cause`` would do at the call site.
+
+    Raises:
+        MonitorError: Always.
+    """
+    code = "network_policy_denied"
+    if cause is not None:
+        raise MonitorError(code, message) from cause
+    raise MonitorError(code, message)
 
 
 def is_public_address(value: str) -> bool:
+    """Return whether ``value`` is a global, non-reserved IP literal.
+
+    Returns:
+        True if ``value`` parses as an IP address in globally-routable,
+        non-link-local/loopback/multicast/private/reserved/unspecified
+        space.
+    """
     try:
         address = ipaddress.ip_address(value.split("%", 1)[0])
     except ValueError:
@@ -113,22 +148,33 @@ def is_public_address(value: str) -> bool:
 
 
 def _normalize_host(host: str) -> str:
+    """Lowercase, trim, and IDNA-encode ``host``.
+
+    Denies (see :func:`_deny`) if ``host`` is empty, not valid IDNA, or
+    exceeds the DNS hostname/label length limits.
+
+    Returns:
+        The normalized ASCII (IDNA) hostname.
+    """
     host = host.rstrip(".").lower()
     if not host:
         msg = "URL host is empty"
-        raise _deny(msg)
+        _deny(msg)
     try:
         normalized = host.encode("idna").decode("ascii")
     except UnicodeError as exc:
         msg = "URL host is not valid IDNA"
-        raise _deny(msg) from exc
-    if len(normalized) > 253 or any(len(label) > 63 for label in normalized.split(".")):
+        _deny(msg, cause=exc)
+    if len(normalized) > _MAX_HOST_LENGTH or any(
+        len(label) > _MAX_HOST_LABEL_LENGTH for label in normalized.split(".")
+    ):
         msg = "URL host is too long"
-        raise _deny(msg)
+        _deny(msg)
     return normalized
 
 
 def _is_webhook_credential_host_path(host: str, decoded_path: str) -> bool:
+    """Return whether ``host``/``decoded_path`` is a known webhook credential URL."""
     return (
         (host == "hooks.slack.com"
         and decoded_path.startswith("/services/"))
@@ -167,27 +213,49 @@ def _split_nested_url(
     false "credential-like" denial. A malformed candidate, such as an
     unbalanced IPv6-literal-style host, is treated as an opaque non-URL
     value rather than raised.
+
+    Returns:
+        A (parsed URL, was-path-relative-match) tuple, or ``None`` if
+        ``value`` is not a candidate nested URL.
     """
     candidate = value
     for _ in range(max_layers + 1):
         try:
             split = urlsplit(candidate)
         except ValueError:
-            return None
-        scheme = split.scheme.lower()
-        if scheme in {"http", "https"} and split.hostname:
-            return split, False
-        if not scheme and split.netloc and split.hostname:
-            return split, False
-        if not scheme and not split.netloc and (split.query or split.fragment):
-            if not split.path or split.path.startswith("/"):
-                return split, False
-            if allow_path_relative:
-                return split, True
+            break
+        match = _classify_nested_url_split(
+            split, allow_path_relative=allow_path_relative
+        )
+        if match is not None:
+            return match
         decoded = unquote(candidate)
         if decoded == candidate:
-            return None
+            break
         candidate = decoded
+    return None
+
+
+def _classify_nested_url_split(
+    split: SplitResult, *, allow_path_relative: bool
+) -> tuple[SplitResult, bool] | None:
+    """Classify one already-``urlsplit`` candidate as a nested URL match.
+
+    Returns:
+        A (``split``, was-path-relative-match) tuple if ``split`` matches
+        one of :func:`_split_nested_url`'s recognized nested-URL shapes,
+        else ``None``.
+    """
+    scheme = split.scheme.lower()
+    if scheme in {"http", "https"} and split.hostname:
+        return split, False
+    if not scheme and split.netloc and split.hostname:
+        return split, False
+    if not scheme and not split.netloc and (split.query or split.fragment):
+        if not split.path or split.path.startswith("/"):
+            return split, False
+        if allow_path_relative:
+            return split, True
     return None
 
 
@@ -204,6 +272,9 @@ def _unquote_to_fixed_point(value: str, *, max_layers: int) -> tuple[str, bool]:
     ``False`` when the budget was exhausted without reaching a fixed point,
     meaning further hidden structure may remain -- callers must fail closed
     in that case rather than trust the partially-decoded text.
+
+    Returns:
+        A (fully-decoded value, reached-fixed-point) tuple.
     """
     candidate = value
     for _ in range(max_layers + 1):
@@ -311,21 +382,13 @@ def has_credential_bearing_query(
     exposed to be handed down another recursion level, so the name is
     fully unquoted to a fixed point (also bounded, and also failing closed
     if that budget runs out first) before the flat sensitive-name scan.
+
+    Returns:
+        Whether ``query`` carries a credential directly, in a sensitively
+        named parameter, or nested inside a candidate embedded URL.
     """
     if depth > _MAX_NESTED_URL_DEPTH:
-        if _split_nested_url(
-            query, max_layers=_MAX_NESTED_URL_DEPTH, allow_path_relative=True
-        ):
-            return True
-        fully_decoded, reached_fixed_point = _unquote_to_fixed_point(
-            query, max_layers=_MAX_NESTED_URL_DEPTH
-        )
-        if not reached_fixed_point:
-            return True
-        return any(
-            is_sensitive_query_name(name)
-            for name, _ in parse_qsl(fully_decoded, keep_blank_values=True)
-        )
+        return _has_credential_bearing_query_at_depth_limit(query)
     if _nested_url_has_credential(query, depth=depth):
         return True
     for name, value in parse_qsl(query, keep_blank_values=True):
@@ -338,42 +401,86 @@ def has_credential_bearing_query(
     return False
 
 
+def _has_credential_bearing_query_at_depth_limit(query: str) -> bool:
+    """Fail-closed flat scan of ``query`` once the recursion budget is spent.
+
+    Returns:
+        Whether ``query`` still looks like an unwrappable nested URL, is
+        not fully decodable within budget, or flat-scans as sensitive.
+    """
+    if _split_nested_url(
+        query, max_layers=_MAX_NESTED_URL_DEPTH, allow_path_relative=True
+    ):
+        return True
+    fully_decoded, reached_fixed_point = _unquote_to_fixed_point(
+        query, max_layers=_MAX_NESTED_URL_DEPTH
+    )
+    if not reached_fixed_point:
+        return True
+    return any(
+        is_sensitive_query_name(name)
+        for name, _ in parse_qsl(fully_decoded, keep_blank_values=True)
+    )
+
+
 def canonicalize_url(value: str) -> tuple[str, SplitResult]:
-    if not isinstance(value, str) or len(value) > 4_096:
+    """Deny-by-default validate and canonicalize an HTTP(S) URL.
+
+    Denies (see :func:`_deny`) non-string/oversized/control-character
+    values, malformed URLs, non-HTTP(S) schemes, missing hosts, embedded
+    credentials, credential-bearing query parameters, webhook credential
+    URLs, and invalid ports.
+
+    Returns:
+        A tuple of (the canonical URL string, its parsed SplitResult).
+    """
+    if (
+        not isinstance(value, str)  # pyright: ignore[reportUnnecessaryIsInstance]
+        # value ultimately originates from untrusted, dynamically-typed
+        # sheet/JSON/redirect-header data; callers may pass a non-str value
+        # at runtime despite the declared type, so this check stays
+        # load-bearing.
+        or len(value) > _MAX_URL_LENGTH
+    ):
         msg = "URL must be a string no longer than 4096 characters"
-        raise _deny(msg)
-    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        _deny(msg)
+    if any(
+        ord(char) < _MIN_PRINTABLE_CODEPOINT or ord(char) == _DEL_CODEPOINT
+        for char in value
+    ):
         msg = "URL contains control characters"
-        raise _deny(msg)
+        _deny(msg)
     try:
         parsed = urlsplit(value)
         port = parsed.port
     except ValueError as exc:
         msg = "URL is malformed"
-        raise _deny(msg) from exc
+        _deny(msg, cause=exc)
     scheme = parsed.scheme.lower()
     if scheme not in {"http", "https"}:
         msg = "only HTTP and HTTPS URLs are allowed"
-        raise _deny(msg)
+        _deny(msg)
     if not parsed.hostname:
         msg = "URL host is required"
-        raise _deny(msg)
+        _deny(msg)
     if parsed.username is not None or parsed.password is not None:
         msg = "embedded URL credentials are forbidden"
-        raise _deny(msg)
+        _deny(msg)
     if has_credential_bearing_query(parsed.query, allow_path_relative=True):
         msg = "credential-like URL query parameters are forbidden"
-        raise _deny(msg)
+        _deny(msg)
     host = _normalize_host(parsed.hostname)
     decoded_path = unquote(parsed.path)
     if _is_webhook_credential_host_path(host, decoded_path):
         msg = "webhook credential URLs are forbidden"
-        raise _deny(msg)
-    port = port or (443 if scheme == "https" else 80)
-    if not 1 <= port <= 65535:
+        _deny(msg)
+    port = port or (
+        _HTTPS_DEFAULT_PORT if scheme == "https" else _HTTP_DEFAULT_PORT
+    )
+    if not _MIN_PORT <= port <= _MAX_PORT:
         msg = "URL port is invalid"
-        raise _deny(msg)
-    default_port = 443 if scheme == "https" else 80
+        _deny(msg)
+    default_port = _HTTPS_DEFAULT_PORT if scheme == "https" else _HTTP_DEFAULT_PORT
     display_host = f"[{host}]" if ":" in host else host
     netloc = display_host if port == default_port else f"{display_host}:{port}"
     path = quote(parsed.path or "/", safe="/:@!$&'()*+,;=-._~%")
@@ -400,17 +507,22 @@ def canonicalize_fragment_identity(fragment: str) -> str:
     display, but a fragment longer than that bound gets a SHA-256 digest of
     its *complete* validated text appended so two fragments sharing a long
     common prefix still produce distinct identities and hashes.
+
+    Returns:
+        ``""`` for an empty fragment, else the validated fragment (digest
+        suffixed if it exceeds ``MAX_FRAGMENT_IDENTITY_CHARS``).
     """
     if not fragment:
         return ""
-    if len(fragment) > 4_096 or any(
-        ord(char) < 32 or ord(char) == 127 for char in fragment
+    if len(fragment) > _MAX_URL_LENGTH or any(
+        ord(char) < _MIN_PRINTABLE_CODEPOINT or ord(char) == _DEL_CODEPOINT
+        for char in fragment
     ):
         msg = "URL fragment is malformed"
-        raise _deny(msg)
+        _deny(msg)
     if has_credential_bearing_query(fragment, allow_path_relative=True):
         msg = "credential-like URL fragment is forbidden"
-        raise _deny(msg)
+        _deny(msg)
     if len(fragment) <= MAX_FRAGMENT_IDENTITY_CHARS:
         return fragment
     digest = hashlib.sha256(fragment.encode("utf-8")).hexdigest()
@@ -422,6 +534,18 @@ def canonicalize_fragment_identity(fragment: str) -> str:
 def _addresses_from_resolution(
     host: str, port: int, resolver: Resolver
 ) -> tuple[str, ...]:
+    """Resolve ``host`` to its public IP addresses via ``resolver``.
+
+    ``host`` itself may already be an IP literal, in which case it is used
+    directly without a DNS lookup.
+
+    Returns:
+        The sorted, deduplicated public addresses ``host`` resolves to.
+
+    Raises:
+        MonitorError: If resolution fails, resolves to no addresses, or
+            resolves to any non-public address.
+    """
     try:
         literal = ipaddress.ip_address(host.split("%", 1)[0])
     except ValueError:
@@ -454,7 +578,7 @@ def _addresses_from_resolution(
     disallowed = [address for address in addresses if not is_public_address(address)]
     if disallowed:
         msg = "target host resolves to a non-public address"
-        raise _deny(msg)
+        _deny(msg)
     return addresses
 
 
@@ -464,26 +588,44 @@ def resolve_public_url(
     resolver: Resolver = socket.getaddrinfo,
     verify_stable_dns: bool = True,
 ) -> ResolvedTarget:
+    """Canonicalize, DNS-resolve, and validate a URL as a safe fetch target.
+
+    When ``verify_stable_dns``, resolves twice and denies (see
+    :func:`_deny`) if the two resolutions disagree, guarding against a
+    TOCTOU DNS-rebinding attack between validation and the actual fetch.
+
+    Returns:
+        The resolved target, including its validated public addresses.
+    """
     canonical, parsed = canonicalize_url(value)
     host = _normalize_host(parsed.hostname or "")
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    port = parsed.port or (
+        _HTTPS_DEFAULT_PORT if parsed.scheme == "https" else _HTTP_DEFAULT_PORT
+    )
     first = _addresses_from_resolution(host, port, resolver)
     if verify_stable_dns:
         second = _addresses_from_resolution(host, port, resolver)
         if first != second:
             msg = "target DNS answers changed during validation"
-            raise _deny(msg)
+            _deny(msg)
     return ResolvedTarget(canonical, parsed.scheme, host, port, first)
 
 
 def validate_peer_address(peer_address: str, allowed: Iterable[str]) -> None:
+    """Deny (see :func:`_deny`) unless ``peer_address`` is in ``allowed``.
+
+    ``allowed`` must already be the validated public address set for the
+    request (e.g. from :class:`ResolvedTarget`); this only re-confirms that
+    the address actually connected to matches one of them and is itself
+    still public, guarding against a connection-time DNS rebind.
+    """
     peer = str(ipaddress.ip_address(peer_address.split("%", 1)[0]))
     normalized_allowed = {
         str(ipaddress.ip_address(item.split("%", 1)[0])) for item in allowed
     }
     if peer not in normalized_allowed or not is_public_address(peer):
         msg = "connected peer does not match the validated public address set"
-        raise _deny(msg)
+        _deny(msg)
 
 
 def validate_redirect(
@@ -492,7 +634,16 @@ def validate_redirect(
     *,
     resolver: Resolver = socket.getaddrinfo,
 ) -> ResolvedTarget:
-    if not location or len(location) > 4_096:
+    """Resolve a redirect's ``Location`` header against ``current_url``.
+
+    Returns:
+        The redirect target, canonicalized and validated as a public
+        HTTP(S) URL.
+
+    Raises:
+        MonitorError: If ``location`` is missing or oversized.
+    """
+    if not location or len(location) > _MAX_URL_LENGTH:
         msg = "redirect_missing_location"
         raise MonitorError(
             msg, "redirect has no usable Location header"
@@ -510,6 +661,11 @@ class BrowserNetworkGuard:
         allowed_hosts: Iterable[str] = (),
         resolver: Resolver = socket.getaddrinfo,
     ) -> None:
+        """Resolve ``initial_url`` and seed the allowed-host set from it.
+
+        ``initial_url``'s own host is always allowed, in addition to any
+        ``allowed_hosts``.
+        """
         initial = resolve_public_url(initial_url, resolver=resolver)
         self._resolver = resolver
         self._allowed_hosts = {
@@ -519,12 +675,21 @@ class BrowserNetworkGuard:
         self.initial = initial
 
     def validate_request(self, url: str) -> ResolvedTarget:
+        """Resolve and validate ``url`` against the allowed-host set.
+
+        Denies (see :func:`_deny`) if ``url``'s host is not in the allowed
+        set, or if ``url`` is otherwise invalid.
+
+        Returns:
+            The resolved target.
+        """
         target = resolve_public_url(url, resolver=self._resolver)
         if target.host not in self._allowed_hosts:
             msg = "browser request host is not explicitly allowed"
-            raise _deny(msg)
+            _deny(msg)
         return target
 
     def validate_response_peer(self, url: str, peer_address: str) -> None:
+        """Validate ``url`` and that ``peer_address`` matches its resolution."""
         target = self.validate_request(url)
         validate_peer_address(peer_address, target.addresses)
