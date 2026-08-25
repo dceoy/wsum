@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
+import subprocess  # ruff: ignore[suspicious-subprocess-import] -- deliberately used
 import tempfile
 import unittest
 from io import StringIO
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
@@ -22,6 +23,7 @@ from normalize import normalize_content
 from outbox import (
     OUTBOX_COLUMNS,
     OutboxDeliveryError,
+    OutboxRecord,
     OutboxSheetsStore,
     dispatch_record,
     enqueue_record,
@@ -31,6 +33,9 @@ from replay import main as replay_main
 from replay import replay_manifest
 
 from tests import support
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 class DriveTests(unittest.TestCase):
@@ -123,12 +128,12 @@ class DriveTests(unittest.TestCase):
     def test_retention_plan_retains_the_entire_current_reference_group(
         self,
     ) -> None:
+        """Test that retention plan retains the entire current reference group."""
         # The current baseline's hash can fall outside the newest
         # ``retain_snapshots`` groups (as here, with retain_snapshots=1 and
         # the oldest snapshot still the active baseline). The whole group --
         # not just the file matching current_ref -- must be retained so its
         # metadata/diff audit artifacts survive alongside normalized.txt.
-        """Test that retention plan retains the entire current reference group."""
         connector = MemoryDriveConnector()
         store = SnapshotStore(connector)
         references: list[str] = []
@@ -178,19 +183,45 @@ class OutboxTests(unittest.TestCase):
             """A fake Drive/Sheets connector used to exercise the tested behavior."""
 
             def __init__(self) -> None:
-                self.values = [list(OUTBOX_COLUMNS)]
+                self.values: list[list[str]] = [list(OUTBOX_COLUMNS)]
                 self.options: list[str] = []
 
-            def read_values(self, spreadsheet_id: str, range_name: str):
+            def read_values(
+                self, spreadsheet_id: str, range_name: str
+            ) -> list[list[str]]:
                 del spreadsheet_id, range_name
                 return self.values
 
-            def replace_values(self, *args, value_input_option: str) -> None:
-                del args
+            def replace_values(
+                self,
+                spreadsheet_id: str,
+                range_name: str,
+                values: Sequence[Sequence[object]],
+                *,
+                value_input_option: str,
+            ) -> None:
+                del spreadsheet_id, range_name, values
                 self.options.append(value_input_option)
 
-            def append_values(self, *args, value_input_option: str) -> None:
-                del args
+            def append_values(
+                self,
+                spreadsheet_id: str,
+                range_name: str,
+                values: Sequence[Sequence[object]],
+                *,
+                value_input_option: str,
+            ) -> None:
+                del spreadsheet_id, range_name, values
+                self.options.append(value_input_option)
+
+            def batch_replace_values(
+                self,
+                spreadsheet_id: str,
+                data: Sequence[Mapping[str, object]],
+                *,
+                value_input_option: str,
+            ) -> None:
+                del spreadsheet_id, data
                 self.options.append(value_input_option)
 
         connector = Connector()
@@ -323,7 +354,7 @@ class OutboxTests(unittest.TestCase):
             "message",
             now="2026-01-01T00:00:00Z",
         )
-        transitions = []
+        transitions: list[OutboxRecord] = []
 
         def ambiguous_sender(group: str, message: str) -> str:
             del group, message
@@ -357,8 +388,16 @@ class OutboxTests(unittest.TestCase):
             record.created_at,
             record.updated_at,
         )
+
+        def unreachable_sender(group: str, message: str) -> str:
+            del group, message
+            return "sent"
+
+        def noop_persist(record: OutboxRecord) -> None:
+            del record
+
         result = dispatch_record(
-            poison, lambda *_: "sent", persist_transition=lambda _: None
+            poison, unreachable_sender, persist_transition=noop_persist
         )
         assert result.status == "poison"
         sending = type(record)(
@@ -370,7 +409,9 @@ class OutboxTests(unittest.TestCase):
             record.created_at,
             record.updated_at,
         )
-        assert sending is dispatch_record(sending, lambda *_: "sent", persist_transition=lambda _: None)
+        assert sending is dispatch_record(
+            sending, unreachable_sender, persist_transition=noop_persist
+        )
 
 
 class ReplayAndAuditTests(unittest.TestCase):
@@ -522,7 +563,11 @@ const byEventId = Object.fromEntries(
 console.log(JSON.stringify({{fetchCalls, byEventId}}));
 """
         result = subprocess.run(
-            [node, "-e", harness], capture_output=True, text=True, timeout=10
+            [node, "-e", harness],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         outcome = json.loads(result.stdout)
@@ -622,7 +667,11 @@ console.log(JSON.stringify({{
 }}));
 """
         result = subprocess.run(
-            [node, "-e", harness], capture_output=True, text=True, timeout=10
+            [node, "-e", harness],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
         assert result.returncode == 0, result.stderr
         outcome = json.loads(result.stdout)
