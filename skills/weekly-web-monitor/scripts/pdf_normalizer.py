@@ -113,9 +113,7 @@ def _scan_hex_string_token(data: bytes, index: int) -> tuple[tuple[str, int, int
         index += 1
     if index >= length:
         msg = "pdf_malformed"
-        raise MonitorError(
-            msg, "PDF content stream has an unterminated hex string"
-        )
+        raise MonitorError(msg, "PDF content stream has an unterminated hex string")
     index += 1
     return ("hex_string", start, index), index
 
@@ -288,9 +286,7 @@ def _bounded_decompress(value: bytes, limit: int) -> bytes:
         )
     if not decompressor.eof:
         msg = "pdf_malformed"
-        raise MonitorError(
-            msg, "PDF contains a truncated compressed stream"
-        )
+        raise MonitorError(msg, "PDF contains a truncated compressed stream")
     return result
 
 
@@ -375,9 +371,7 @@ def _skip_hex_string(data: bytes, position: int) -> int:
         position += 1
     if position >= len(data):
         msg = "pdf_malformed"
-        raise MonitorError(
-            msg, "PDF dictionary has an unterminated hex string"
-        )
+        raise MonitorError(msg, "PDF dictionary has an unterminated hex string")
     return position + 1
 
 
@@ -456,9 +450,7 @@ def _skip_pdf_array(data: bytes, position: int, nesting: int) -> int:
         position = _skip_whitespace_and_comments(data, position)
         if position >= len(data):
             msg = "pdf_malformed"
-            raise MonitorError(
-                msg, "PDF dictionary has an unterminated array"
-            )
+            raise MonitorError(msg, "PDF dictionary has an unterminated array")
         if data[position] == ord("]"):
             return position + 1
         position = _skip_pdf_object(data, position, nesting)
@@ -532,9 +524,7 @@ def _stream_filters(dictionary: bytes) -> list[bytes]:
         if name == b"/Filter":
             if filters is not None:
                 msg = "pdf_malformed"
-                raise MonitorError(
-                    msg, "PDF stream dictionary repeats /Filter"
-                )
+                raise MonitorError(msg, "PDF stream dictionary repeats /Filter")
             filters, position = _filter_value(dictionary, position)
             continue
         position = _skip_pdf_object(dictionary, position)
@@ -591,9 +581,7 @@ def _matches_expected_name_value(
     value_end = value_start + len(expected_value)
     if dictionary[value_start:value_end] != expected_value:
         return False
-    return value_end == len(dictionary) or (
-        dictionary[value_end] in _NAME_TERMINATORS
-    )
+    return value_end == len(dictionary) or (dictionary[value_end] in _NAME_TERMINATORS)
 
 
 def _has_top_level_name_value(
@@ -649,9 +637,7 @@ def _stream_dictionary(
     index = bisect.bisect_right(object_starts, stream_start) - 1
     if index < 0:
         msg = "pdf_malformed"
-        raise MonitorError(
-            msg, "PDF stream has no enclosing object dictionary"
-        )
+        raise MonitorError(msg, "PDF stream has no enclosing object dictionary")
     dictionary = pdf[object_starts[index] : stream_start]
     stripped = dictionary.strip()
     if not (stripped.startswith(b"<<") and stripped.endswith(b">>")):
@@ -687,9 +673,7 @@ def _resolve_length(
     match = re.match(rb"\s*(\d+)", pdf[start : start + 32])
     if match is None:
         msg = "pdf_malformed"
-        raise MonitorError(
-            msg, "PDF stream /Length object is not an integer"
-        )
+        raise MonitorError(msg, "PDF stream /Length object is not an integer")
     return int(match.group(1))
 
 
@@ -726,9 +710,7 @@ def _validate_streams(pdf: bytes, limit: int) -> bool:
         data_end = data_start + length
         if data_end > len(pdf):
             msg = "pdf_malformed"
-            raise MonitorError(
-                msg, "PDF stream /Length exceeds the document size"
-            )
+            raise MonitorError(msg, "PDF stream /Length exceeds the document size")
         # /Length must land exactly on "endstream" (optionally preceded by
         # its own end-of-line marker). A mismatch means the declared length
         # cannot be trusted, and scanning ahead for the next literal

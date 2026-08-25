@@ -74,9 +74,7 @@ class MemoryOperationalStore:
         updates = {item.event_id: item for item in notifications}
         if len(updates) != len(notifications):
             msg = "notification_invalid"
-            raise MonitorError(
-                msg, "notification batch contains duplicate IDs"
-            )
+            raise MonitorError(msg, "notification batch contains duplicate IDs")
         self.notifications = {**self.notifications, **updates}
 
     def append_audit(self, record: AuditRecord) -> None:
@@ -118,9 +116,7 @@ class MemoryDriveConnector:
         del mime_type
         if self.fail_upload:
             msg = "drive_write_failed"
-            raise MonitorError(
-                msg, "fixture upload failed", retryable=True
-            )
+            raise MonitorError(msg, "fixture upload failed", retryable=True)
         reference = f"drive:{hashlib.sha256(path.encode()).hexdigest()}"
         self.paths[path] = reference
         self.files[reference] = content
@@ -260,7 +256,8 @@ class EvidenceSummaryClient:
 
     def summarize(  # ruff: ignore[no-self-use] -- instance method to conform to the
         # summary-client interface used elsewhere via duck typing
-        self, request: Mapping[str, Any]
+        self,
+        request: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Build a schema-valid material summary from the request's first section.
 

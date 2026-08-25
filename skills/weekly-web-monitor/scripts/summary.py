@@ -35,9 +35,7 @@ def build_summary_request(target: Target, diff: DiffResult) -> dict[str, Any]:
     """
     if not diff.should_summarize:
         msg = "summary_not_required"
-        raise MonitorError(
-            msg, "only candidate material diffs may be summarized"
-        )
+        raise MonitorError(msg, "only candidate material diffs may be summarized")
     validate_http_url(target.url)
     if not diff.sections:
         msg = "diff_empty"

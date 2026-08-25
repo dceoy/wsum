@@ -36,19 +36,17 @@ def target(
     Returns:
         The constructed Target.
     """
-    return Target.from_mapping(
-        {
-            "target_id": target_id,
-            "enabled": True,
-            "name": f"Target {target_id}",
-            "url": url or f"https://example.com/{target_id}",
-            "fetch_mode": "static",
-            "include_selector": "",
-            "exclude_selectors": "",
-            "watch_focus": "価格",
-            "notification_group": group,
-        }
-    )
+    return Target.from_mapping({
+        "target_id": target_id,
+        "enabled": True,
+        "name": f"Target {target_id}",
+        "url": url or f"https://example.com/{target_id}",
+        "fetch_mode": "static",
+        "include_selector": "",
+        "exclude_selectors": "",
+        "watch_focus": "価格",
+        "notification_group": group,
+    })
 
 
 def request_and_summary() -> tuple[dict[str, Any], dict[str, Any]]:
@@ -353,12 +351,10 @@ class NotificationTests(unittest.TestCase):
     def test_large_group_is_split_and_target_name_is_escaped(self) -> None:
         """Test that large group is split and target name is escaped."""
         items = [target(f"item-{index}", "group") for index in range(10)]
-        items[0] = Target.from_mapping(
-            {
-                **items[0].as_dict(),
-                "name": "<!channel>",
-            }
-        )
+        items[0] = Target.from_mapping({
+            **items[0].as_dict(),
+            "name": "<!channel>",
+        })
         store = MemoryOperationalStore(items)
         slack = MemorySlackConnector()
         events = [
@@ -391,9 +387,11 @@ class ValidateSummaryCliTest(unittest.TestCase):
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
             request_path.write_text(json.dumps(request), encoding="utf-8")
             with patch("sys.stdout", new_callable=StringIO) as stdout:
-                code = validate_summary_main(
-                    ["validate_summary.py", str(summary_path), str(request_path)]
-                )
+                code = validate_summary_main([
+                    "validate_summary.py",
+                    str(summary_path),
+                    str(request_path),
+                ])
         assert code == 0
         payload = json.loads(stdout.getvalue())
         assert payload["material"] is True
@@ -403,9 +401,11 @@ class ValidateSummaryCliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "does-not-exist.json"
             with patch("sys.stdout", new_callable=StringIO) as stdout:
-                code = validate_summary_main(
-                    ["validate_summary.py", str(missing), str(missing)]
-                )
+                code = validate_summary_main([
+                    "validate_summary.py",
+                    str(missing),
+                    str(missing),
+                ])
         assert code == 1
         payload = json.loads(stdout.getvalue())
         assert payload["error"]["code"] == "summary_invalid"

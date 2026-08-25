@@ -108,9 +108,7 @@ def _normalize_table(values: Sequence[Sequence[Any]], sheet: str) -> list[list[A
     Raises:
         MonitorError: If ``values`` or any of its rows is not an array.
     """
-    if not isinstance(
-        values, Sequence
-    ) or isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+    if not isinstance(values, Sequence) or isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         # values ultimately originates from an untrusted Sheets API
         # response; callers may pass a non-conforming value at runtime
         # despite the declared type, so this check stays load-bearing.
@@ -124,15 +122,11 @@ def _normalize_table(values: Sequence[Sequence[Any]], sheet: str) -> list[list[A
         )
     table: list[list[Any]] = []
     for row in values:
-        if not isinstance(
-            row, Sequence
-        ) or isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+        if not isinstance(row, Sequence) or isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
             row, (str, bytes)
         ):
             msg = "sheet_invalid_structure"
-            raise MonitorError(
-                msg, f"{sheet}: every row must be an array"
-            )
+            raise MonitorError(msg, f"{sheet}: every row must be an array")
         table.append(list(row))
     return table
 
@@ -164,9 +158,7 @@ def records_from_values(
     headers = [str(value).strip() for value in table[0]]
     if any(not header for header in headers) or len(headers) != len(set(headers)):
         msg = "sheet_invalid_structure"
-        raise MonitorError(
-            msg, f"{sheet}: headers must be non-empty and unique"
-        )
+        raise MonitorError(msg, f"{sheet}: headers must be non-empty and unique")
     missing = [column for column in required_columns if column not in headers]
     if missing:
         msg = "sheet_missing_columns"
@@ -189,9 +181,7 @@ def records_from_values(
             continue
         if len(raw_row) > len(headers):
             msg = "sheet_invalid_row"
-            raise MonitorError(
-                msg, f"{sheet}: row {row_number} has too many values"
-            )
+            raise MonitorError(msg, f"{sheet}: row {row_number} has too many values")
         padded = raw_row + [""] * (len(headers) - len(raw_row))
         record = dict(zip(headers, padded, strict=True))
         record["_row_number"] = row_number
@@ -223,9 +213,7 @@ def _ensure_unique(
             )
         if value in seen:
             msg = "sheet_duplicate_id"
-            raise MonitorError(
-                msg, f"{sheet}: duplicate {key}: {value}"
-            )
+            raise MonitorError(msg, f"{sheet}: duplicate {key}: {value}")
         seen.add(value)
         result.append(record)
     return result
@@ -428,9 +416,7 @@ def upsert_notification_payload(
         return {"range": "Notifications!A:F", "values": [row], "mode": "append"}
     if row_number < _FIRST_DATA_ROW:
         msg = "sheet_invalid_row"
-        raise MonitorError(
-            msg, "Notifications row_number must be at least 2"
-        )
+        raise MonitorError(msg, "Notifications row_number must be at least 2")
     return {
         "range": f"Notifications!A{row_number}:F{row_number}",
         "values": [row],
@@ -566,9 +552,7 @@ class SheetsStore:
         event_ids = [item.event_id for item in notifications]
         if len(event_ids) != len(set(event_ids)):
             msg = "notification_invalid"
-            raise MonitorError(
-                msg, "notification batch contains duplicate IDs"
-            )
+            raise MonitorError(msg, "notification batch contains duplicate IDs")
         existing = load_notifications(
             self._connector.read_values(self._spreadsheet_id, "Notifications!A:F")
         )

@@ -80,9 +80,7 @@ def make_audit_record(
     for key, value in (metadata or {}).items():
         if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key):
             msg = "audit_invalid"
-            raise MonitorError(
-                msg, "audit metadata key is not lower snake case"
-            )
+            raise MonitorError(msg, "audit metadata key is not lower snake case")
         if SENSITIVE_KEY_RE.search(key):
             msg = "audit_sensitive_field"
             raise MonitorError(
@@ -92,9 +90,7 @@ def make_audit_record(
         rendered = str(value)
         if len(rendered) > _MAX_METADATA_VALUE_LENGTH:
             msg = "audit_field_too_long"
-            raise MonitorError(
-                msg, "audit metadata value exceeds 200 characters"
-            )
+            raise MonitorError(msg, "audit metadata value exceeds 200 characters")
         safe_metadata[key] = rendered
     if not re.fullmatch(r"[a-z][a-z0-9_.-]{0,99}", event_type):
         msg = "audit_invalid"

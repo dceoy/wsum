@@ -29,17 +29,15 @@ SLACK_CONTROL_RE = re.compile(
     r"(?:<!|<@|<#|@channel\b|@here\b|@everyone\b)", re.IGNORECASE
 )
 URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
-ALLOWED_KEYS = frozenset(
-    {
-        "material",
-        "significance",
-        "summary_ja",
-        "evidence",
-        "recommended_action_ja",
-        "notification_text_ja",
-        "source_url",
-    }
-)
+ALLOWED_KEYS = frozenset({
+    "material",
+    "significance",
+    "summary_ja",
+    "evidence",
+    "recommended_action_ja",
+    "notification_text_ja",
+    "source_url",
+})
 EVIDENCE_KEYS = frozenset({"section_id", "claim_ja", "before", "after"})
 MAX_EVIDENCE_ITEMS = 30
 
@@ -69,12 +67,8 @@ def _require_string(
         raise MonitorError(msg, f"{key} must be a string")
     if len(raw) > maximum or (not allow_empty and not raw.strip()):
         msg = "summary_invalid"
-        raise MonitorError(
-            msg, f"{key} is empty or exceeds {maximum} characters"
-        )
-    if any(
-        ord(char) < _MIN_PRINTABLE_CODEPOINT and char not in "\n\t" for char in raw
-    ):
+        raise MonitorError(msg, f"{key} is empty or exceeds {maximum} characters")
+    if any(ord(char) < _MIN_PRINTABLE_CODEPOINT and char not in "\n\t" for char in raw):
         msg = "summary_invalid"
         raise MonitorError(msg, f"{key} contains control characters")
     return raw.strip()
@@ -100,9 +94,7 @@ def _validate_url(value: str, expected: str) -> None:
         or value != expected
     ):
         msg = "summary_invalid_url"
-        raise MonitorError(
-            msg, "source_url does not match the monitored source"
-        )
+        raise MonitorError(msg, "source_url does not match the monitored source")
 
 
 def _normalized_evidence_lines(section: Mapping[str, Any], key: str) -> list[str]:
@@ -133,9 +125,7 @@ def _validate_schema_keys(summary: Mapping[str, Any]) -> None:
         MonitorError: If ``summary`` is not a mapping, or has unknown or
             missing keys.
     """
-    if not isinstance(
-        summary, Mapping
-    ):  # pyright: ignore[reportUnnecessaryIsInstance]
+    if not isinstance(summary, Mapping):  # pyright: ignore[reportUnnecessaryIsInstance]
         # summary ultimately originates from untrusted, dynamically-typed
         # model/JSON output; callers may pass a non-mapping value at
         # runtime despite the declared type, so this check stays
@@ -221,9 +211,7 @@ def _validate_text_fields(
         raise MonitorError(msg, "summary_ja must contain Japanese text")
     if action and not JAPANESE_RE.search(action):
         msg = "summary_invalid"
-        raise MonitorError(
-            msg, "recommended_action_ja must contain Japanese text"
-        )
+        raise MonitorError(msg, "recommended_action_ja must contain Japanese text")
     if material and (
         not JAPANESE_RE.search(notification) or source_url not in notification
     ):
@@ -260,14 +248,11 @@ def _validate_delivery_text(
     # "https://example.com<ideographic full stop>"), and that punctuation
     # is not part of the URL.
     if any(
-        value != source_url
-        and value.rstrip(".,;:!?。、，；：！？") != source_url  # ruff: ignore[ambiguous-unicode-character-string]
+        value != source_url and value.rstrip(".,;:!?。、，；：！？") != source_url  # ruff: ignore[ambiguous-unicode-character-string]
         for value in delivery_urls
     ):
         msg = "summary_invalid"
-        raise MonitorError(
-            msg, "delivery text contains an unsupported external URL"
-        )
+        raise MonitorError(msg, "delivery text contains an unsupported external URL")
     if not material and notification:
         msg = "summary_invalid"
         raise MonitorError(
@@ -339,15 +324,11 @@ def _validate_one_evidence_item(
     """
     if not isinstance(item, Mapping):
         msg = "summary_invalid"
-        raise MonitorError(
-            msg, "evidence fields do not match the required schema"
-        )
+        raise MonitorError(msg, "evidence fields do not match the required schema")
     item = cast("Mapping[str, Any]", item)
     if frozenset(item) != EVIDENCE_KEYS:
         msg = "summary_invalid"
-        raise MonitorError(
-            msg, "evidence fields do not match the required schema"
-        )
+        raise MonitorError(msg, "evidence fields do not match the required schema")
     section_id = _require_string(item, "section_id", maximum=64)
     claim = _require_string(item, "claim_ja", maximum=300)
     before = _require_string(item, "before", maximum=500, allow_empty=True)
@@ -355,14 +336,10 @@ def _validate_one_evidence_item(
     section = section_map.get(section_id)
     if section is None:
         msg = "summary_unsupported"
-        raise MonitorError(
-            msg, "evidence references an unknown diff section"
-        )
+        raise MonitorError(msg, "evidence references an unknown diff section")
     if not JAPANESE_RE.search(claim):
         msg = "summary_invalid"
-        raise MonitorError(
-            msg, "evidence claim_ja must contain Japanese text"
-        )
+        raise MonitorError(msg, "evidence claim_ja must contain Japanese text")
     allowed_before = _normalized_evidence_lines(section, "before")
     allowed_after = _normalized_evidence_lines(section, "after")
     normalized_before = " ".join(before.split())
@@ -370,29 +347,17 @@ def _validate_one_evidence_item(
     if not normalized_before and not normalized_after:
         msg = "summary_unsupported"
         raise MonitorError(msg, "evidence must quote before or after text")
-    if (
-        normalized_before
-        and normalized_after
-        and normalized_before == normalized_after
-    ):
+    if normalized_before and normalized_after and normalized_before == normalized_after:
         msg = "summary_unsupported"
-        raise MonitorError(
-            msg, "before and after evidence must show a change"
-        )
+        raise MonitorError(msg, "before and after evidence must show a change")
     if normalized_before and not any(
         normalized_before in line for line in allowed_before
     ):
         msg = "summary_unsupported"
-        raise MonitorError(
-            msg, "before evidence is absent from its diff section"
-        )
-    if normalized_after and not any(
-        normalized_after in line for line in allowed_after
-    ):
+        raise MonitorError(msg, "before evidence is absent from its diff section")
+    if normalized_after and not any(normalized_after in line for line in allowed_after):
         msg = "summary_unsupported"
-        raise MonitorError(
-            msg, "after evidence is absent from its diff section"
-        )
+        raise MonitorError(msg, "after evidence is absent from its diff section")
     return section_id, claim, before, after
 
 
@@ -411,14 +376,12 @@ def _validate_evidence_items(
             item, section_map
         )
         supported_text_parts.extend((before, after))
-        validated_evidence.append(
-            {
-                "section_id": section_id,
-                "claim_ja": claim,
-                "before": before,
-                "after": after,
-            }
-        )
+        validated_evidence.append({
+            "section_id": section_id,
+            "claim_ja": claim,
+            "before": before,
+            "after": after,
+        })
     return supported_text_parts, validated_evidence
 
 
@@ -503,9 +466,7 @@ def _main(argv: list[str]) -> int:
         incorrect CLI usage.
     """
     if len(argv) != _EXPECTED_ARGC:
-        sys.stderr.write(
-            "usage: validate_summary.py SUMMARY_JSON REQUEST_JSON\n"
-        )
+        sys.stderr.write("usage: validate_summary.py SUMMARY_JSON REQUEST_JSON\n")
         return 2
     try:
         with pathlib.Path(argv[1]).open(encoding="utf-8") as summary_stream:

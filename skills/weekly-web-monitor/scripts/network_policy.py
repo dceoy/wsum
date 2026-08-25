@@ -23,28 +23,26 @@ from errors import MonitorError
 
 Resolver = Callable[..., Sequence[tuple[Any, ...]]]
 
-_SENSITIVE_QUERY_NAMES = frozenset(
-    {
-        "access-token",
-        "api-key",
-        "apikey",
-        "auth",
-        "auth-token",
-        "authorization",
-        "awsaccesskeyid",
-        "credential",
-        "id-token",
-        "oauth-token",
-        "password",
-        "refresh-token",
-        "secret",
-        "sig",
-        "signature",
-        "subscription-key",
-        "token",
-        "x-api-key",
-    }
-)
+_SENSITIVE_QUERY_NAMES = frozenset({
+    "access-token",
+    "api-key",
+    "apikey",
+    "auth",
+    "auth-token",
+    "authorization",
+    "awsaccesskeyid",
+    "credential",
+    "id-token",
+    "oauth-token",
+    "password",
+    "refresh-token",
+    "secret",
+    "sig",
+    "signature",
+    "subscription-key",
+    "token",
+    "x-api-key",
+})
 _SENSITIVE_QUERY_SUFFIXES = (
     "credential",
     "secret",
@@ -135,16 +133,14 @@ def is_public_address(value: str) -> bool:
         address = ipaddress.ip_address(value.split("%", 1)[0])
     except ValueError:
         return False
-    return bool(address.is_global) and not any(
-        (
-            address.is_link_local,
-            address.is_loopback,
-            address.is_multicast,
-            address.is_private,
-            address.is_reserved,
-            address.is_unspecified,
-        )
-    )
+    return bool(address.is_global) and not any((
+        address.is_link_local,
+        address.is_loopback,
+        address.is_multicast,
+        address.is_private,
+        address.is_reserved,
+        address.is_unspecified,
+    ))
 
 
 def _normalize_host(host: str) -> str:
@@ -175,11 +171,8 @@ def _normalize_host(host: str) -> str:
 
 def _is_webhook_credential_host_path(host: str, decoded_path: str) -> bool:
     """Return whether ``host``/``decoded_path`` is a known webhook credential URL."""
-    return (
-        (host == "hooks.slack.com"
-        and decoded_path.startswith("/services/"))
-        or (host in {"discord.com", "discordapp.com"}
-        and "/api/webhooks/" in decoded_path)
+    return (host == "hooks.slack.com" and decoded_path.startswith("/services/")) or (
+        host in {"discord.com", "discordapp.com"} and "/api/webhooks/" in decoded_path
     )
 
 
@@ -474,9 +467,7 @@ def canonicalize_url(value: str) -> tuple[str, SplitResult]:
     if _is_webhook_credential_host_path(host, decoded_path):
         msg = "webhook credential URLs are forbidden"
         _deny(msg)
-    port = port or (
-        _HTTPS_DEFAULT_PORT if scheme == "https" else _HTTP_DEFAULT_PORT
-    )
+    port = port or (_HTTPS_DEFAULT_PORT if scheme == "https" else _HTTP_DEFAULT_PORT)
     if not _MIN_PORT <= port <= _MAX_PORT:
         msg = "URL port is invalid"
         _deny(msg)
@@ -645,9 +636,7 @@ def validate_redirect(
     """
     if not location or len(location) > _MAX_URL_LENGTH:
         msg = "redirect_missing_location"
-        raise MonitorError(
-            msg, "redirect has no usable Location header"
-        )
+        raise MonitorError(msg, "redirect has no usable Location header")
     return resolve_public_url(urljoin(current_url, location), resolver=resolver)
 
 

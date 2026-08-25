@@ -575,7 +575,10 @@ console.log(JSON.stringify({{fetchCalls, byEventId}}));
         assert outcome["fetchCalls"][0]["body"]["text"] == "hello-a"
         assert outcome["byEventId"]["event-allowed"]["status"] == "sent"
         assert outcome["byEventId"]["event-mismatched"]["status"] == "poison"
-        assert outcome["byEventId"]["event-mismatched"]["last_error"] == "notification_group_mismatch"
+        assert (
+            outcome["byEventId"]["event-mismatched"]["last_error"]
+            == "notification_group_mismatch"
+        )
 
     def test_gas_dispatcher_treats_existing_sending_row_as_delivery_claim(
         self,

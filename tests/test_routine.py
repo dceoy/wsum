@@ -37,19 +37,17 @@ def make_target(target_id: str = "one", group: str = "default") -> Target:
     Returns:
         The constructed target.
     """
-    return Target.from_mapping(
-        {
-            "target_id": target_id,
-            "enabled": True,
-            "name": target_id.title(),
-            "url": f"https://example.com/{target_id}",
-            "fetch_mode": "static",
-            "include_selector": "main",
-            "exclude_selectors": "",
-            "watch_focus": "price and terms",
-            "notification_group": group,
-        }
-    )
+    return Target.from_mapping({
+        "target_id": target_id,
+        "enabled": True,
+        "name": target_id.title(),
+        "url": f"https://example.com/{target_id}",
+        "fetch_mode": "static",
+        "include_selector": "main",
+        "exclude_selectors": "",
+        "watch_focus": "price and terms",
+        "notification_group": group,
+    })
 
 
 def response(price: int) -> FixtureResponse:
@@ -310,9 +308,7 @@ class RoutineTests(unittest.TestCase):
                 self.get_state_calls += 1
                 if self.get_state_calls == 1:
                     msg = "state_read_failed"
-                    raise MonitorError(
-                        msg, "simulated transient failure"
-                    )
+                    raise MonitorError(msg, "simulated transient failure")
                 return super().get_state(target_id)
 
         flaky_store = FlakyStateStore([self.target], dict(self.store.states))
@@ -459,9 +455,7 @@ class RoutineTests(unittest.TestCase):
                 self.replace_state_calls += 1
                 if self.replace_state_calls == 1:
                     msg = "state_write_failed"
-                    raise MonitorError(
-                        msg, "simulated transient failure"
-                    )
+                    raise MonitorError(msg, "simulated transient failure")
                 super().replace_state(state)
 
         store = PartialCommitStore(
@@ -534,12 +528,10 @@ class RoutineTests(unittest.TestCase):
         """Test that one target failure does not abort other targets."""
         targets = [make_target("good"), make_target("bad")]
         store = MemoryOperationalStore(targets)
-        fetcher = FixtureFetcher(
-            {
-                "good": response(1000),
-                "bad": MonitorError("selector_no_match", "fixture"),
-            }
-        )
+        fetcher = FixtureFetcher({
+            "good": response(1000),
+            "bad": MonitorError("selector_no_match", "fixture"),
+        })
         routine = WeeklyMonitorRoutine(
             store=store,
             snapshots=SnapshotStore(MemoryDriveConnector()),
@@ -570,9 +562,10 @@ class RoutineTests(unittest.TestCase):
         """Test that invalid caller run id fails before target side effects."""
         longest = make_target("x" * 128)
         store = MemoryOperationalStore([self.target, longest])
-        fetcher = FixtureFetcher(
-            {"one": response(1000), longest.target_id: response(1000)}
-        )
+        fetcher = FixtureFetcher({
+            "one": response(1000),
+            longest.target_id: response(1000),
+        })
         slack = MemorySlackConnector()
         routine = WeeklyMonitorRoutine(
             store=store,
@@ -601,6 +594,7 @@ class RoutineTests(unittest.TestCase):
 
     def test_audit_sink_failure_does_not_change_primary_result(self) -> None:
         """Test that audit sink failure does not change primary result."""
+
         class FailingAudit:
             """An audit sink stub whose writes always fail."""
 
@@ -628,6 +622,7 @@ class RoutineTests(unittest.TestCase):
 
     def test_outbox_is_a_mutually_exclusive_delivery_backend(self) -> None:
         """Test that outbox is a mutually exclusive delivery backend."""
+
         def outbox_cycle(price: int, run_id: str) -> RoutineResult:
             """Run one outbox-delivery-mode cycle for the given price.
 
@@ -697,10 +692,15 @@ class RoutineTests(unittest.TestCase):
         result = routine.run(run_id="summary-2")
         assert result.metrics.failed == 1
         assert len(result.runs[0].attempts) == 3
-        assert [attempt.error_code for attempt in result.runs[0].attempts] == ["", "connector_unavailable", "connector_unavailable"]
+        assert [attempt.error_code for attempt in result.runs[0].attempts] == [
+            "",
+            "connector_unavailable",
+            "connector_unavailable",
+        ]
 
     def test_oversized_diff_fails_closed_instead_of_advancing_baseline(self) -> None:
         """Test that oversized diff fails closed instead of advancing baseline."""
+
         class UnreachableSummary:
             """A summary client stub that fails the test if invoked."""
 
@@ -715,9 +715,7 @@ class RoutineTests(unittest.TestCase):
                     "synthetic budget-exceeded evidence must never reach a "
                     "summary model"
                 )
-                raise AssertionError(
-                    msg
-                )
+                raise AssertionError(msg)
 
         routine_config = RoutineConfig(
             max_concurrency=2,
@@ -821,15 +819,14 @@ class RoutineTests(unittest.TestCase):
         baseline_paragraphs: list[str] = []
         changed_paragraphs: list[str] = []
         for index in range(5):
-            baseline_paragraphs.extend(
-                [f"Anchor {index}", f"Note {index} original text here"]
-            )
-            changed_paragraphs.extend(
-                [
-                    f"Anchor {index}",
-                    f"Note {index} completely different content now present",
-                ]
-            )
+            baseline_paragraphs.extend([
+                f"Anchor {index}",
+                f"Note {index} original text here",
+            ])
+            changed_paragraphs.extend([
+                f"Anchor {index}",
+                f"Note {index} completely different content now present",
+            ])
         routine_config = RoutineConfig(
             max_concurrency=2,
             retry=RetryConfig(),
@@ -862,7 +859,10 @@ class RoutineTests(unittest.TestCase):
         )
         result = changed_routine.run(run_id="nonsignal-2")
         assert result.metrics.failed == 1
-        assert self.store.runs["nonsignal-2:one"].error_code == "truncated_diff_non_material"
+        assert (
+            self.store.runs["nonsignal-2:one"].error_code
+            == "truncated_diff_non_material"
+        )
         assert baseline_hash == self.store.states["one"].normalized_hash
         assert self.store.states["one"].consecutive_failures == 1
 
@@ -878,12 +878,8 @@ class RoutineTests(unittest.TestCase):
         baseline_paragraphs: list[str] = []
         changed_paragraphs: list[str] = []
         for index in range(5):
-            baseline_paragraphs.extend(
-                [f"Anchor {index}", f"Price: ¥{100 + index}"]
-            )
-            changed_paragraphs.extend(
-                [f"Anchor {index}", f"Price: ¥{200 + index}"]
-            )
+            baseline_paragraphs.extend([f"Anchor {index}", f"Price: ¥{100 + index}"])
+            changed_paragraphs.extend([f"Anchor {index}", f"Price: ¥{200 + index}"])
         routine_config = RoutineConfig(
             max_concurrency=2,
             retry=RetryConfig(),
@@ -916,7 +912,9 @@ class RoutineTests(unittest.TestCase):
         )
         result = changed_routine.run(run_id="dropped-2")
         assert result.metrics.failed == 1
-        assert self.store.runs["dropped-2:one"].error_code == "truncated_diff_non_material"
+        assert (
+            self.store.runs["dropped-2:one"].error_code == "truncated_diff_non_material"
+        )
         assert baseline_hash == self.store.states["one"].normalized_hash
         assert self.store.states["one"].consecutive_failures == 1
 

@@ -107,17 +107,15 @@ def declared_content_kind(content_type: str) -> str:
     return "unsupported"
 
 
-_ALLOWED_CHARSET_CODECS = frozenset(
-    {
-        "cp932",
-        "cp1252",
-        "euc_jp",
-        "iso8859-1",
-        "shift_jis",
-        "utf-8",
-        "utf-8-sig",
-    }
-)
+_ALLOWED_CHARSET_CODECS = frozenset({
+    "cp932",
+    "cp1252",
+    "euc_jp",
+    "iso8859-1",
+    "shift_jis",
+    "utf-8",
+    "utf-8-sig",
+})
 
 
 def _decode_strict(body: bytes, codec_name: str) -> str:
@@ -170,9 +168,7 @@ def _decode_text(body: bytes, charset: str = "") -> str:
         codec = codecs.lookup(encoding)
     except LookupError as exc:
         msg = "unsupported_charset"
-        raise MonitorError(
-            msg, "document charset is unsupported"
-        ) from exc
+        raise MonitorError(msg, "document charset is unsupported") from exc
     if codec.name not in _ALLOWED_CHARSET_CODECS:
         msg = "unsupported_charset"
         raise MonitorError(msg, "document charset is unsupported")
@@ -240,30 +236,22 @@ def normalize_content(
             limit, its declared and detected content types mismatch, its
             declared type is unsupported, or extraction/decoding fails.
     """
-    if not isinstance(
-        body, bytes
-    ):  # pyright: ignore[reportUnnecessaryIsInstance]
+    if not isinstance(body, bytes):  # pyright: ignore[reportUnnecessaryIsInstance]
         # body ultimately originates from an untrusted HTTP fetch; callers
         # may pass a non-bytes value at runtime despite the declared type.
         msg = "invalid_content"
         raise MonitorError(msg, "content must be bytes")
     if not _MIN_INPUT_BYTES <= max_input_bytes <= _MAX_INPUT_BYTES:
         msg = "invalid_configuration"
-        raise MonitorError(
-            msg, "normalization input limit is invalid"
-        )
+        raise MonitorError(msg, "normalization input limit is invalid")
     if len(body) > max_input_bytes:
         msg = "response_too_large"
-        raise MonitorError(
-            msg, "content exceeds the normalization input limit"
-        )
+        raise MonitorError(msg, "content exceeds the normalization input limit")
     sniffed = sniff_content_kind(body)
     declared = declared_content_kind(content_type)
     if declared == "unsupported":
         msg = "unsupported_content_type"
-        raise MonitorError(
-            msg, "declared content type is unsupported"
-        )
+        raise MonitorError(msg, "declared content type is unsupported")
     compatible = declared in {"text", sniffed} or (
         declared == "xml" and sniffed in {"feed", "xml"}
     )

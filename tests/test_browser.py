@@ -211,6 +211,7 @@ class FakePlaywrightManager:
 
     def __init__(self, browser: FakeBrowser) -> None:
         """Wrap ``browser`` behind a fake ``sync_playwright()`` chromium launcher."""
+
         def launch(**_kwargs: object) -> FakeBrowser:
             return browser
 
@@ -294,6 +295,7 @@ class BrowserFetcherTests(unittest.TestCase):
         # would make State round-trip fail on the very next run. The
         # canonical URL returned by the SSRF guard strips the fragment.
         """Test that final url fragment set by page js is canonicalized."""
+
         class FragmentPage(FakePage):
             """A FakePage variant whose final URL carries a fragment."""
 
@@ -308,9 +310,10 @@ class BrowserFetcherTests(unittest.TestCase):
         )
         result, _, _ = self.run_fake(page)
         assert result.final_url == "https://example.com/"
-        state = State.from_mapping(
-            {"target_id": "t1", "validated_url": result.final_url}
-        )
+        state = State.from_mapping({
+            "target_id": "t1",
+            "validated_url": result.final_url,
+        })
         assert state.validated_url == "https://example.com/"
 
     def test_private_subresource_and_redirect_are_denied(self) -> None:
@@ -399,7 +402,10 @@ class BrowserFetcherTests(unittest.TestCase):
                 sys.modules,
                 {"playwright": None, "playwright.sync_api": None},
             ),
-            pytest.raises(MonitorError, match="browser mode requires the optional Playwright runtime"),
+            pytest.raises(
+                MonitorError,
+                match="browser mode requires the optional Playwright runtime",
+            ),
         ):
             fetch_rendered(
                 "https://example.com",

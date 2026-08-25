@@ -114,9 +114,7 @@ class OutboxRecord:
             attempt_count = int(value.get("attempt_count", 0))
         except (TypeError, ValueError) as exc:
             msg = "outbox_invalid"
-            raise MonitorError(
-                msg, "attempt_count must be an integer"
-            ) from exc
+            raise MonitorError(msg, "attempt_count must be an integer") from exc
         return cls(
             event_id=str(value.get("event_id", "")).strip(),
             target_id=str(value.get("target_id", "")).strip(),
@@ -230,9 +228,7 @@ def enqueue_record(
     validate_target_id(notification_group)
     if "hooks.slack.com/services/" in message.lower():
         msg = "outbox_invalid"
-        raise MonitorError(
-            msg, "Outbox message must not contain a webhook URL"
-        )
+        raise MonitorError(msg, "Outbox message must not contain a webhook URL")
     timestamp = now or utc_now()
     payload = json.dumps(
         {"notification_group": notification_group, "message": message},

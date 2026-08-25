@@ -74,8 +74,10 @@ _CHROMIUM_LAUNCH_ARGS = (
     "--disable-default-apps",
     "--disable-dev-shm-usage",
     "--disable-extensions",
-    ("--disable-features=InterestFeedContentSuggestions,"
-     "MediaRouter,OptimizationHints,Translate"),
+    (
+        "--disable-features=InterestFeedContentSuggestions,"
+        "MediaRouter,OptimizationHints,Translate"
+    ),
     "--disable-sync",
     "--metrics-recording-only",
     "--no-first-run",
@@ -104,23 +106,17 @@ class BrowserFetchConfig:
         """
         if not _MIN_TIMEOUT_SECONDS <= self.timeout_seconds <= _MAX_TIMEOUT_SECONDS:
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "browser timeout must be 1-120 seconds"
-            )
+            raise MonitorError(msg, "browser timeout must be 1-120 seconds")
         if not (
             _MIN_MAX_RENDERED_BYTES
             <= self.max_rendered_bytes
             <= _MAX_MAX_RENDERED_BYTES
         ):
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "browser rendered size limit is invalid"
-            )
+            raise MonitorError(msg, "browser rendered size limit is invalid")
         if not _MIN_MAX_REQUESTS <= self.max_requests <= _MAX_MAX_REQUESTS:
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "browser request limit is invalid"
-            )
+            raise MonitorError(msg, "browser request limit is invalid")
         if not (
             _MIN_MAX_DECLARED_RESOURCE_BYTES
             <= self.max_declared_resource_bytes
@@ -136,9 +132,7 @@ class BrowserFetchConfig:
             or len(self.block_resource_types) > _MAX_BLOCK_RESOURCE_TYPES
         ):
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "browser host or resource policy is too large"
-            )
+            raise MonitorError(msg, "browser host or resource policy is too large")
 
 
 @dataclass(slots=True)

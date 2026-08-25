@@ -87,9 +87,7 @@ def change_event_id(target_id: str, normalized_hash: str) -> str:
     validate_target_id(target_id)
     if not HASH_RE.fullmatch(normalized_hash):
         msg = "notification_invalid"
-        raise MonitorError(
-            msg, "normalized_hash must be a SHA-256 digest"
-        )
+        raise MonitorError(msg, "normalized_hash must be a SHA-256 digest")
     return hashlib.sha256(f"{target_id}{normalized_hash}".encode()).hexdigest()
 
 
@@ -138,15 +136,11 @@ def build_change_event(
     """
     if summary.get("material") is not True:
         msg = "notification_suppressed"
-        raise MonitorError(
-            msg, "only validated material summaries may notify"
-        )
+        raise MonitorError(msg, "only validated material summaries may notify")
     notification_text = str(summary.get("notification_text_ja", ""))
     if target.url not in notification_text:
         msg = "notification_invalid"
-        raise MonitorError(
-            msg, "notification text must contain the source URL"
-        )
+        raise MonitorError(msg, "notification text must contain the source URL")
     return NotificationEvent(
         event_id=change_event_id(target.target_id, normalized_hash),
         target=target,
@@ -381,9 +375,7 @@ def deliver_grouped(
     """
     if not _MIN_MAX_MESSAGE_CHARS <= max_message_chars <= _MAX_MAX_MESSAGE_CHARS:
         msg = "invalid_configuration"
-        raise MonitorError(
-            msg, "Slack message length limit is invalid"
-        )
+        raise MonitorError(msg, "Slack message length limit is invalid")
     outcomes, sendable = _partition_by_dedup_status(events, store)
 
     for group, group_events in sendable.items():

@@ -37,9 +37,7 @@ def _validate_snapshot(name: str, snapshot: Mapping[str, Any]) -> None:
     actual_hash = hash_normalized(kind, text)
     if actual_hash != expected_hash:
         msg = "replay_hash_mismatch"
-        raise MonitorError(
-            msg, f"{name} normalized hash does not match"
-        )
+        raise MonitorError(msg, f"{name} normalized hash does not match")
 
 
 def _check_expected(expected: object, diff: DiffResult) -> None:
@@ -57,9 +55,7 @@ def _check_expected(expected: object, diff: DiffResult) -> None:
     for key in ("result", "change_score", "significance"):
         if key in expected and diff.as_dict()[key] != expected[key]:
             msg = "replay_result_mismatch"
-            raise MonitorError(
-                msg, f"replayed {key} does not match"
-            )
+            raise MonitorError(msg, f"replayed {key} does not match")
 
 
 def replay_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -88,9 +84,7 @@ def replay_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
     current = value.get("current")
     if not isinstance(previous, Mapping) or not isinstance(current, Mapping):
         msg = "replay_invalid"
-        raise MonitorError(
-            msg, "previous and current snapshots are required"
-        )
+        raise MonitorError(msg, "previous and current snapshots are required")
     previous = cast("Mapping[str, Any]", previous)
     current = cast("Mapping[str, Any]", current)
     for name, snapshot in (("previous", previous), ("current", current)):
@@ -118,9 +112,7 @@ def replay_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
         source_url = value.get("source_url")
         if not isinstance(source_url, str):
             msg = "replay_invalid"
-            raise MonitorError(
-                msg, "independent replay source_url is missing"
-            )
+            raise MonitorError(msg, "independent replay source_url is missing")
         summary_result = validate_summary(
             summary,
             changed_sections=[section.as_dict() for section in diff.sections],

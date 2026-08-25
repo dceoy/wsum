@@ -35,17 +35,15 @@ class MonitorError(Exception):
         return result
 
 
-RETRYABLE_ERROR_CODES = frozenset(
-    {
-        "connector_unavailable",
-        "drive_write_failed",
-        "fetch_connection_failed",
-        "fetch_timeout",
-        "http_rate_limited",
-        "http_server_error",
-        "notification_send_failed",
-    }
-)
+RETRYABLE_ERROR_CODES = frozenset({
+    "connector_unavailable",
+    "drive_write_failed",
+    "fetch_connection_failed",
+    "fetch_timeout",
+    "http_rate_limited",
+    "http_server_error",
+    "notification_send_failed",
+})
 
 
 def is_retryable_error(error: BaseException) -> bool:

@@ -17,18 +17,16 @@ if TYPE_CHECKING:
 TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HASH_RE = re.compile(r"^[a-f0-9]{64}$")
 FETCH_MODES = frozenset({"static", "browser"})
-RUN_RESULTS = frozenset(
-    {
-        "baseline_created",
-        "failed",
-        "material",
-        "minor",
-        "non_material",
-        "notified",
-        "suppressed",
-        "unchanged",
-    }
-)
+RUN_RESULTS = frozenset({
+    "baseline_created",
+    "failed",
+    "material",
+    "minor",
+    "non_material",
+    "notified",
+    "suppressed",
+    "unchanged",
+})
 NOTIFICATION_STATUSES = frozenset({"pending", "sent", "failed", "suppressed"})
 
 _MIN_PRINTABLE_CODEPOINT = 32
@@ -80,9 +78,7 @@ def validate_timestamp(
         parsed = datetime.fromisoformat(value)
     except (TypeError, ValueError) as exc:
         msg = "invalid_record"
-        raise MonitorError(
-            msg, f"{field_name} must be an ISO-8601 timestamp"
-        ) from exc
+        raise MonitorError(msg, f"{field_name} must be an ISO-8601 timestamp") from exc
     if parsed.tzinfo is None:
         msg = "invalid_record"
         raise MonitorError(msg, f"{field_name} must include a timezone")
@@ -116,9 +112,7 @@ def validate_http_url(value: str, field_name: str = "url") -> str:
     """
     if _has_control_chars(value):
         msg = "invalid_record"
-        raise MonitorError(
-            msg, f"{field_name} contains control characters"
-        )
+        raise MonitorError(msg, f"{field_name} contains control characters")
     try:
         parsed = urlsplit(value)
         port = parsed.port
@@ -145,16 +139,11 @@ def validate_http_url(value: str, field_name: str = "url") -> str:
         )
     host = (parsed.hostname or "").lower()
     decoded_path = unquote(parsed.path)
-    if (
-        (host == "hooks.slack.com"
-        and decoded_path.startswith("/services/"))
-        or (host in {"discord.com", "discordapp.com"}
-        and "/api/webhooks/" in decoded_path)
+    if (host == "hooks.slack.com" and decoded_path.startswith("/services/")) or (
+        host in {"discord.com", "discordapp.com"} and "/api/webhooks/" in decoded_path
     ):
         msg = "invalid_record"
-        raise MonitorError(
-            msg, f"{field_name} must not be a webhook credential URL"
-        )
+        raise MonitorError(msg, f"{field_name} must not be a webhook credential URL")
     return value
 
 
@@ -233,9 +222,7 @@ def _parse_selectors(value: object) -> tuple[str, ...]:
         len(item) > _MAX_EXCLUDE_SELECTOR_LENGTH for item in selectors
     ):
         msg = "invalid_record"
-        raise MonitorError(
-            msg, "exclude_selectors exceeds the count or length limit"
-        )
+        raise MonitorError(msg, "exclude_selectors exceeds the count or length limit")
     return selectors
 
 
@@ -348,9 +335,7 @@ class State:
         normalized_hash = str(value.get("normalized_hash", "") or "").strip().lower()
         if normalized_hash and not HASH_RE.fullmatch(normalized_hash):
             msg = "invalid_record"
-            raise MonitorError(
-                msg, f"state {target_id}: normalized_hash is invalid"
-            )
+            raise MonitorError(msg, f"state {target_id}: normalized_hash is invalid")
         try:
             failures = int(value.get("consecutive_failures", 0) or 0)
         except (TypeError, ValueError) as exc:
@@ -444,9 +429,7 @@ class RunRecord:
             or len(self.error_code) > _MAX_ERROR_CODE_LENGTH
         ):
             msg = "invalid_record"
-            raise MonitorError(
-                msg, "run summary or error_code is too long"
-            )
+            raise MonitorError(msg, "run summary or error_code is too long")
         validate_timestamp(self.started_at, "started_at")
         validate_timestamp(self.finished_at, "finished_at")
 

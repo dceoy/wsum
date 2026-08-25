@@ -106,9 +106,7 @@ class SnapshotStore:
         """
         if not _MIN_MAX_SNAPSHOT_BYTES <= max_snapshot_bytes <= _MAX_MAX_SNAPSHOT_BYTES:
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "snapshot size limit is invalid"
-            )
+            raise MonitorError(msg, "snapshot size limit is invalid")
         self._connector = connector
         self._max_snapshot_bytes = max_snapshot_bytes
 
@@ -173,9 +171,7 @@ class SnapshotStore:
         normalized_bytes = content.text.encode("utf-8")
         if len(normalized_bytes) > self._max_snapshot_bytes:
             msg = "snapshot_too_large"
-            raise MonitorError(
-                msg, "normalized snapshot exceeds the size limit"
-            )
+            raise MonitorError(msg, "normalized snapshot exceeds the size limit")
         normalized_ref = self._ensure_file(
             paths.normalized, normalized_bytes, "text/plain; charset=utf-8"
         )
@@ -236,9 +232,7 @@ class SnapshotStore:
             return content.decode("utf-8")
         except UnicodeDecodeError as exc:
             msg = "snapshot_invalid"
-            raise MonitorError(
-                msg, "stored normalized snapshot is not UTF-8"
-            ) from exc
+            raise MonitorError(msg, "stored normalized snapshot is not UTF-8") from exc
 
     def plan_cleanup(
         self,
@@ -260,9 +254,7 @@ class SnapshotStore:
         validate_target_id(target_id)
         if retain_snapshots < 1:
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "retain_snapshots must be at least one"
-            )
+            raise MonitorError(msg, "retain_snapshots must be at least one")
         try:
             files = list(self._connector.list_files(f"snapshots/{target_id}/"))
         except Exception as exc:
@@ -276,10 +268,10 @@ class SnapshotStore:
         for file in files:
             path = str(file.get("path", ""))
             parts = path.split("/")
-            if (
-                len(parts) != _SNAPSHOT_PATH_PART_COUNT
-                or parts[:2] != ["snapshots", target_id]
-            ):
+            if len(parts) != _SNAPSHOT_PATH_PART_COUNT or parts[:2] != [
+                "snapshots",
+                target_id,
+            ]:
                 continue
             groups.setdefault(parts[2], []).append(file)
         ordered = sorted(

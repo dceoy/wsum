@@ -41,34 +41,26 @@ class RetryConfig:
         """
         if not _MIN_MAX_ATTEMPTS <= self.max_attempts <= _MAX_MAX_ATTEMPTS:
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "max_attempts must be between 1 and 5"
-            )
+            raise MonitorError(msg, "max_attempts must be between 1 and 5")
         if not (
             _MIN_INITIAL_DELAY_SECONDS
             <= self.initial_delay_seconds
             <= _MAX_INITIAL_DELAY_SECONDS
         ):
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "initial retry delay is invalid"
-            )
+            raise MonitorError(msg, "initial retry delay is invalid")
         if not (
             _MIN_BACKOFF_MULTIPLIER
             <= self.backoff_multiplier
             <= _MAX_BACKOFF_MULTIPLIER
         ):
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "retry backoff multiplier is invalid"
-            )
+            raise MonitorError(msg, "retry backoff multiplier is invalid")
         if not (
             _MIN_MAX_DELAY_SECONDS <= self.max_delay_seconds <= _MAX_MAX_DELAY_SECONDS
         ):
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "maximum retry delay is invalid"
-            )
+            raise MonitorError(msg, "maximum retry delay is invalid")
 
 
 @dataclass(frozen=True, slots=True)

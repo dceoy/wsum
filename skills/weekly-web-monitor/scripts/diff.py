@@ -102,9 +102,7 @@ class DiffConfig:
             raise MonitorError(msg, "diff thresholds are invalid")
         if not _MIN_MAX_DIFF_CHARS <= self.max_diff_chars <= _MAX_MAX_DIFF_CHARS:
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "max_diff_chars must be 1000-100000"
-            )
+            raise MonitorError(msg, "max_diff_chars must be 1000-100000")
         if not _MIN_MAX_SECTIONS <= self.max_sections <= _MAX_MAX_SECTIONS:
             msg = "invalid_configuration"
             raise MonitorError(msg, "max_sections must be 1-100")
@@ -113,9 +111,7 @@ class DiffConfig:
             raise MonitorError(msg, "context_lines must be 0-5")
         if not _MIN_MAX_DIFF_LINES <= self.max_diff_lines <= _MAX_MAX_DIFF_LINES:
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "max_diff_lines must be 1000-200000"
-            )
+            raise MonitorError(msg, "max_diff_lines must be 1000-200000")
         if not (
             _MIN_MAX_DIFF_COMPLEXITY
             <= self.max_diff_complexity

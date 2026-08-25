@@ -429,12 +429,10 @@ class NetworkPolicyTests(unittest.TestCase):
 
     def test_detects_dns_rebinding(self) -> None:
         """Test that detects dns rebinding."""
-        answers = iter(
-            [
-                [(2, 1, 6, "", ("93.184.216.34", 443))],
-                [(2, 1, 6, "", ("127.0.0.1", 443))],
-            ]
-        )
+        answers = iter([
+            [(2, 1, 6, "", ("93.184.216.34", 443))],
+            [(2, 1, 6, "", ("127.0.0.1", 443))],
+        ])
 
         def resolver(*_: object, **__: object) -> list[tuple[Any, ...]]:
             return next(answers)
@@ -727,11 +725,14 @@ class FetchTests(unittest.TestCase):
 
     def test_unexpected_304_and_unsafe_validators_fail(self) -> None:
         """Test that unexpected 304 and unsafe validators fail."""
-        with patch.object(
-            fetch,
-            "_open_connection",
-            return_value=FakeConnection(FakeResponse(304, b"")),
-        ), pytest.raises(MonitorError, match="without a conditional"):
+        with (
+            patch.object(
+                fetch,
+                "_open_connection",
+                return_value=FakeConnection(FakeResponse(304, b"")),
+            ),
+            pytest.raises(MonitorError, match="without a conditional"),
+        ):
             fetch_url("https://example.com", resolver=support.public_resolver)
         with pytest.raises(MonitorError, match="control characters"):
             fetch_url(
@@ -742,11 +743,14 @@ class FetchTests(unittest.TestCase):
 
     def test_304_is_rejected_when_validators_could_not_be_bound(self) -> None:
         """Test that 304 is rejected when validators could not be bound."""
-        with patch.object(
-            fetch,
-            "_open_connection",
-            return_value=FakeConnection(FakeResponse(304, b"")),
-        ), pytest.raises(MonitorError, match="without a conditional"):
+        with (
+            patch.object(
+                fetch,
+                "_open_connection",
+                return_value=FakeConnection(FakeResponse(304, b"")),
+            ),
+            pytest.raises(MonitorError, match="without a conditional"),
+        ):
             fetch_url(
                 "https://example.com",
                 etag="old",
@@ -758,9 +762,12 @@ class FetchTests(unittest.TestCase):
     def test_redirect_target_is_revalidated(self) -> None:
         """Test that redirect target is revalidated."""
         response = FakeResponse(302, b"", {"Location": "http://127.0.0.1/admin"})
-        with patch.object(
-            fetch, "_open_connection", return_value=FakeConnection(response)
-        ), pytest.raises(MonitorError, match="non-public"):
+        with (
+            patch.object(
+                fetch, "_open_connection", return_value=FakeConnection(response)
+            ),
+            pytest.raises(MonitorError, match="non-public"),
+        ):
             fetch_url(
                 "https://example.com",
                 resolver=support.public_resolver,
@@ -1240,6 +1247,7 @@ class FetchTests(unittest.TestCase):
 
     def test_slow_initial_dns_resolution_is_bounded_by_the_total_deadline(self) -> None:
         """Test that slow initial dns resolution is bounded by the total deadline."""
+
         def slow_resolver(*_: object, **__: object) -> list[tuple[Any, ...]]:
             time.sleep(30)
             return [(2, 1, 6, "", ("93.184.216.34", 443))]

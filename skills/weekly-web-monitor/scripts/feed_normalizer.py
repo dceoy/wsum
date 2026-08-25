@@ -135,9 +135,7 @@ def _content_link_destination(
         raise
     if budget.remaining <= 0:
         msg = "feed_too_large"
-        raise MonitorError(
-            msg, "feed entry has too many link destinations"
-        )
+        raise MonitorError(msg, "feed entry has too many link destinations")
     budget.remaining -= 1
     fragment = canonicalize_fragment_identity(urlsplit(resolved).fragment)
     identity = f"{canonical}#{fragment}" if fragment else canonical
@@ -410,14 +408,10 @@ def _validate_feed_input(xml: bytes, max_input_bytes: int) -> None:
         raise MonitorError(msg, "feed exceeds the input size limit")
     if b"\x00" in xml[:_ENCODING_SNIFF_BYTES]:
         msg = "feed_unsupported_encoding"
-        raise MonitorError(
-            msg, "UTF-16/32 feeds are not supported"
-        )
+        raise MonitorError(msg, "UTF-16/32 feeds are not supported")
     if b"<!DOCTYPE" in xml.upper() or b"<!ENTITY" in xml.upper():
         msg = "feed_unsafe_xml"
-        raise MonitorError(
-            msg, "DOCTYPE and entity declarations are forbidden"
-        )
+        raise MonitorError(msg, "DOCTYPE and entity declarations are forbidden")
 
 
 def _feed_and_count_elements(

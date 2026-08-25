@@ -127,32 +127,24 @@ class RoutineConfig:
         """
         if not _MIN_CONCURRENCY <= self.max_concurrency <= _MAX_CONCURRENCY:
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "max_concurrency must be between 1 and 4"
-            )
+            raise MonitorError(msg, "max_concurrency must be between 1 and 4")
         if not (
             _MIN_FAILURE_ALERT_THRESHOLD
             <= self.failure_alert_threshold
             <= _MAX_FAILURE_ALERT_THRESHOLD
         ):
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "failure alert threshold is invalid"
-            )
+            raise MonitorError(msg, "failure alert threshold is invalid")
         if self.delivery_mode not in {"direct", "outbox"}:
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "delivery_mode must be direct or outbox"
-            )
+            raise MonitorError(msg, "delivery_mode must be direct or outbox")
         if not (
             _MIN_NOTIFICATION_CHARS
             <= self.max_notification_chars
             <= _MAX_NOTIFICATION_CHARS
         ):
             msg = "invalid_configuration"
-            raise MonitorError(
-                msg, "notification length limit is invalid"
-            )
+            raise MonitorError(msg, "notification length limit is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,9 +421,7 @@ class WeeklyMonitorRoutine:
                 msg = (
                     f"State commit failed after Run {run.run_id} was already persisted"
                 )
-                raise _PartialCommitError(
-                    msg
-                ) from exc
+                raise _PartialCommitError(msg) from exc
         return run
 
     def _send_slack_message(self, target: Target, message: str) -> str:
@@ -1288,15 +1278,13 @@ class WeeklyMonitorRoutine:
                 + secrets.token_hex(4)
             )
         active_run_id = self._validate_run_id(candidate_run_id, targets)
-        config_digest = configuration_digest(
-            {
-                "max_concurrency": self.config.max_concurrency,
-                "failure_alert_threshold": self.config.failure_alert_threshold,
-                "retry_max_attempts": self.config.retry.max_attempts,
-                "diff_minor_threshold": self.config.diff.minor_threshold,
-                "delivery_mode": self.config.delivery_mode,
-            }
-        )
+        config_digest = configuration_digest({
+            "max_concurrency": self.config.max_concurrency,
+            "failure_alert_threshold": self.config.failure_alert_threshold,
+            "retry_max_attempts": self.config.retry.max_attempts,
+            "diff_minor_threshold": self.config.diff.minor_threshold,
+            "delivery_mode": self.config.delivery_mode,
+        })
         self._audit(
             "configuration_loaded",
             outcome="succeeded",

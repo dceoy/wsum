@@ -128,14 +128,19 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "url": "https://example.com",
         }
         signed_urls = (
-            ("https://bucket.s3.amazonaws.com/key"
-            "?X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"),
+            (
+                "https://bucket.s3.amazonaws.com/key"
+                "?X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"
+            ),
             "https://bucket.s3.amazonaws.com/key?X-Amz-Signature=abc123",
             "https://storage.googleapis.com/bucket/key?X-Goog-Signature=abc123",
             "https://bucket.s3.amazonaws.com/key?AWSAccessKeyId=AKIAEXAMPLE",
         )
         for url in signed_urls:
-            with self.subTest(url=url), pytest.raises(MonitorError, match="credential-like"):
+            with (
+                self.subTest(url=url),
+                pytest.raises(MonitorError, match="credential-like"),
+            ):
                 Target.from_mapping({**base, "url": url})
 
     def test_rejects_credential_bearing_urls_nested_in_query_values(self) -> None:
@@ -152,18 +157,27 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "url": "https://example.com",
         }
         nested_urls = (
-            ("https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
-            "cb%3Faccess_token%3Dsecret"),
-            ("https://example.com/?next=https%3A%2F%2Fbucket.s3.amazonaws.com"
-            "%2Fkey%3FX-Amz-Signature%3Dabc123"),
+            (
+                "https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
+                "cb%3Faccess_token%3Dsecret"
+            ),
+            (
+                "https://example.com/?next=https%3A%2F%2Fbucket.s3.amazonaws.com"
+                "%2Fkey%3FX-Amz-Signature%3Dabc123"
+            ),
             "https://example.com/?redirect=https%3A%2F%2Fuser%3Apass%40evil.com",
             # An OAuth implicit-flow token after "#" in the nested URL, not
             # its query string.
-            ("https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
-            "cb%23access_token%3Dsecret"),
+            (
+                "https://example.com/?redirect=https%3A%2F%2Fidp.example%2F"
+                "cb%23access_token%3Dsecret"
+            ),
         )
         for url in nested_urls:
-            with self.subTest(url=url), pytest.raises(MonitorError, match="credential-like"):
+            with (
+                self.subTest(url=url),
+                pytest.raises(MonitorError, match="credential-like"),
+            ):
                 Target.from_mapping({**base, "url": url})
 
     def test_rejects_nested_webhook_urls_in_query_values(self) -> None:
@@ -180,13 +194,20 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "url": "https://example.com",
         }
         nested_webhook_urls = (
-            ("https://example.com/?redirect=https%3A%2F%2Fhooks.slack.com"
-            "%2Fservices%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX"),
-            ("https://example.com/?next=https%3A%2F%2Fdiscord.com"
-            "%2Fapi%2Fwebhooks%2F123456789%2Fabcdef"),
+            (
+                "https://example.com/?redirect=https%3A%2F%2Fhooks.slack.com"
+                "%2Fservices%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX"
+            ),
+            (
+                "https://example.com/?next=https%3A%2F%2Fdiscord.com"
+                "%2Fapi%2Fwebhooks%2F123456789%2Fabcdef"
+            ),
         )
         for url in nested_webhook_urls:
-            with self.subTest(url=url), pytest.raises(MonitorError, match="credential-like"):
+            with (
+                self.subTest(url=url),
+                pytest.raises(MonitorError, match="credential-like"),
+            ):
                 Target.from_mapping({**base, "url": url})
 
     def test_rejects_nested_webhook_url_carried_in_a_fragment_value(self) -> None:
@@ -244,14 +265,21 @@ class ModelsAndSheetsTests(unittest.TestCase):
             "url": "https://example.com",
         }
         bypassing_urls = (
-            ("https://example.com/?redirect=%2F%2Fhooks.slack.com%2Fservices"
-            "%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX"),
-            ("https://example.com/?redirect=https%253A%252F%252Fhooks.slack"
-            ".com%252Fservices%252FT00000000%252FB00000000"
-            "%252FXXXXXXXXXXXXXXXXXXXXXXXX"),
+            (
+                "https://example.com/?redirect=%2F%2Fhooks.slack.com%2Fservices"
+                "%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX"
+            ),
+            (
+                "https://example.com/?redirect=https%253A%252F%252Fhooks.slack"
+                ".com%252Fservices%252FT00000000%252FB00000000"
+                "%252FXXXXXXXXXXXXXXXXXXXXXXXX"
+            ),
         )
         for url in bypassing_urls:
-            with self.subTest(url=url), pytest.raises(MonitorError, match="credential-like"):
+            with (
+                self.subTest(url=url),
+                pytest.raises(MonitorError, match="credential-like"),
+            ):
                 Target.from_mapping({**base, "url": url})
 
     def test_malformed_nested_url_in_query_value_does_not_crash(self) -> None:
@@ -300,17 +328,15 @@ class ModelsAndSheetsTests(unittest.TestCase):
         )
         assert notifications[digest][1].status == "sent"
         with pytest.raises(MonitorError, match="validator"):
-            State.from_mapping(
-                {
-                    "target_id": "one",
-                    "etag": "bad\r\nvalue",
-                    "last_checked_at": "",
-                    "last_modified": "",
-                    "normalized_hash": "",
-                    "snapshot_ref": "",
-                    "consecutive_failures": 0,
-                }
-            )
+            State.from_mapping({
+                "target_id": "one",
+                "etag": "bad\r\nvalue",
+                "last_checked_at": "",
+                "last_modified": "",
+                "normalized_hash": "",
+                "snapshot_ref": "",
+                "consecutive_failures": 0,
+            })
 
     def test_write_payload_generation(self) -> None:
         """Test that write payload generation."""
@@ -334,7 +360,10 @@ class ModelsAndSheetsTests(unittest.TestCase):
         assert upsert_notification_payload(notification)["mode"] == "append"
         assert upsert_notification_payload(notification)["range"] == "Notifications!A:F"
         assert upsert_notification_payload(notification, 4)["mode"] == "replace"
-        assert upsert_notification_payload(notification, 4)["range"] == "Notifications!A4:F4"
+        assert (
+            upsert_notification_payload(notification, 4)["range"]
+            == "Notifications!A4:F4"
+        )
 
     def test_record_parser_allows_extra_columns_but_not_extra_values(self) -> None:
         """Test that record parser allows extra columns but not extra values."""
@@ -371,6 +400,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
 
     def test_store_uses_raw_write_semantics_and_idempotent_runs(self) -> None:
         """Test that store uses raw write semantics and idempotent runs."""
+
         class Connector:
             """A fake Sheets connector used to exercise the tested behavior."""
 
@@ -440,11 +470,14 @@ class ModelsAndSheetsTests(unittest.TestCase):
 
     def test_get_run_round_trips_result_and_attempts(self) -> None:
         """Test that get run round trips result and attempts."""
+
         class Connector:
             """A fake Sheets connector used to exercise the tested behavior."""
 
             def __init__(self) -> None:
-                self.values: dict[str, list[list[Any]]] = {"Runs!A:H": [list(RUN_COLUMNS)]}
+                self.values: dict[str, list[list[Any]]] = {
+                    "Runs!A:H": [list(RUN_COLUMNS)]
+                }
 
             def read_values(
                 self, spreadsheet_id: str, range_name: str
@@ -473,7 +506,10 @@ class ModelsAndSheetsTests(unittest.TestCase):
                 value_input_option: str,
             ) -> None:
                 del spreadsheet_id, value_input_option
-                self.values[range_name] = [*self.values[range_name], *(list(row) for row in values)]
+                self.values[range_name] = [
+                    *self.values[range_name],
+                    *(list(row) for row in values),
+                ]
 
             def batch_replace_values(
                 self,
@@ -505,11 +541,14 @@ class ModelsAndSheetsTests(unittest.TestCase):
 
     def test_notification_round_trips_kind_and_last_error(self) -> None:
         """Test that notification round trips kind and last error."""
+
         class Connector:
             """A fake Sheets connector used to exercise the tested behavior."""
 
             def __init__(self) -> None:
-                self.values: dict[str, list[list[Any]]] = {"Notifications!A:F": [list(NOTIFICATION_COLUMNS)]}
+                self.values: dict[str, list[list[Any]]] = {
+                    "Notifications!A:F": [list(NOTIFICATION_COLUMNS)]
+                }
 
             def read_values(
                 self, spreadsheet_id: str, range_name: str
@@ -584,9 +623,7 @@ class ModelsAndSheetsTests(unittest.TestCase):
                         [second.event_id, "two", "pending", "", "change", ""],
                     ]
                 }
-                self.batches: list[
-                    tuple[Sequence[Mapping[str, Any]], str]
-                ] = []
+                self.batches: list[tuple[Sequence[Mapping[str, Any]], str]] = []
 
             def read_values(
                 self, spreadsheet_id: str, range_name: str
@@ -630,26 +667,27 @@ class ModelsAndSheetsTests(unittest.TestCase):
 
         connector = Connector()
         store = SheetsStore(connector, "runtime-only-id")
-        store.upsert_notifications_atomically(
-            [
-                NotificationRecord(
-                    first.event_id,
-                    "one",
-                    "sent",
-                    notified_at="2026-01-01T00:00:00Z",
-                ),
-                NotificationRecord(
-                    second.event_id,
-                    "two",
-                    "sent",
-                    notified_at="2026-01-01T00:00:00Z",
-                ),
-            ]
-        )
+        store.upsert_notifications_atomically([
+            NotificationRecord(
+                first.event_id,
+                "one",
+                "sent",
+                notified_at="2026-01-01T00:00:00Z",
+            ),
+            NotificationRecord(
+                second.event_id,
+                "two",
+                "sent",
+                notified_at="2026-01-01T00:00:00Z",
+            ),
+        ])
         assert len(connector.batches) == 1
         data, option = connector.batches[0]
         assert option == "RAW"
-        assert [item["range"] for item in data] == ["Notifications!A2:F2", "Notifications!A3:F3"]
+        assert [item["range"] for item in data] == [
+            "Notifications!A2:F2",
+            "Notifications!A3:F3",
+        ]
 
 
 if __name__ == "__main__":

@@ -121,21 +121,17 @@ def _text_pdf(content: bytes, *, indirect_length: bool = False) -> bytes:
     """
     writer = PdfWriter()
     page = writer.add_blank_page(width=300, height=200)
-    font = DictionaryObject(
-        {
-            NameObject("/Type"): NameObject("/Font"),
-            NameObject("/Subtype"): NameObject("/Type1"),
-            NameObject("/BaseFont"): NameObject("/Helvetica"),
-            NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
-        }
-    )
-    page[NameObject("/Resources")] = DictionaryObject(
-        {
-            NameObject("/Font"): DictionaryObject(
-                {NameObject("/F1"): writer._add_object(font)}
-            )
-        }
-    )
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+        NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+    })
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({
+            NameObject("/F1"): writer._add_object(font)
+        })
+    })
     stream_data = b"BT /F1 12 Tf " + content + b" ET"
     if indirect_length:
         stream = _IndirectLengthStreamObject()
@@ -160,21 +156,17 @@ def _text_pdf_with_link(content: bytes, *, uri: str) -> bytes:
     """
     writer = PdfWriter()
     page = writer.add_blank_page(width=300, height=200)
-    font = DictionaryObject(
-        {
-            NameObject("/Type"): NameObject("/Font"),
-            NameObject("/Subtype"): NameObject("/Type1"),
-            NameObject("/BaseFont"): NameObject("/Helvetica"),
-            NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
-        }
-    )
-    page[NameObject("/Resources")] = DictionaryObject(
-        {
-            NameObject("/Font"): DictionaryObject(
-                {NameObject("/F1"): writer._add_object(font)}
-            )
-        }
-    )
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+        NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+    })
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({
+            NameObject("/F1"): writer._add_object(font)
+        })
+    })
     stream_data = b"BT /F1 12 Tf " + content + b" ET"
     stream = DecodedStreamObject()
     stream.set_data(stream_data)
@@ -196,24 +188,20 @@ def _image_only_pdf() -> bytes:
     page = writer.add_blank_page(width=300, height=200)
     image = StreamObject()
     image._data = b"bounded encoded image fixture"
-    image.update(
-        {
-            NameObject("/Type"): NameObject("/XObject"),
-            NameObject("/Subtype"): NameObject("/Image"),
-            NameObject("/Width"): NumberObject(1),
-            NameObject("/Height"): NumberObject(1),
-            NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
-            NameObject("/BitsPerComponent"): NumberObject(8),
-            NameObject("/Filter"): NameObject("/DCTDecode"),
-        }
-    )
-    page[NameObject("/Resources")] = DictionaryObject(
-        {
-            NameObject("/XObject"): DictionaryObject(
-                {NameObject("/Im1"): writer._add_object(image)}
-            )
-        }
-    )
+    image.update({
+        NameObject("/Type"): NameObject("/XObject"),
+        NameObject("/Subtype"): NameObject("/Image"),
+        NameObject("/Width"): NumberObject(1),
+        NameObject("/Height"): NumberObject(1),
+        NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
+        NameObject("/BitsPerComponent"): NumberObject(8),
+        NameObject("/Filter"): NameObject("/DCTDecode"),
+    })
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/XObject"): DictionaryObject({
+            NameObject("/Im1"): writer._add_object(image)
+        })
+    })
     content = DecodedStreamObject()
     content.set_data(b"q 1 0 0 1 0 0 cm /Im1 Do Q")
     page[NameObject("/Contents")] = writer._add_object(content)
@@ -295,7 +283,10 @@ class NormalizationTests(unittest.TestCase):
             b"<item><guid>1</guid><title>One</title></item>"
             b"</channel></rss>"
         )
-        assert normalize_content(bom_feed, content_type="application/rss+xml").kind == "feed"
+        assert (
+            normalize_content(bom_feed, content_type="application/rss+xml").kind
+            == "feed"
+        )
         plain = normalize_content(
             "ＡＢＣ".encode(),  # ruff: ignore[ambiguous-unicode-character-string] -- deliberately fullwidth
             content_type="text/plain",
@@ -833,11 +824,15 @@ class NormalizationTests(unittest.TestCase):
         # snapshot/model/Slack secret boundary.
         """Test that credential bearing link scheme relative or double encoded fails closed."""
         destinations = (
-            ("https://example.com/?redirect=%2F%2Fhooks.slack.com%2Fservices"
-            "%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX"),
-            ("https://example.com/?redirect=https%253A%252F%252Fhooks.slack"
-            ".com%252Fservices%252FT00000000%252FB00000000"
-            "%252FXXXXXXXXXXXXXXXXXXXXXXXX"),
+            (
+                "https://example.com/?redirect=%2F%2Fhooks.slack.com%2Fservices"
+                "%2FT00000000%2FB00000000%2FXXXXXXXXXXXXXXXXXXXXXXXX"
+            ),
+            (
+                "https://example.com/?redirect=https%253A%252F%252Fhooks.slack"
+                ".com%252Fservices%252FT00000000%252FB00000000"
+                "%252FXXXXXXXXXXXXXXXXXXXXXXXX"
+            ),
         )
         for destination in destinations:
             with self.subTest(destination=destination):
@@ -1091,7 +1086,9 @@ class NormalizationTests(unittest.TestCase):
         )
         feed_diff = compare_content(first.text, removed.text)
         assert any(section.kind == "removed" for section in feed_diff.sections)
-        assert any(section.anchor.startswith("ENTRY 2") for section in feed_diff.sections)
+        assert any(
+            section.anchor.startswith("ENTRY 2") for section in feed_diff.sections
+        )
 
     def test_long_feed_entry_ids_keep_full_identity_with_bounded_output(self) -> None:
         # A bare ``stable_id[:1_000]`` makes IDs that differ only after that
@@ -1153,6 +1150,7 @@ class NormalizationTests(unittest.TestCase):
 
     def test_rss_content_encoded_survives_alongside_description(self) -> None:
         """Test that rss content encoded survives alongside description."""
+
         def render(encoded: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
@@ -1181,6 +1179,7 @@ class NormalizationTests(unittest.TestCase):
         # regardless of the href -- a stable guid/title/link plus a
         # destination-only href change left the entry hash unchanged.
         """Test that feed content destination only change is not silently missed."""
+
         def render(href: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
@@ -1211,6 +1210,7 @@ class NormalizationTests(unittest.TestCase):
         # like /apply-v1 was silently discarded, so bumping it to /apply-v2
         # left the entry hash unchanged and the destination update invisible.
         """Test that feed content relative link without entry link fails closed."""
+
         def render(href: str) -> bytes:
             return f"""<?xml version="1.0"?>
             <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
@@ -1232,6 +1232,7 @@ class NormalizationTests(unittest.TestCase):
         # relative content-link hrefs should resolve against that inherited
         # feed-level base instead of failing closed.
         """Test that feed content relative link resolves against channel link."""
+
         def render(href: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
@@ -1264,6 +1265,7 @@ class NormalizationTests(unittest.TestCase):
         # like the real fetch -> normalize pipeline, rather than calling
         # normalize_feed directly.
         """Test that feed channel link change is tracked with fetched base url."""
+
         def render(channel_link: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <rss version="2.0">
@@ -1295,6 +1297,7 @@ class NormalizationTests(unittest.TestCase):
         # "apply" against the unchanged entry link both times and miss that
         # the real destination moved from /v1/ to /v2/.
         """Test that feed xml base only change is not silently missed."""
+
         def render(base: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <feed xmlns="http://www.w3.org/2005/Atom" xml:base="{base}">
@@ -1323,6 +1326,7 @@ class NormalizationTests(unittest.TestCase):
         # per-content-element overrides specifically, since a bug in either
         # would otherwise leave a real destination change unrecorded.
         """Test that feed xml base at entry and content scope overrides feed level."""
+
         def render(entry_base: str, content_base: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <feed xmlns="http://www.w3.org/2005/Atom"
@@ -1388,6 +1392,7 @@ class NormalizationTests(unittest.TestCase):
         # retargeted from one step to another) must not be silently absorbed
         # into an identical normalized text.
         """Test that feed content link fragment destination change is tracked."""
+
         def render(href: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
@@ -1452,6 +1457,7 @@ class NormalizationTests(unittest.TestCase):
         # content) used to leave its href stuck unflushed: a destination-only
         # change to it left the entry's normalized text/hash unchanged.
         """Test that feed content unterminated anchor href is not dropped."""
+
         def render(href: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <rss xmlns:content="http://purl.org/rss/1.0/modules/content/">
@@ -1480,6 +1486,7 @@ class NormalizationTests(unittest.TestCase):
         # attributes, so a real <a> element's href needs its own structural
         # walk rather than relying on the escaped-text HTML parser.
         """Test that atom xhtml content destination only change is not missed."""
+
         def render(href: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <feed xmlns="http://www.w3.org/2005/Atom">
@@ -1505,6 +1512,7 @@ class NormalizationTests(unittest.TestCase):
         # xml:base. Changing only the wrapping <div>'s xml:base must
         # change the resolved destination.
         """Test that atom xhtml descendant xml base change is not missed."""
+
         def render(div_base: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <feed xmlns="http://www.w3.org/2005/Atom">
@@ -1529,6 +1537,7 @@ class NormalizationTests(unittest.TestCase):
         # wrapping ancestor, with no xml:base anywhere else in the content
         # subtree. Only the anchor's own base changes here.
         """Test that atom xhtml anchor own xml base change is not missed."""
+
         def render(anchor_base: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <feed xmlns="http://www.w3.org/2005/Atom">
@@ -1606,6 +1615,7 @@ class NormalizationTests(unittest.TestCase):
 
     def test_atom_prefers_alternate_link_over_self(self) -> None:
         """Test that atom prefers alternate link over self."""
+
         def render(destination: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <feed xmlns="http://www.w3.org/2005/Atom">
@@ -1626,6 +1636,7 @@ class NormalizationTests(unittest.TestCase):
 
     def test_atom_external_content_source_is_canonicalized_and_captured(self) -> None:
         """Test that atom external content source is canonicalized and captured."""
+
         def render(source: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <feed xmlns="http://www.w3.org/2005/Atom">
@@ -1647,6 +1658,7 @@ class NormalizationTests(unittest.TestCase):
         # differing only by fragment (e.g. "#v1" -> "#v2") must not collapse
         # into the same stored CONTENT_SRC identity/hash.
         """Test that atom content source fragment change is tracked."""
+
         def render(source: str) -> str:
             xml = f"""<?xml version="1.0"?>
             <feed xmlns="http://www.w3.org/2005/Atom">
@@ -1787,36 +1799,30 @@ class NormalizationTests(unittest.TestCase):
         """Test that generated text pdf with filtered images is extracted."""
         writer = PdfWriter()
         page = writer.add_blank_page(width=300, height=200)
-        font = DictionaryObject(
-            {
-                NameObject("/Type"): NameObject("/Font"),
-                NameObject("/Subtype"): NameObject("/Type1"),
-                NameObject("/BaseFont"): NameObject("/Helvetica"),
-                NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
-            }
-        )
-        resources = DictionaryObject(
-            {
-                NameObject("/Font"): DictionaryObject(
-                    {NameObject("/F1"): writer._add_object(font)}
-                )
-            }
-        )
+        font = DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+            NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+        })
+        resources = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({
+                NameObject("/F1"): writer._add_object(font)
+            })
+        })
         xobjects = DictionaryObject()
         for index, filter_name in enumerate(("/DCTDecode", "/JPXDecode"), start=1):
             image = StreamObject()
             image._data = b"bounded encoded image fixture"
-            image.update(
-                {
-                    NameObject("/Type"): NameObject("/XObject"),
-                    NameObject("/Subtype"): NameObject("/Image"),
-                    NameObject("/Width"): NumberObject(1),
-                    NameObject("/Height"): NumberObject(1),
-                    NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
-                    NameObject("/BitsPerComponent"): NumberObject(8),
-                    NameObject("/Filter"): NameObject(filter_name),
-                }
-            )
+            image.update({
+                NameObject("/Type"): NameObject("/XObject"),
+                NameObject("/Subtype"): NameObject("/Image"),
+                NameObject("/Width"): NumberObject(1),
+                NameObject("/Height"): NumberObject(1),
+                NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
+                NameObject("/BitsPerComponent"): NumberObject(8),
+                NameObject("/Filter"): NameObject(filter_name),
+            })
             xobjects[NameObject(f"/Im{index}")] = writer._add_object(image)
         resources[NameObject("/XObject")] = xobjects
         page[NameObject("/Resources")] = resources
@@ -1963,6 +1969,7 @@ class NormalizationTests(unittest.TestCase):
         # after it -- including a later, otherwise-stable Tj whose own text
         # changes -- would be silently dropped from the normalized hash.
         """Test that pdf endstream inside a string operand does not truncate the stream."""
+
         def stream(edit: bytes) -> bytes:
             return (
                 b"(marker\nendstream inside a string) Tj (Stable) Tj (" + edit + b") Tj"
