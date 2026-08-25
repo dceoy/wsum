@@ -1,23 +1,22 @@
 # Website Update Monitor
 
-A deterministic toolkit with two Agent Skills for website change monitoring. Both
-variants use the same SSRF-safe fetch, normalization, diff, summary-validation,
-retry, replay, and notification pipeline; only persistence differs.
+A deterministic toolkit and Agent Skill for website change monitoring. The monitor
+uses the same SSRF-safe fetch, normalization, diff, summary-validation, retry,
+replay, and notification pipeline with one of two persistence modes selected at
+runtime:
 
-- `weekly-web-monitor-google-drive` reads operational records through Google Sheets
-  connectors and stores normalized snapshots in Google Drive.
-- `weekly-web-monitor-local` stores targets, operational state, run history,
-  notification state, and snapshots in a caller-selected local directory without
-  Google Sheets or Google Drive.
+- `google-drive`: read targets and operational records through Google Sheets and
+  store normalized snapshots in Google Drive.
+- `local`: store targets, operational state, run history, notification state, and
+  snapshots in a caller-selected local runtime directory.
 
-The two registered skills live under `skills/` and share the implementation in
-`skills/_weekly-web-monitor-shared/`. `.claude/skills` exposes the root skill tree,
-and `.agents/skills` links the two registered monitor skills explicitly.
+The registered skill lives in `.claude/skills/web-monitor/`. Start with its
+`SKILL.md` and references.
 
 HTML, plain-text, and feed monitoring use only the standard library. PDF
-normalization requires [`pypdf`](https://pypi.org/project/pypdf/); when running from
-a source checkout, install it before monitoring PDFs or running the complete test
-suite:
+normalization requires [`pypdf`](https://pypi.org/project/pypdf/); when running
+from a source checkout, install it before monitoring PDFs or running the complete
+test suite:
 
 ```bash
 python3 -m pip install 'pypdf>=6,<7'
@@ -29,10 +28,10 @@ Run the local test suite:
 python3 -m unittest discover -s tests -v
 ```
 
-Run the end-to-end connector-free fixture through either registered skill:
+Run the end-to-end connector-free fixture:
 
 ```bash
-python3 .claude/skills/weekly-web-monitor-local/scripts/dry_run.py \
+python3 .claude/skills/web-monitor/scripts/dry_run.py \
   tests/fixtures/dry-run.json
 ```
 
@@ -44,5 +43,7 @@ production snapshots, production diffs, logs, Sheets/Drive exports, credentials,
 cookies, browser profiles, webhook URLs, connector configuration, signed URLs,
 spreadsheet/Drive identifiers, or local runtime/replay artifacts.
 
-The weekly schedule, connector identifiers, destination mappings, credentials, and
-production local runtime root are configured outside this repository.
+Execution cadence is configured outside this repository. The skill may be invoked
+ad hoc or by any non-overlapping external schedule appropriate to the monitored
+targets; connector identifiers, destination mappings, credentials, and production
+local runtime roots also remain deployment configuration.

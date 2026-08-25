@@ -1,8 +1,8 @@
 # Local persistence setup
 
-The local skill replaces Google Sheets and Google Drive persistence with one trusted
-runtime directory. The monitoring algorithms and Slack delivery semantics remain
-unchanged.
+Local persistence mode replaces Google Sheets and Google Drive with one trusted
+runtime directory. The fetch, normalization, diff, summary, and Slack delivery
+semantics are identical to Google Drive mode.
 
 ## Runtime layout
 
@@ -53,26 +53,15 @@ target from static to browser automatically.
 
 ## Wiring
 
-Use the local stores with the shared routine:
+Construct `scripts/local_storage.py::LocalOperationalStore` and
+`LocalSnapshotStore` with the same runtime root, then inject them into the
+orchestration in `scripts/routine.py`. The caller supplies the summary client,
+delivery adapter, `run_id`, and runtime root. Do not store credentials or destination
+configuration in the repository.
 
-```python
-from local_storage import LocalOperationalStore, LocalSnapshotStore
-from routine import WeeklyMonitorRoutine
-
-store = LocalOperationalStore(runtime_root)
-snapshots = LocalSnapshotStore(runtime_root)
-routine = WeeklyMonitorRoutine(
-    store=store,
-    snapshots=snapshots,
-    summary_client=summary_client,
-    slack=slack_connector,
-)
-result = routine.run(run_id=run_id)
-```
-
-`summary_client`, `slack_connector`, `run_id`, and `runtime_root` are supplied by the
-caller. Do not store their credentials or destination configuration in the
-repository.
+The local backend changes persistence only; it does not impose a scheduling cadence.
+The same runtime root may be used for ad hoc or externally scheduled invocations,
+but overlapping invocations against the same target set are not supported.
 
 ## Persistence guarantees
 

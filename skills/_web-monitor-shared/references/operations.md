@@ -1,19 +1,22 @@
 # Operations and auditability
 
-## Practical weekly SLOs
+## Suggested SLOs
 
-For the initial approximately 10-target pilot:
+For an initial approximately 10-target pilot:
 
-- Finish a weekly static run within 15 minutes.
-- Achieve at least 95% successful target checks over four weeks.
+- Finish one static run within 15 minutes.
+- Achieve at least 95% successful target checks over the deployment's chosen
+  reporting window.
 - Produce zero duplicate successful change notifications under normal
   single-instance operation; see the concurrent-invocation gap in
-  [security.md](security.md) for the bound that applies if invocations
-  overlap.
+  [security.md](security.md) for the bound that applies if invocations overlap.
 - Alert after three consecutive target failures.
 - Retain at least 12 normalized snapshots per target.
 - Investigate any failed target within one business day and any security-policy
   failure before re-enabling it.
+
+Tune reporting windows and retention to the selected execution cadence rather than
+assuming a weekly schedule.
 
 ## Health checks
 
@@ -27,9 +30,10 @@ run ID, temporary workspaces no longer exist, no `pending`/`sending` delivery is
 automatically retried, and state references a loadable snapshot after successful
 non-304 processing.
 
-Weekly checks should also verify connector authorization, available Drive capacity,
-stale selectors, retention backlog, poison Outbox rows, and browser-mode target
-approval.
+Periodically verify connector or filesystem authorization, available snapshot
+capacity, stale selectors, retention backlog, poison Outbox rows, and browser-mode
+target approval. Choose the frequency independently from the monitor's execution
+cadence.
 
 ## Failure triage
 
@@ -49,14 +53,14 @@ approval.
 
 ## Recovery
 
-After a successful check, reset `consecutive_failures` to zero. If the current Drive
+After a successful check, reset `consecutive_failures` to zero. If the current
 snapshot is missing, restore a known valid snapshot reference or create a reviewed
 baseline; never silently replace it with empty or unrelated extraction.
 
-For an interrupted material notification, query `Notifications`/Outbox by event ID.
-If sent, update state without resending. If definitively failed, mark `failed`/`retry`
-before another attempt. If ambiguous, retain `pending`/`sending` and require operator
-resolution.
+For an interrupted material notification, query the selected operational store by
+event ID. If sent, update state without resending. If definitively failed, mark
+`failed`/`retry` before another attempt. If ambiguous, retain `pending`/`sending` and
+require operator resolution.
 
 ## Replay
 
@@ -75,12 +79,14 @@ alert outcome, and routine terminal outcome. Store identifiers, configuration
 digest, counts, outcomes, and stable error codes only. Audit validation rejects keys
 that imply body, content, HTML, payload, credential, secret, token, webhook, or
 free-text data. A temporary audit-sink failure does not change fetch, state, or
-delivery decisions; surface and repair it through deployment-level connector
+delivery decisions; surface and repair it through deployment-level persistence
 health monitoring.
 
 ## Retention
 
-Keep Sheets operational records according to the deployment's audit policy. Keep 12
-Drive snapshots per target by default. Generate and review the cleanup plan; never
-delete the current baseline. Disable Drive delete permission when cleanup is not
-scheduled. Poison/ambiguous delivery rows remain until an operator resolves them.
+Keep operational records according to the deployment's audit policy. Keep 12
+snapshots per target by default. Generate and review the cleanup plan; never delete
+the current baseline. In Google Drive mode, disable Drive delete permission when
+cleanup is not scheduled. In local mode, apply the same baseline-preservation rule
+to filesystem cleanup. Poison/ambiguous delivery records remain until an operator
+resolves them.
