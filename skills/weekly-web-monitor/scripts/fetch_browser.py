@@ -41,11 +41,11 @@ from __future__ import annotations
 import importlib
 import socket
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, cast
 
 from errors import MonitorError
 from fetch import FetchResult
+from models import utc_now
 from network_policy import BrowserNetworkGuard, Resolver
 
 
@@ -83,10 +83,6 @@ class BrowserFetchConfig:
             raise MonitorError(
                 "invalid_configuration", "browser host or resource policy is too large"
             )
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def fetch_rendered(
@@ -280,7 +276,7 @@ def fetch_rendered(
                 content_length=len(rendered),
                 etag=response.headers.get("etag", "")[:1_000],
                 last_modified=response.headers.get("last-modified", "")[:1_000],
-                fetched_at=_utc_now(),
+                fetched_at=utc_now(),
                 redirect_count=0,
                 body=rendered,
             )
