@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from errors import MonitorError
 from fetch import FetchResult
-from notifications import ConfirmedDeliveryFailure
+from notifications import ConfirmedDeliveryFailureError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -179,7 +179,7 @@ class MemorySlackConnector:
     def send_message(self, notification_group: str, message: str) -> str:
         if notification_group in self.fail_groups:
             msg = "notification_send_failed"
-            raise ConfirmedDeliveryFailure(
+            raise ConfirmedDeliveryFailureError(
                 msg,
                 "fixture Slack delivery failed",
                 retryable=True,

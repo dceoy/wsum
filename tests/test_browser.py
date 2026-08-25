@@ -2,28 +2,30 @@ from __future__ import annotations
 
 import sys
 import unittest
+from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from tests import support
 from errors import MonitorError
 from fetch_browser import BrowserFetchConfig, fetch_rendered
 from models import State
+
+from tests import support
 
 
 class FakePlaywrightError(Exception):
     pass
 
 
-class FakePlaywrightTimeout(FakePlaywrightError):
+class FakePlaywrightTimeoutError(FakePlaywrightError):
     pass
 
 
+@dataclass
 class FakeRequest:
-    def __init__(self, url: str, resource_type: str = "document") -> None:
-        self.url = url
-        self.resource_type = resource_type
+    url: str
+    resource_type: str = "document"
 
 
 class FakeRoute:
@@ -100,7 +102,7 @@ class FakePage:
     def goto(self, url: str, **_: object) -> FakeResponse:
         self.url = url
         if self.timeout:
-            raise FakePlaywrightTimeout
+            raise FakePlaywrightTimeoutError
         assert self.context is not None
         assert self.context.route_handler is not None
         for request in self.requests:
@@ -172,7 +174,7 @@ def playwright_modules(browser: FakeBrowser) -> dict[str, ModuleType]:
     package = ModuleType("playwright")
     sync_api = ModuleType("playwright.sync_api")
     sync_api.Error = FakePlaywrightError
-    sync_api.TimeoutError = FakePlaywrightTimeout
+    sync_api.TimeoutError = FakePlaywrightTimeoutError
     sync_api.sync_playwright = lambda: FakePlaywrightManager(browser)
     package.sync_api = sync_api
     return {"playwright": package, "playwright.sync_api": sync_api}

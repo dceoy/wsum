@@ -20,8 +20,8 @@ from metrics import RunMetrics, calculate_metrics
 from models import Attempt, NotificationRecord, RunRecord, State, Target, utc_now
 from normalize import NormalizedContent, normalize_content
 from notifications import (
-    AmbiguousDeliveryFailure,
-    ConfirmedDeliveryFailure,
+    AmbiguousDeliveryFailureError,
+    ConfirmedDeliveryFailureError,
     DeliveryOutcome,
     NotificationEvent,
     NotificationStore,
@@ -403,11 +403,11 @@ class WeeklyMonitorRoutine:
                 reference = self.slack.send_message(target.notification_group, message)
             if not reference:
                 msg = "notification_send_failed"
-                raise AmbiguousDeliveryFailure(
+                raise AmbiguousDeliveryFailureError(
                     msg,
                     "failure alert returned no delivery reference",
                 )
-        except ConfirmedDeliveryFailure:
+        except ConfirmedDeliveryFailureError:
             with self._store_lock:
                 self.store.upsert_notification(
                     NotificationRecord(
