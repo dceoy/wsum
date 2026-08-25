@@ -6,15 +6,74 @@ import json
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from diff import DiffConfig, compare_content
+from diff import DiffConfig, DiffResult, compare_content
 from errors import MonitorError
 from normalize import NORMALIZATION_VERSION, hash_normalized
 from validate_summary import validate_summary
 
+_EXPECTED_ARGC = 2
+
+
+def _validate_snapshot(name: str, snapshot: Mapping[str, Any]) -> None:
+    """Validate one manifest snapshot's normalization version and hash.
+
+    Raises:
+        MonitorError: If the snapshot's version, shape, or hash is invalid.
+    """
+    if snapshot.get("normalization_version") != NORMALIZATION_VERSION:
+        msg = "replay_version_mismatch"
+        raise MonitorError(
+            msg,
+            f"{name} normalization version is unsupported",
+        )
+    kind = snapshot.get("kind")
+    text = snapshot.get("text")
+    expected_hash = snapshot.get("normalized_hash")
+    if not isinstance(kind, str) or not isinstance(text, str):
+        msg = "replay_invalid"
+        raise MonitorError(msg, f"{name} snapshot is malformed")
+    actual_hash = hash_normalized(kind, text)
+    if actual_hash != expected_hash:
+        msg = "replay_hash_mismatch"
+        raise MonitorError(
+            msg, f"{name} normalized hash does not match"
+        )
+
+
+def _check_expected(expected: object, diff: DiffResult) -> None:
+    """Check a replayed diff against an optional ``expected`` manifest field.
+
+    Raises:
+        MonitorError: If ``expected`` is malformed or a replayed field
+            diverges from its expected value.
+    """
+    if not expected:
+        return
+    if not isinstance(expected, Mapping):
+        msg = "replay_invalid"
+        raise MonitorError(msg, "expected must be an object")
+    for key in ("result", "change_score", "significance"):
+        if key in expected and diff.as_dict()[key] != expected[key]:
+            msg = "replay_result_mismatch"
+            raise MonitorError(
+                msg, f"replayed {key} does not match"
+            )
+
 
 def replay_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Recompute a prior run's diff and summary validity without network access.
+
+    Returns:
+        A summary of the replay containing ``hashes_valid``, the recomputed
+        ``diff``, and whether the stored ``summary`` (if any) is valid.
+
+    Raises:
+        MonitorError: If ``value`` is malformed, its snapshots' normalization
+            version or hash does not match, or the replayed result diverges
+            from an ``expected`` outcome embedded in ``value``.
+    """
     if set(value) - {
         "previous",
         "current",
@@ -32,29 +91,15 @@ def replay_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
         raise MonitorError(
             msg, "previous and current snapshots are required"
         )
+    previous = cast("Mapping[str, Any]", previous)
+    current = cast("Mapping[str, Any]", current)
     for name, snapshot in (("previous", previous), ("current", current)):
-        if snapshot.get("normalization_version") != NORMALIZATION_VERSION:
-            msg = "replay_version_mismatch"
-            raise MonitorError(
-                msg,
-                f"{name} normalization version is unsupported",
-            )
-        kind = snapshot.get("kind")
-        text = snapshot.get("text")
-        expected_hash = snapshot.get("normalized_hash")
-        if not isinstance(kind, str) or not isinstance(text, str):
-            msg = "replay_invalid"
-            raise MonitorError(msg, f"{name} snapshot is malformed")
-        actual_hash = hash_normalized(kind, text)
-        if actual_hash != expected_hash:
-            msg = "replay_hash_mismatch"
-            raise MonitorError(
-                msg, f"{name} normalized hash does not match"
-            )
+        _validate_snapshot(name, snapshot)
     config_value = value.get("diff_config", {})
     if not isinstance(config_value, Mapping):
         msg = "replay_invalid"
         raise MonitorError(msg, "diff_config must be an object")
+    config_value = cast("Mapping[str, Any]", config_value)
     diff = compare_content(
         str(previous["text"]),
         str(current["text"]),
@@ -62,23 +107,14 @@ def replay_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
         current_hash=str(current["normalized_hash"]),
         config=DiffConfig.from_mapping(config_value),
     )
-    expected = value.get("expected", {})
-    if expected:
-        if not isinstance(expected, Mapping):
-            msg = "replay_invalid"
-            raise MonitorError(msg, "expected must be an object")
-        for key in ("result", "change_score", "significance"):
-            if key in expected and diff.as_dict()[key] != expected[key]:
-                msg = "replay_result_mismatch"
-                raise MonitorError(
-                    msg, f"replayed {key} does not match"
-                )
+    _check_expected(value.get("expected", {}), diff)
     summary_result: dict[str, Any] | None = None
     if "summary" in value:
         summary = value["summary"]
         if not isinstance(summary, Mapping):
             msg = "replay_invalid"
             raise MonitorError(msg, "summary must be an object")
+        summary = cast("Mapping[str, Any]", summary)
         source_url = value.get("source_url")
         if not isinstance(source_url, str):
             msg = "replay_invalid"
@@ -98,7 +134,13 @@ def replay_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
+    """Run the CLI entry point: replay the manifest named in ``argv[1]``.
+
+    Returns:
+        0 on success, 1 if the manifest is invalid or the replay fails, 2
+        for incorrect CLI usage.
+    """
+    if len(argv) != _EXPECTED_ARGC:
         return 2
     try:
         value = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
