@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from audit import AuditSink, configuration_digest, make_audit_record
 from diff import DiffConfig, DiffResult, compare_content
@@ -619,7 +619,11 @@ class WeeklyMonitorRoutine:
             last_checked_at=utc_now(),
             consecutive_failures=previous_state.consecutive_failures + 1,
         )
-        error_attempts = error.details.get("attempts", []) if error.details else []
+        error_attempts = (
+            cast("list[dict[str, Any]]", error.details.get("attempts", []))
+            if error.details
+            else []
+        )
         combined = list(attempts)
         if error_attempts:
             parsed_attempts = tuple(
@@ -968,7 +972,7 @@ class WeeklyMonitorRoutine:
     def _process_target(
         self, run_id: str, target: Target
     ) -> RunRecord | _PendingMaterial:
-        """Run the full per-target pipeline, routing any failure to :func:`_finish_failure`.
+        """Run the per-target pipeline, routing failures to :func:`_finish_failure`.
 
         Returns:
             The finished run record, or pending change material awaiting
@@ -990,7 +994,9 @@ class WeeklyMonitorRoutine:
                 return claimed
             ctx.previous_state = self._state(target)
             ctx.state_loaded = True
-            return self._run_target_pipeline_in_workspace(run_id, target, started_at, ctx)
+            return self._run_target_pipeline_in_workspace(
+                run_id, target, started_at, ctx
+            )
         except _PartialCommitError:
             # The Run for this run_id already landed durably; do not let
             # the generic Exception handler below route this through
@@ -1110,7 +1116,168 @@ class WeeklyMonitorRoutine:
             pending.attempts,
         )
 
+    def _run_targets(
+        self, active_run_id: str, targets: Sequence[Target], started_at: str
+    ) -> tuple[list[RunRecord], list[_PendingMaterial]]:
+        """Run every target concurrently, isolating executor-level failures.
+
+        Returns:
+            The completed run records, and any material change awaiting
+            delivery.
+        """
+        completed: list[RunRecord] = []
+        pending: list[_PendingMaterial] = []
+        with ThreadPoolExecutor(max_workers=self.config.max_concurrency) as executor:
+            futures = {
+                executor.submit(self._process_target, active_run_id, target): target
+                for target in targets
+            }
+            for future in as_completed(futures):
+                target = futures[future]
+                try:
+                    result = future.result()
+                except Exception:  # ruff: ignore[blind-except] -- a connector can
+                    # prevent durable state/run writes from inside
+                    # _process_target. Preserve isolation by returning a
+                    # content-free terminal result for this target while
+                    # other targets continue.
+                    result = self._run_record(
+                        active_run_id,
+                        target,
+                        "failed",
+                        0,
+                        "",
+                        "connector_unavailable",
+                        started_at,
+                        (),
+                    )
+                if isinstance(result, _PendingMaterial):
+                    pending.append(result)
+                else:
+                    completed.append(result)
+        return completed, pending
+
+    def _deliver_via_outbox(
+        self, pending: Sequence[_PendingMaterial]
+    ) -> dict[str, DeliveryOutcome]:
+        """Queue every pending material change onto the outbox delivery backend.
+
+        Returns:
+            Each event's queue-or-failure delivery outcome, by event ID.
+        """
+        outcomes: dict[str, DeliveryOutcome] = {}
+        for item in pending:
+            try:
+                outcome = self._queue_material(item)
+            except Exception:  # ruff: ignore[blind-except] -- the outbox store is a
+                # caller-supplied boundary whose failure modes cannot be
+                # enumerated; any failure here must not abort other targets.
+                outcome = DeliveryOutcome(
+                    item.event.event_id,
+                    "failed",
+                    error_code="connector_unavailable",
+                )
+            outcomes[item.event.event_id] = outcome
+        return outcomes
+
+    def _require_slack(self) -> SlackConnector:
+        """Return the configured Slack connector.
+
+        Returns:
+            The routine's Slack connector.
+
+        Raises:
+            MonitorError: If no Slack connector is configured.
+        """
+        if self.slack is None:
+            msg = "connector_configuration_missing"
+            raise MonitorError(msg, "Slack connector is unavailable")
+        return self.slack
+
+    def _deliver_via_slack(
+        self, pending: Sequence[_PendingMaterial]
+    ) -> dict[str, DeliveryOutcome]:
+        """Group-deliver every pending material change over Slack.
+
+        Returns:
+            Each event's delivery outcome, by event ID -- a content-free
+            "pending" placeholder for every event if delivery itself failed.
+        """
+        try:
+            slack = self._require_slack()
+            return deliver_grouped(
+                [item.event for item in pending], store=self.store, connector=slack
+            )
+        except Exception:  # ruff: ignore[blind-except] -- the Slack connector is a
+            # caller-supplied boundary whose failure modes cannot be
+            # enumerated; any failure here must not abort other targets.
+            return {
+                item.event.event_id: DeliveryOutcome(
+                    item.event.event_id,
+                    "pending",
+                    error_code="connector_unavailable",
+                )
+                for item in pending
+            }
+
+    def _finish_pending(
+        self,
+        active_run_id: str,
+        pending: Sequence[_PendingMaterial],
+        outcomes: Mapping[str, DeliveryOutcome],
+    ) -> list[RunRecord]:
+        """Persist the terminal outcome for every pending material change.
+
+        Returns:
+            The finished run record for each pending item, in the same order.
+        """
+        finished: list[RunRecord] = []
+        for item in pending:
+            try:
+                finished.append(
+                    self._finish_material(
+                        active_run_id, item, outcomes[item.event.event_id]
+                    )
+                )
+            except Exception:  # ruff: ignore[blind-except] -- persisting the outcome
+                # can itself hit the same caller-supplied store/connector
+                # boundary; any failure here must not abort other targets.
+                finished.append(
+                    self._run_record(
+                        active_run_id,
+                        item.target,
+                        "failed",
+                        0,
+                        "",
+                        "connector_unavailable",
+                        item.started_at,
+                        item.attempts,
+                    )
+                )
+        return finished
+
+    def _deliver_pending(
+        self, active_run_id: str, pending: list[_PendingMaterial]
+    ) -> list[RunRecord]:
+        """Deliver and persist every pending material change, sorted by target.
+
+        Returns:
+            The finished run record for each pending item.
+        """
+        pending.sort(key=lambda item: item.target.target_id)
+        if self.config.delivery_mode == "outbox":
+            outcomes = self._deliver_via_outbox(pending)
+        else:
+            outcomes = self._deliver_via_slack(pending)
+        return self._finish_pending(active_run_id, pending, outcomes)
+
     def run(self, *, run_id: str | None = None) -> RoutineResult:
+        """Run one full monitoring cycle across every enabled target.
+
+        Returns:
+            The completed routine result, with a run record per target and
+            summary metrics.
+        """
         started_at = utc_now()
         targets = self.store.load_enabled_targets()
         candidate_run_id: object = run_id
@@ -1139,91 +1306,9 @@ class WeeklyMonitorRoutine:
                 "target_count": len(targets),
             },
         )
-        completed: list[RunRecord] = []
-        pending: list[_PendingMaterial] = []
-        with ThreadPoolExecutor(max_workers=self.config.max_concurrency) as executor:
-            futures = {
-                executor.submit(self._process_target, active_run_id, target): target
-                for target in targets
-            }
-            for future in as_completed(futures):
-                target = futures[future]
-                try:
-                    result = future.result()
-                except Exception:
-                    # A connector can prevent durable state/run writes. Preserve
-                    # isolation by returning a content-free terminal result for
-                    # this target while other targets continue.
-                    result = self._run_record(
-                        active_run_id,
-                        target,
-                        "failed",
-                        0,
-                        "",
-                        "connector_unavailable",
-                        started_at,
-                        (),
-                    )
-                if isinstance(result, _PendingMaterial):
-                    pending.append(result)
-                else:
-                    completed.append(result)
+        completed, pending = self._run_targets(active_run_id, targets, started_at)
         if pending:
-            pending.sort(key=lambda item: item.target.target_id)
-            if self.config.delivery_mode == "outbox":
-                outcomes = {}
-                for item in pending:
-                    try:
-                        outcome = self._queue_material(item)
-                    except Exception:
-                        outcome = DeliveryOutcome(
-                            item.event.event_id,
-                            "failed",
-                            error_code="connector_unavailable",
-                        )
-                    outcomes[item.event.event_id] = outcome
-            else:
-                try:
-                    if self.slack is None:
-                        msg = "connector_configuration_missing"
-                        raise MonitorError(
-                            msg,
-                            "Slack connector is unavailable",
-                        )
-                    outcomes = deliver_grouped(
-                        [item.event for item in pending],
-                        store=self.store,
-                        connector=self.slack,
-                    )
-                except Exception:
-                    outcomes = {
-                        item.event.event_id: DeliveryOutcome(
-                            item.event.event_id,
-                            "pending",
-                            error_code="connector_unavailable",
-                        )
-                        for item in pending
-                    }
-            for item in pending:
-                try:
-                    completed.append(
-                        self._finish_material(
-                            active_run_id, item, outcomes[item.event.event_id]
-                        )
-                    )
-                except Exception:
-                    completed.append(
-                        self._run_record(
-                            active_run_id,
-                            item.target,
-                            "failed",
-                            0,
-                            "",
-                            "connector_unavailable",
-                            item.started_at,
-                            item.attempts,
-                        )
-                    )
+            completed.extend(self._deliver_pending(active_run_id, pending))
         completed.sort(key=lambda run: run.target_id)
         finished_at = utc_now()
         metrics = calculate_metrics(completed)
