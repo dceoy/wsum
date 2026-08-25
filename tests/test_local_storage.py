@@ -8,7 +8,6 @@ import unittest
 from pathlib import Path
 
 import pytest
-
 from errors import MonitorError
 from local_storage import LocalOperationalStore, LocalSnapshotStore
 from models import Attempt, NotificationRecord, RunRecord, State
@@ -17,9 +16,13 @@ from normalize import NormalizedContent
 _TIMESTAMP = "2026-08-26T00:00:00Z"
 
 
-def _write_targets(root: Path) -> None:
-    """Write one enabled and one disabled local target fixture."""
-    targets = [
+def _target_records() -> list[dict[str, object]]:
+    """Build one enabled and one disabled local target fixture.
+
+    Returns:
+        The two target mappings in deterministic order.
+    """
+    return [
         {
             "target_id": "enabled",
             "enabled": True,
@@ -43,11 +46,21 @@ def _write_targets(root: Path) -> None:
             "notification_group": "default",
         },
     ]
-    (root / "targets.json").write_text(json.dumps(targets), encoding="utf-8")
+
+
+def _write_targets(root: Path) -> None:
+    """Write the local target fixtures to ``targets.json``."""
+    (root / "targets.json").write_text(
+        json.dumps(_target_records()), encoding="utf-8"
+    )
 
 
 def _run_record(*, summary: str = "") -> RunRecord:
-    """Build one validated local run fixture."""
+    """Build one validated local run fixture.
+
+    Returns:
+        The run record.
+    """
     return RunRecord(
         run_id="run-1",
         target_id="enabled",
@@ -62,7 +75,11 @@ def _run_record(*, summary: str = "") -> RunRecord:
 
 
 def _notification(event_id: str) -> NotificationRecord:
-    """Build one pending notification fixture."""
+    """Build one pending notification fixture.
+
+    Returns:
+        The notification record.
+    """
     return NotificationRecord(
         event_id=event_id,
         target_id="enabled",
@@ -73,7 +90,11 @@ def _notification(event_id: str) -> NotificationRecord:
 def _normalized(
     text: str = "hello\n", digest: str = "a" * 64
 ) -> NormalizedContent:
-    """Build one normalized text fixture with a caller-controlled hash."""
+    """Build one normalized text fixture with a caller-controlled hash.
+
+    Returns:
+        The normalized content record.
+    """
     return NormalizedContent(
         kind="text",
         text=text,
@@ -144,9 +165,8 @@ class LocalOperationalStoreTest(unittest.TestCase):
             store.load_enabled_targets()
         assert malformed.value.code == "local_storage_invalid"
 
-        _write_targets(self.root)
-        targets = json.loads((self.root / "targets.json").read_text(encoding="utf-8"))
-        targets.append(targets[0])
+        targets = _target_records()
+        targets.append(targets[0].copy())
         (self.root / "targets.json").write_text(
             json.dumps(targets), encoding="utf-8"
         )
