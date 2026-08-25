@@ -6,7 +6,7 @@ import secrets
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -41,55 +41,100 @@ if TYPE_CHECKING:
 
 
 class OperationalStore(NotificationStore, Protocol):
-    def load_enabled_targets(self) -> list[Target]: ...
+    """The persistence surface the routine needs beyond notifications."""
 
-    def get_state(self, target_id: str) -> State | None: ...
+    def load_enabled_targets(self) -> list[Target]:
+        """Return every target enabled for monitoring."""
+        ...
 
-    def replace_state(self, state: State) -> None: ...
+    def get_state(self, target_id: str) -> State | None:
+        """Return the target's last-known state, or None if never checked."""
+        ...
 
-    def get_run(self, run_id: str) -> RunRecord | None: ...
+    def replace_state(self, state: State) -> None:
+        """Persist ``state`` as the target's new current state."""
+        ...
 
-    def append_run(self, run: RunRecord) -> None: ...
+    def get_run(self, run_id: str) -> RunRecord | None:
+        """Return the run record for ``run_id``, or None if not found."""
+        ...
+
+    def append_run(self, run: RunRecord) -> None:
+        """Durably record ``run``, deduplicated by its run id."""
+        ...
 
 
 class SnapshotStorage(Protocol):
+    """Storage for normalized content snapshots, addressed by reference."""
+
     def save(
         self,
         target_id: str,
         content: NormalizedContent,
         diff: DiffResult | None = None,
         previous_hash: str = "",
-    ) -> str: ...
+    ) -> str:
+        """Persist ``content`` and return its snapshot reference."""
+        ...
 
-    def load_normalized(self, snapshot_ref: str) -> str: ...
+    def load_normalized(self, snapshot_ref: str) -> str:
+        """Return the normalized text stored at ``snapshot_ref``."""
+        ...
 
 
 class SummaryClient(Protocol):
-    def summarize(self, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    """A client that can produce a natural-language change summary."""
+
+    def summarize(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Return a summary response for ``request``."""
+        ...
 
 
 class TargetFetcher(Protocol):
-    def fetch(self, target: Target, state: State, workspace: Path) -> FetchResult: ...
+    """Something that can fetch one target's current content."""
+
+    def fetch(self, target: Target, state: State, workspace: Path) -> FetchResult:
+        """Fetch ``target``'s current content, given its prior ``state``."""
+        ...
+
+
+_MIN_CONCURRENCY = 1
+_MAX_CONCURRENCY = 4
+_MIN_FAILURE_ALERT_THRESHOLD = 1
+_MAX_FAILURE_ALERT_THRESHOLD = 100
+_MIN_NOTIFICATION_CHARS = 100
+_MAX_NOTIFICATION_CHARS = 3_500
 
 
 @dataclass(frozen=True, slots=True)
 class RoutineConfig:
+    """Validated tunables for one :class:`WeeklyMonitorRoutine`."""
+
     max_concurrency: int = 2
     failure_alert_threshold: int = 3
-    retry: RetryConfig = RetryConfig()
-    fetch: FetchConfig = FetchConfig()
-    browser: BrowserFetchConfig = BrowserFetchConfig()
-    diff: DiffConfig = DiffConfig()
+    retry: RetryConfig = field(default_factory=RetryConfig)
+    fetch: FetchConfig = field(default_factory=FetchConfig)
+    browser: BrowserFetchConfig = field(default_factory=BrowserFetchConfig)
+    diff: DiffConfig = field(default_factory=DiffConfig)
     max_notification_chars: int = 1_500
     delivery_mode: str = "direct"
 
     def __post_init__(self) -> None:
-        if not 1 <= self.max_concurrency <= 4:
+        """Validate every field's bounds.
+
+        Raises:
+            MonitorError: If any field is outside its allowed bounds.
+        """
+        if not _MIN_CONCURRENCY <= self.max_concurrency <= _MAX_CONCURRENCY:
             msg = "invalid_configuration"
             raise MonitorError(
                 msg, "max_concurrency must be between 1 and 4"
             )
-        if not 1 <= self.failure_alert_threshold <= 100:
+        if not (
+            _MIN_FAILURE_ALERT_THRESHOLD
+            <= self.failure_alert_threshold
+            <= _MAX_FAILURE_ALERT_THRESHOLD
+        ):
             msg = "invalid_configuration"
             raise MonitorError(
                 msg, "failure alert threshold is invalid"
@@ -99,7 +144,11 @@ class RoutineConfig:
             raise MonitorError(
                 msg, "delivery_mode must be direct or outbox"
             )
-        if not 100 <= self.max_notification_chars <= 3_500:
+        if not (
+            _MIN_NOTIFICATION_CHARS
+            <= self.max_notification_chars
+            <= _MAX_NOTIFICATION_CHARS
+        ):
             msg = "invalid_configuration"
             raise MonitorError(
                 msg, "notification length limit is invalid"
@@ -108,6 +157,8 @@ class RoutineConfig:
 
 @dataclass(frozen=True, slots=True)
 class RoutineResult:
+    """The outcome of one full routine run across every enabled target."""
+
     run_id: str
     started_at: str
     finished_at: str
@@ -115,6 +166,12 @@ class RoutineResult:
     runs: tuple[RunRecord, ...]
 
     def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation of this result.
+
+        Returns:
+            This result's fields, with ``metrics``/``runs`` recursively
+            converted to plain dicts/lists.
+        """
         return {
             "run_id": self.run_id,
             "started_at": self.started_at,
@@ -137,8 +194,19 @@ class _PartialCommitError(Exception):
     """
 
 
+@dataclass(slots=True)
+class _TargetRunContext:
+    """Mutable per-target run state, tracked so exception handlers see progress."""
+
+    previous_state: State
+    state_loaded: bool = False
+    attempts: tuple[Attempt, ...] = ()
+
+
 @dataclass(frozen=True, slots=True)
 class _PendingMaterial:
+    """Everything computed for a detected change, before it is persisted/delivered."""
+
     target: Target
     previous_state: State
     next_state: State
@@ -150,15 +218,23 @@ class _PendingMaterial:
 
 
 class DefaultFetcher:
+    """Fetches a target via static HTTP or a headless browser, per its mode."""
+
     def __init__(
         self,
         static_config: FetchConfig,
         browser_config: BrowserFetchConfig,
     ) -> None:
+        """Store the configs used for each fetch mode."""
         self._static = static_config
         self._browser = browser_config
 
     def fetch(self, target: Target, state: State, workspace: Path) -> FetchResult:
+        """Fetch ``target``'s current content via its configured fetch mode.
+
+        Returns:
+            The fetch outcome.
+        """
         del workspace
         if target.fetch_mode == "browser":
             return fetch_rendered(target.url, config=self._browser)
@@ -172,6 +248,8 @@ class DefaultFetcher:
 
 
 class WeeklyMonitorRoutine:
+    """Orchestrates a full weekly monitoring run across every enabled target."""
+
     def __init__(
         self,
         *,
@@ -185,6 +263,13 @@ class WeeklyMonitorRoutine:
         config: RoutineConfig | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> None:
+        """Wire up the routine's stores/connectors, validating delivery mode.
+
+        Raises:
+            MonitorError: If the connector supplied for delivery does not
+                match ``config.delivery_mode`` (exactly one of ``slack``/
+                ``outbox_store`` must be set, matching the mode).
+        """
         self.config = config or RoutineConfig()
         self.store = store
         self.snapshots = snapshots
@@ -233,7 +318,7 @@ class WeeklyMonitorRoutine:
         try:
             with self._store_lock:
                 self.audit_sink.append_audit(record)
-        except Exception:
+        except Exception:  # ruff: ignore[blind-except] -- audit-sink failure modes are ambiguous by design:
             # Audit availability must not change fetch, state, or delivery
             # decisions. Routine metrics still expose the primary outcome.
             return
@@ -247,8 +332,8 @@ class WeeklyMonitorRoutine:
             self.store.append_run(run)
         return run
 
+    @staticmethod
     def _success_state(
-        self,
         state: State,
         fetched: FetchResult,
         normalized_hash: str,
@@ -341,11 +426,40 @@ class WeeklyMonitorRoutine:
                 # no longer be made to record a different outcome for this
                 # run_id. Raise rather than let a caller retry the pair and
                 # silently no-op the append while replace_state runs again.
-                msg = f"State commit failed after Run {run.run_id} was already persisted"
+                msg = (
+                    f"State commit failed after Run {run.run_id} was already persisted"
+                )
                 raise _PartialCommitError(
                     msg
                 ) from exc
         return run
+
+    def _send_slack_message(self, target: Target, message: str) -> str:
+        """Send ``message`` for ``target`` via the configured Slack connector.
+
+        Returns:
+            The delivery reference.
+
+        Raises:
+            MonitorError: If no Slack connector is configured.
+            AmbiguousDeliveryFailureError: If ``send_message`` returns no
+                delivery reference.
+        """
+        with self._slack_lock:
+            if self.slack is None:
+                msg = "connector_configuration_missing"
+                raise MonitorError(
+                    msg,
+                    "Slack connector is unavailable",
+                )
+            reference = self.slack.send_message(target.notification_group, message)
+        if not reference:
+            msg = "notification_send_failed"
+            raise AmbiguousDeliveryFailureError(
+                msg,
+                "failure alert returned no delivery reference",
+            )
+        return reference
 
     def _failure_alert(
         self,
@@ -393,20 +507,7 @@ class WeeklyMonitorRoutine:
                 )
             )
         try:
-            with self._slack_lock:
-                if self.slack is None:
-                    msg = "connector_configuration_missing"
-                    raise MonitorError(
-                        msg,
-                        "Slack connector is unavailable",
-                    )
-                reference = self.slack.send_message(target.notification_group, message)
-            if not reference:
-                msg = "notification_send_failed"
-                raise AmbiguousDeliveryFailureError(
-                    msg,
-                    "failure alert returned no delivery reference",
-                )
+            self._send_slack_message(target, message)
         except ConfirmedDeliveryFailureError:
             with self._store_lock:
                 self.store.upsert_notification(
@@ -426,7 +527,7 @@ class WeeklyMonitorRoutine:
                 metadata={"error_code": error_code},
             )
             return
-        except Exception:
+        except Exception:  # ruff: ignore[blind-except] -- any delivery failure here is ambiguous by design
             self._audit(
                 "failure_alert",
                 target_id=target.target_id,
@@ -511,7 +612,7 @@ class WeeklyMonitorRoutine:
             try:
                 previous_state = self._state(target)
                 state_loaded = True
-            except Exception:  # ruff: ignore[try-except-pass] - the second load is best-effort
+            except Exception:  # ruff: ignore[try-except-pass, blind-except] - the second load is best-effort
                 pass
         failed_state = replace(
             previous_state,
@@ -563,216 +664,333 @@ class WeeklyMonitorRoutine:
             )
         return run
 
+    def _handle_unchanged_fetch(
+        self,
+        run_id: str,
+        target: Target,
+        ctx: _TargetRunContext,
+        fetched: FetchResult,
+        started_at: str,
+    ) -> RunRecord:
+        """Persist the run for a fetch that itself reported no change (e.g. HTTP 304).
+
+        Returns:
+            The persisted run record.
+        """
+        next_state = replace(
+            ctx.previous_state,
+            last_checked_at=fetched.fetched_at,
+            etag=fetched.etag or ctx.previous_state.etag,
+            last_modified=fetched.last_modified or ctx.previous_state.last_modified,
+            validated_url=fetched.final_url or ctx.previous_state.validated_url,
+            consecutive_failures=0,
+        )
+        run = self._run_record(
+            run_id, target, "unchanged", 0, "", "", started_at, ctx.attempts
+        )
+        return self._persist_success(next_state, run)
+
+    def _handle_baseline_created(
+        self,
+        run_id: str,
+        target: Target,
+        ctx: _TargetRunContext,
+        fetched: FetchResult,
+        normalized: NormalizedContent,
+        started_at: str,
+    ) -> RunRecord:
+        """Persist the run for the first-ever snapshot of a target.
+
+        Returns:
+            The persisted run record.
+        """
+        with self._snapshot_lock:
+            reference = self.snapshots.save(target.target_id, normalized)
+        next_state = self._success_state(
+            ctx.previous_state, fetched, normalized.normalized_hash, reference
+        )
+        run = self._run_record(
+            run_id, target, "baseline_created", 0, "", "", started_at, ctx.attempts
+        )
+        return self._persist_success(next_state, run)
+
+    def _handle_unchanged_hash(
+        self,
+        run_id: str,
+        target: Target,
+        ctx: _TargetRunContext,
+        fetched: FetchResult,
+        started_at: str,
+    ) -> RunRecord:
+        """Persist the run for content that normalized to the same hash as before.
+
+        Returns:
+            The persisted run record.
+        """
+        next_state = self._success_state(
+            ctx.previous_state,
+            fetched,
+            ctx.previous_state.normalized_hash,
+            ctx.previous_state.snapshot_ref,
+        )
+        run = self._run_record(
+            run_id, target, "unchanged", 0, "", "", started_at, ctx.attempts
+        )
+        return self._persist_success(next_state, run)
+
+    def _handle_minor_change(
+        self,
+        run_id: str,
+        target: Target,
+        ctx: _TargetRunContext,
+        fetched: FetchResult,
+        normalized: NormalizedContent,
+        diff: DiffResult,
+        started_at: str,
+    ) -> RunRecord:
+        """Persist the run for a change too minor to warrant summarization.
+
+        Returns:
+            The persisted run record.
+        """
+        with self._snapshot_lock:
+            reference = self.snapshots.save(
+                target.target_id,
+                normalized,
+                diff,
+                previous_hash=ctx.previous_state.normalized_hash,
+            )
+        next_state = self._success_state(
+            ctx.previous_state, fetched, normalized.normalized_hash, reference
+        )
+        run = self._run_record(
+            run_id,
+            target,
+            "minor",
+            diff.change_score,
+            "",
+            "",
+            started_at,
+            ctx.attempts,
+        )
+        return self._persist_success(next_state, run)
+
+    def _summarize_and_build_outcome(
+        self,
+        run_id: str,
+        target: Target,
+        ctx: _TargetRunContext,
+        fetched: FetchResult,
+        normalized: NormalizedContent,
+        diff: DiffResult,
+        started_at: str,
+        retry_kwargs: dict[str, Any],
+    ) -> RunRecord | _PendingMaterial:
+        """Summarize a material-candidate diff and build its run outcome.
+
+        Returns:
+            The persisted run record for a non-material verdict, or pending
+            change material (for the caller to deliver) for a material one.
+
+        Raises:
+            MonitorError: If the diff was truncated and the model judged it
+                non-material anyway -- the evidence was too incomplete to
+                trust that verdict.
+        """
+        request = build_summary_request(target, diff)
+        with self._summary_lock:
+            summary_retry = run_with_retry(
+                lambda: self.summary_client.summarize(request),
+                **retry_kwargs,
+            )
+        summary_attempts = self._renumber(
+            summary_retry.attempts, offset=len(ctx.attempts)
+        )
+        ctx.attempts = (*ctx.attempts, *summary_attempts)
+        validated = validate_summary(
+            summary_retry.value,
+            changed_sections=request["changed_sections"],
+            source_url=target.url,
+            max_notification_chars=self.config.max_notification_chars,
+        )
+        if not validated["material"] and diff.truncated:
+            # A diff can be candidate_material for reasons outside the
+            # five recognized price/spec/terms/availability/
+            # eligibility patterns (e.g. changed ratio alone). Any
+            # truncation means the model judged materiality from an
+            # incomplete view, so a non-material verdict cannot be
+            # trusted regardless of which section was cut.
+            msg = "truncated_diff_non_material"
+            raise MonitorError(
+                msg,
+                "diff truncation dropped evidence the model never saw; "
+                "a non-material verdict over incomplete evidence needs "
+                "manual review before the baseline can advance",
+            )
+        with self._snapshot_lock:
+            reference = self.snapshots.save(
+                target.target_id,
+                normalized,
+                diff,
+                previous_hash=ctx.previous_state.normalized_hash,
+            )
+        next_state = self._success_state(
+            ctx.previous_state, fetched, normalized.normalized_hash, reference
+        )
+        if not validated["material"]:
+            run = self._run_record(
+                run_id,
+                target,
+                "non_material",
+                diff.change_score,
+                validated["summary_ja"],
+                "",
+                started_at,
+                ctx.attempts,
+            )
+            return self._persist_success(next_state, run)
+        event = build_change_event(target, normalized.normalized_hash, validated)
+        return _PendingMaterial(
+            target,
+            ctx.previous_state,
+            next_state,
+            event,
+            started_at,
+            diff.change_score,
+            validated["summary_ja"],
+            ctx.attempts,
+        )
+
+    def _run_target_pipeline(
+        self,
+        run_id: str,
+        target: Target,
+        started_at: str,
+        ctx: _TargetRunContext,
+        workspace: Path,
+    ) -> RunRecord | _PendingMaterial:
+        """Fetch, normalize, diff, and (if material) summarize one target.
+
+        Returns:
+            The finished run record, or pending change material awaiting
+            delivery.
+
+        Raises:
+            MonitorError: If the diff exceeds its configured line budget
+                (via :func:`compare_content`), or (via
+                :func:`_summarize_and_build_outcome`) a truncated diff was
+                judged non-material.
+        """
+        retry_kwargs: dict[str, Any] = {"config": self.config.retry}
+        if self.sleeper is not None:
+            retry_kwargs["sleeper"] = self.sleeper
+        fetched_retry = run_with_retry(
+            lambda: self.fetcher.fetch(target, ctx.previous_state, workspace),
+            **retry_kwargs,
+        )
+        fetched = fetched_retry.value
+        ctx.attempts = self._renumber(fetched_retry.attempts)
+        if fetched.result == "unchanged":
+            return self._handle_unchanged_fetch(
+                run_id, target, ctx, fetched, started_at
+            )
+        normalized = normalize_content(
+            fetched.body,
+            content_type=fetched.content_type,
+            charset=fetched.charset,
+            base_url=fetched.final_url,
+            include_selector=target.include_selector,
+            exclude_selectors=target.exclude_selectors,
+        )
+        if not ctx.previous_state.normalized_hash:
+            return self._handle_baseline_created(
+                run_id, target, ctx, fetched, normalized, started_at
+            )
+        if ctx.previous_state.normalized_hash == normalized.normalized_hash:
+            return self._handle_unchanged_hash(run_id, target, ctx, fetched, started_at)
+        with self._snapshot_lock:
+            previous_text = self.snapshots.load_normalized(
+                ctx.previous_state.snapshot_ref
+            )
+        diff = compare_content(
+            previous_text,
+            normalized.text,
+            previous_hash=ctx.previous_state.normalized_hash,
+            current_hash=normalized.normalized_hash,
+            config=self.config.diff,
+            watch_focus=target.watch_focus,
+        )
+        if diff.budget_exceeded:
+            msg = "diff_budget_exceeded"
+            raise MonitorError(
+                msg,
+                "diff exceeded the configured line budget; the change "
+                "cannot be assessed from synthetic evidence and needs "
+                "manual review",
+            )
+        if not diff.should_summarize:
+            return self._handle_minor_change(
+                run_id, target, ctx, fetched, normalized, diff, started_at
+            )
+        return self._summarize_and_build_outcome(
+            run_id, target, ctx, fetched, normalized, diff, started_at, retry_kwargs
+        )
+
+    def _claimed_run(self, run_id: str, target: Target) -> RunRecord | None:
+        """Return the already-recorded run for this run/target pair, if any.
+
+        Returns:
+            The prior run record if this exact run ID already reached a
+            terminal outcome for this target, otherwise None.
+        """
+        with self._store_lock:
+            return self.store.get_run(self._run_record_id(run_id, target))
+
+    def _run_target_pipeline_in_workspace(
+        self,
+        run_id: str,
+        target: Target,
+        started_at: str,
+        ctx: _TargetRunContext,
+    ) -> RunRecord | _PendingMaterial:
+        """Run the target pipeline inside a scratch workspace directory.
+
+        Returns:
+            The finished run record, or pending change material awaiting
+            delivery.
+        """
+        with tempfile.TemporaryDirectory(
+            prefix=f"weekly-web-monitor-{target.target_id}-"
+        ) as temporary:
+            workspace = Path(temporary)
+            return self._run_target_pipeline(run_id, target, started_at, ctx, workspace)
+
     def _process_target(
         self, run_id: str, target: Target
     ) -> RunRecord | _PendingMaterial:
+        """Run the full per-target pipeline, routing any failure to :func:`_finish_failure`.
+
+        Returns:
+            The finished run record, or pending change material awaiting
+            delivery.
+
+        Raises:
+            _PartialCommitError: If a prior failure's Run record landed but
+                its paired state update did not -- propagated rather than
+                handled here (see the except clause below).
+        """
         started_at = utc_now()
-        previous_state = State(target.target_id)
-        state_loaded = False
-        attempts: tuple[Attempt, ...] = ()
+        ctx = _TargetRunContext(previous_state=State(target.target_id))
         try:
-            with self._store_lock:
-                claimed = self.store.get_run(self._run_record_id(run_id, target))
+            claimed = self._claimed_run(run_id, target)
             if claimed is not None:
                 # A prior attempt for this exact run ID already reached a
                 # terminal outcome for this target; replay it instead of
                 # refetching, re-writing state, or re-notifying.
                 return claimed
-            previous_state = self._state(target)
-            state_loaded = True
-            with tempfile.TemporaryDirectory(
-                prefix=f"weekly-web-monitor-{target.target_id}-"
-            ) as temporary:
-                workspace = Path(temporary)
-                retry_kwargs: dict[str, Any] = {"config": self.config.retry}
-                if self.sleeper is not None:
-                    retry_kwargs["sleeper"] = self.sleeper
-                fetched_retry = run_with_retry(
-                    lambda: self.fetcher.fetch(target, previous_state, workspace),
-                    **retry_kwargs,
-                )
-                fetched = fetched_retry.value
-                attempts = self._renumber(fetched_retry.attempts)
-                if fetched.result == "unchanged":
-                    next_state = replace(
-                        previous_state,
-                        last_checked_at=fetched.fetched_at,
-                        etag=fetched.etag or previous_state.etag,
-                        last_modified=fetched.last_modified
-                        or previous_state.last_modified,
-                        validated_url=fetched.final_url or previous_state.validated_url,
-                        consecutive_failures=0,
-                    )
-                    run = self._run_record(
-                        run_id,
-                        target,
-                        "unchanged",
-                        0,
-                        "",
-                        "",
-                        started_at,
-                        attempts,
-                    )
-                    return self._persist_success(next_state, run)
-                normalized = normalize_content(
-                    fetched.body,
-                    content_type=fetched.content_type,
-                    charset=fetched.charset,
-                    base_url=fetched.final_url,
-                    include_selector=target.include_selector,
-                    exclude_selectors=target.exclude_selectors,
-                )
-                if not previous_state.normalized_hash:
-                    with self._snapshot_lock:
-                        reference = self.snapshots.save(target.target_id, normalized)
-                    next_state = self._success_state(
-                        previous_state,
-                        fetched,
-                        normalized.normalized_hash,
-                        reference,
-                    )
-                    run = self._run_record(
-                        run_id,
-                        target,
-                        "baseline_created",
-                        0,
-                        "",
-                        "",
-                        started_at,
-                        attempts,
-                    )
-                    return self._persist_success(next_state, run)
-                if previous_state.normalized_hash == normalized.normalized_hash:
-                    next_state = self._success_state(
-                        previous_state,
-                        fetched,
-                        previous_state.normalized_hash,
-                        previous_state.snapshot_ref,
-                    )
-                    run = self._run_record(
-                        run_id,
-                        target,
-                        "unchanged",
-                        0,
-                        "",
-                        "",
-                        started_at,
-                        attempts,
-                    )
-                    return self._persist_success(next_state, run)
-                with self._snapshot_lock:
-                    previous_text = self.snapshots.load_normalized(
-                        previous_state.snapshot_ref
-                    )
-                diff = compare_content(
-                    previous_text,
-                    normalized.text,
-                    previous_hash=previous_state.normalized_hash,
-                    current_hash=normalized.normalized_hash,
-                    config=self.config.diff,
-                    watch_focus=target.watch_focus,
-                )
-                if diff.budget_exceeded:
-                    msg = "diff_budget_exceeded"
-                    raise MonitorError(
-                        msg,
-                        "diff exceeded the configured line budget; the change "
-                        "cannot be assessed from synthetic evidence and needs "
-                        "manual review",
-                    )
-                if not diff.should_summarize:
-                    with self._snapshot_lock:
-                        reference = self.snapshots.save(
-                            target.target_id,
-                            normalized,
-                            diff,
-                            previous_hash=previous_state.normalized_hash,
-                        )
-                    next_state = self._success_state(
-                        previous_state,
-                        fetched,
-                        normalized.normalized_hash,
-                        reference,
-                    )
-                    run = self._run_record(
-                        run_id,
-                        target,
-                        "minor",
-                        diff.change_score,
-                        "",
-                        "",
-                        started_at,
-                        attempts,
-                    )
-                    return self._persist_success(next_state, run)
-                request = build_summary_request(target, diff)
-                with self._summary_lock:
-                    summary_retry = run_with_retry(
-                        lambda: self.summary_client.summarize(request),
-                        **retry_kwargs,
-                    )
-                summary_attempts = self._renumber(
-                    summary_retry.attempts, offset=len(attempts)
-                )
-                attempts = (*attempts, *summary_attempts)
-                validated = validate_summary(
-                    summary_retry.value,
-                    changed_sections=request["changed_sections"],
-                    source_url=target.url,
-                    max_notification_chars=self.config.max_notification_chars,
-                )
-                if not validated["material"] and diff.truncated:
-                    # A diff can be candidate_material for reasons outside the
-                    # five recognized price/spec/terms/availability/
-                    # eligibility patterns (e.g. changed ratio alone). Any
-                    # truncation means the model judged materiality from an
-                    # incomplete view, so a non-material verdict cannot be
-                    # trusted regardless of which section was cut.
-                    msg = "truncated_diff_non_material"
-                    raise MonitorError(
-                        msg,
-                        "diff truncation dropped evidence the model never saw; "
-                        "a non-material verdict over incomplete evidence needs "
-                        "manual review before the baseline can advance",
-                    )
-                with self._snapshot_lock:
-                    reference = self.snapshots.save(
-                        target.target_id,
-                        normalized,
-                        diff,
-                        previous_hash=previous_state.normalized_hash,
-                    )
-                next_state = self._success_state(
-                    previous_state,
-                    fetched,
-                    normalized.normalized_hash,
-                    reference,
-                )
-                if not validated["material"]:
-                    run = self._run_record(
-                        run_id,
-                        target,
-                        "non_material",
-                        diff.change_score,
-                        validated["summary_ja"],
-                        "",
-                        started_at,
-                        attempts,
-                    )
-                    return self._persist_success(next_state, run)
-                event = build_change_event(
-                    target, normalized.normalized_hash, validated
-                )
-                return _PendingMaterial(
-                    target,
-                    previous_state,
-                    next_state,
-                    event,
-                    started_at,
-                    diff.change_score,
-                    validated["summary_ja"],
-                    attempts,
-                )
+            ctx.previous_state = self._state(target)
+            ctx.state_loaded = True
+            return self._run_target_pipeline_in_workspace(run_id, target, started_at, ctx)
         except _PartialCommitError:
             # The Run for this run_id already landed durably; do not let
             # the generic Exception handler below route this through
@@ -786,23 +1004,26 @@ class WeeklyMonitorRoutine:
             return self._finish_failure(
                 run_id,
                 target,
-                previous_state,
+                ctx.previous_state,
                 exc,
                 started_at,
-                attempts,
-                state_loaded=state_loaded,
+                ctx.attempts,
+                state_loaded=ctx.state_loaded,
             )
-        except Exception:
+        except Exception:  # ruff: ignore[blind-except] -- any target-pipeline failure not already
+            # classified as a MonitorError is recorded as an opaque,
+            # content-free "unexpected_error" so target execution never
+            # crashes the routine.
             return self._finish_failure(
                 run_id,
                 target,
-                previous_state,
+                ctx.previous_state,
                 MonitorError(
                     "unexpected_error", "target execution failed unexpectedly"
                 ),
                 started_at,
-                attempts,
-                state_loaded=state_loaded,
+                ctx.attempts,
+                state_loaded=ctx.state_loaded,
             )
 
     def _finish_material(
