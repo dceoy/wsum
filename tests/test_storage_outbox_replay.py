@@ -1,11 +1,19 @@
+"""Tests for the storage_outbox_replay module."""
+
 from __future__ import annotations
 
 import json
+import re
 import shutil
-import subprocess
+import subprocess  # ruff: ignore[suspicious-subprocess-import] -- deliberately used
+import tempfile
 import unittest
+from io import StringIO
+from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
-import support
+import pytest
 from audit import configuration_digest, make_audit_record
 from diff import compare_content
 from drive import SnapshotStore
@@ -15,16 +23,26 @@ from normalize import normalize_content
 from outbox import (
     OUTBOX_COLUMNS,
     OutboxDeliveryError,
+    OutboxRecord,
     OutboxSheetsStore,
     dispatch_record,
     enqueue_record,
     load_outbox,
 )
+from replay import main as replay_main
 from replay import replay_manifest
+
+from tests import support
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 class DriveTests(unittest.TestCase):
+    """Tests for DriveTests."""
+
     def test_snapshot_upload_lookup_and_duplicate_are_idempotent(self) -> None:
+        """Test that snapshot upload lookup and duplicate are idempotent."""
         connector = MemoryDriveConnector()
         store = SnapshotStore(connector)
         content = normalize_content(
@@ -32,29 +50,31 @@ class DriveTests(unittest.TestCase):
         )
         reference = store.save("one", content)
         second = store.save("one", content)
-        self.assertEqual(reference, second)
-        self.assertEqual(2, len(connector.files))
-        self.assertEqual(content.text, store.load_normalized(reference))
+        assert reference == second
+        assert len(connector.files) == 2
+        assert content.text == store.load_normalized(reference)
 
     def test_failed_write_and_missing_snapshot_fail_closed(self) -> None:
+        """Test that failed write and missing snapshot fail closed."""
         connector = MemoryDriveConnector()
         connector.fail_upload = True
         store = SnapshotStore(connector)
         content = normalize_content(b"<p>Hello</p>", content_type="text/html")
-        with self.assertRaisesRegex(MonitorError, "fixture upload"):
+        with pytest.raises(MonitorError, match="fixture upload"):
             store.save("one", content)
-        self.assertEqual({}, connector.files)
-        with self.assertRaisesRegex(MonitorError, "missing"):
+        assert connector.files == {}
+        with pytest.raises(MonitorError, match="missing"):
             store.load_normalized("drive:missing")
         bounded_connector = MemoryDriveConnector()
         bounded_connector.files["drive:large"] = b"x" * 2_000
         bounded = SnapshotStore(bounded_connector, max_snapshot_bytes=1_024)
-        with self.assertRaisesRegex(MonitorError, "size limit"):
+        with pytest.raises(MonitorError, match="size limit"):
             bounded.load_normalized("drive:large")
 
     def test_diff_artifact_is_versioned_by_previous_hash_on_a_b_c_b_cycle(
         self,
     ) -> None:
+        """Test that diff artifact is versioned by previous hash on a b c b cycle."""
         connector = MemoryDriveConnector()
         store = SnapshotStore(connector)
         content_a = normalize_content(b"<p>A</p>", content_type="text/html")
@@ -79,18 +99,19 @@ class DriveTests(unittest.TestCase):
         ref_second_b = store.save(
             "one", content_b, diff_c_to_b, previous_hash=content_c.normalized_hash
         )
-        self.assertEqual(ref_first_b, ref_second_b)
+        assert ref_first_b == ref_second_b
         b_prefix = f"snapshots/one/{content_b.normalized_hash}/"
         diff_paths = [
             path
             for path in connector.paths
             if path.startswith(b_prefix) and "diff" in path
         ]
-        self.assertEqual(2, len(diff_paths))
+        assert len(diff_paths) == 2
         contents = {connector.files[connector.paths[path]] for path in diff_paths}
-        self.assertEqual(2, len(contents))
+        assert len(contents) == 2
 
     def test_retention_plan_never_deletes_current_reference(self) -> None:
+        """Test that retention plan never deletes current reference."""
         connector = MemoryDriveConnector()
         store = SnapshotStore(connector)
         references: list[str] = []
@@ -102,11 +123,12 @@ class DriveTests(unittest.TestCase):
         candidates = store.plan_cleanup(
             "target", current_ref=references[0], retain_snapshots=1
         )
-        self.assertNotIn(references[0], [item.file_ref for item in candidates])
+        assert references[0] not in [item.file_ref for item in candidates]
 
     def test_retention_plan_retains_the_entire_current_reference_group(
         self,
     ) -> None:
+        """Test that retention plan retains the entire current reference group."""
         # The current baseline's hash can fall outside the newest
         # ``retain_snapshots`` groups (as here, with retain_snapshots=1 and
         # the oldest snapshot still the active baseline). The whole group --
@@ -132,16 +154,19 @@ class DriveTests(unittest.TestCase):
             for path in connector.paths
             if path.startswith(current_prefix) and path != current_path
         }
-        self.assertTrue(sibling_paths)
+        assert sibling_paths
         candidates = store.plan_cleanup(
             "target", current_ref=current_ref, retain_snapshots=1
         )
         candidate_paths = {item.path for item in candidates}
-        self.assertEqual(set(), sibling_paths & candidate_paths)
+        assert set() == sibling_paths & candidate_paths
 
 
 class OutboxTests(unittest.TestCase):
+    """Tests for OutboxTests."""
+
     def test_sheet_parsing_duplicate_detection_and_raw_upsert(self) -> None:
+        """Test that sheet parsing duplicate detection and raw upsert."""
         record = enqueue_record(
             "e" * 64,
             "one",
@@ -150,37 +175,66 @@ class OutboxTests(unittest.TestCase):
             now="2026-01-01T00:00:00Z",
         )
         parsed = load_outbox([list(OUTBOX_COLUMNS), record.as_row()])
-        self.assertEqual("pending", parsed[record.event_id][1].status)
-        with self.assertRaisesRegex(MonitorError, "duplicate"):
+        assert parsed[record.event_id][1].status == "pending"
+        with pytest.raises(MonitorError, match="duplicate"):
             load_outbox([list(OUTBOX_COLUMNS), record.as_row(), record.as_row()])
 
         class Connector:
+            """A fake Drive/Sheets connector used to exercise the tested behavior."""
+
             def __init__(self) -> None:
-                self.values = [list(OUTBOX_COLUMNS)]
+                self.values: list[list[str]] = [list(OUTBOX_COLUMNS)]
                 self.options: list[str] = []
 
-            def read_values(self, spreadsheet_id: str, range_name: str):
+            def read_values(
+                self, spreadsheet_id: str, range_name: str
+            ) -> list[list[str]]:
                 del spreadsheet_id, range_name
                 return self.values
 
-            def replace_values(self, *args, value_input_option: str) -> None:
-                del args
+            def replace_values(
+                self,
+                spreadsheet_id: str,
+                range_name: str,
+                values: Sequence[Sequence[object]],
+                *,
+                value_input_option: str,
+            ) -> None:
+                del spreadsheet_id, range_name, values
                 self.options.append(value_input_option)
 
-            def append_values(self, *args, value_input_option: str) -> None:
-                del args
+            def append_values(
+                self,
+                spreadsheet_id: str,
+                range_name: str,
+                values: Sequence[Sequence[object]],
+                *,
+                value_input_option: str,
+            ) -> None:
+                del spreadsheet_id, range_name, values
+                self.options.append(value_input_option)
+
+            def batch_replace_values(
+                self,
+                spreadsheet_id: str,
+                data: Sequence[Mapping[str, object]],
+                *,
+                value_input_option: str,
+            ) -> None:
+                del spreadsheet_id, data
                 self.options.append(value_input_option)
 
         connector = Connector()
         store = OutboxSheetsStore(connector, "runtime-only-id")
         store.upsert_outbox(record)
-        self.assertEqual(["RAW"], connector.options)
+        assert connector.options == ["RAW"]
 
     def test_rejects_reordered_outbox_header_columns(self) -> None:
         # upsert_outbox writes OUTBOX_COLUMNS in fixed A:I order, so a header
         # row that merely contains every required column out of order would
         # otherwise load fine and then have the next write silently place
         # values (e.g. status/attempt_count) under the wrong headers.
+        """Test that rejects reordered outbox header columns."""
         reordered = [
             "event_id",
             "target_id",
@@ -199,10 +253,11 @@ class OutboxTests(unittest.TestCase):
             "更新",
             now="2026-01-01T00:00:00Z",
         )
-        with self.assertRaisesRegex(MonitorError, "must appear first, in this order"):
+        with pytest.raises(MonitorError, match="must appear first, in this order"):
             load_outbox([reordered, record.as_row()])
 
     def test_enqueue_success_duplicate_and_retry_states(self) -> None:
+        """Test that enqueue success duplicate and retry states."""
         record = enqueue_record(
             "a" * 64,
             "one",
@@ -222,15 +277,15 @@ class OutboxTests(unittest.TestCase):
             persist_transition=lambda _: None,
             now="2026-01-01T00:01:00Z",
         )
-        self.assertEqual("sent", sent.status)
+        assert sent.status == "sent"
         duplicate = dispatch_record(
             sent,
             sender,
             persist_transition=lambda _: None,
             now="2026-01-01T00:02:00Z",
         )
-        self.assertEqual("sent", duplicate.status)
-        self.assertEqual(1, len(calls))
+        assert duplicate.status == "sent"
+        assert len(calls) == 1
 
         def failed_sender(group: str, message: str) -> str:
             del group, message
@@ -248,9 +303,9 @@ class OutboxTests(unittest.TestCase):
             persist_transition=lambda _: None,
             now="2026-01-01T00:01:00Z",
         )
-        self.assertEqual("retry", retried.status)
-        self.assertTrue(retried.next_attempt_at)
-        with self.assertRaisesRegex(MonitorError, "webhook"):
+        assert retried.status == "retry"
+        assert retried.next_attempt_at
+        with pytest.raises(MonitorError, match="webhook"):
             enqueue_record(
                 "f" * 64,
                 "one",
@@ -259,6 +314,7 @@ class OutboxTests(unittest.TestCase):
             )
 
     def test_dispatch_requires_and_commits_sending_before_delivery(self) -> None:
+        """Test that dispatch requires and commits sending before delivery."""
         record = enqueue_record(
             "f" * 64,
             "one",
@@ -273,22 +329,24 @@ class OutboxTests(unittest.TestCase):
             calls.append("send")
             return "sent:1"
 
-        with self.assertRaises(TypeError):
+        with pytest.raises(TypeError):
             dispatch_record(record, sender)  # type: ignore[call-arg]
-        self.assertEqual([], calls)
+        assert calls == []
 
         def failed_persistence(_: object) -> None:
-            raise RuntimeError("store unavailable")
+            msg = "store unavailable"
+            raise RuntimeError(msg)
 
-        with self.assertRaisesRegex(RuntimeError, "store unavailable"):
+        with pytest.raises(RuntimeError, match="store unavailable"):
             dispatch_record(
                 record,
                 sender,
                 persist_transition=failed_persistence,
             )
-        self.assertEqual([], calls)
+        assert calls == []
 
     def test_ambiguous_failure_remains_sending_after_persist_transition(self) -> None:
+        """Test that ambiguous failure remains sending after persist transition."""
         record = enqueue_record(
             "d" * 64,
             "one",
@@ -296,7 +354,7 @@ class OutboxTests(unittest.TestCase):
             "message",
             now="2026-01-01T00:00:00Z",
         )
-        transitions = []
+        transitions: list[OutboxRecord] = []
 
         def ambiguous_sender(group: str, message: str) -> str:
             del group, message
@@ -308,11 +366,12 @@ class OutboxTests(unittest.TestCase):
             persist_transition=transitions.append,
             now="2026-01-01T00:01:00Z",
         )
-        self.assertEqual("sending", transitions[0].status)
-        self.assertEqual("sending", result.status)
-        self.assertEqual("delivery_ambiguous", result.last_error)
+        assert transitions[0].status == "sending"
+        assert result.status == "sending"
+        assert result.last_error == "delivery_ambiguous"
 
     def test_poison_and_sending_are_not_delivered(self) -> None:
+        """Test that poison and sending are not delivered."""
         record = enqueue_record(
             "c" * 64,
             "one",
@@ -329,10 +388,18 @@ class OutboxTests(unittest.TestCase):
             record.created_at,
             record.updated_at,
         )
+
+        def unreachable_sender(group: str, message: str) -> str:
+            del group, message
+            return "sent"
+
+        def noop_persist(record: OutboxRecord) -> None:
+            del record
+
         result = dispatch_record(
-            poison, lambda *_: "sent", persist_transition=lambda _: None
+            poison, unreachable_sender, persist_transition=noop_persist
         )
-        self.assertEqual("poison", result.status)
+        assert result.status == "poison"
         sending = type(record)(
             record.event_id,
             record.target_id,
@@ -342,16 +409,16 @@ class OutboxTests(unittest.TestCase):
             record.created_at,
             record.updated_at,
         )
-        self.assertIs(
-            sending,
-            dispatch_record(
-                sending, lambda *_: "sent", persist_transition=lambda _: None
-            ),
+        assert sending is dispatch_record(
+            sending, unreachable_sender, persist_transition=noop_persist
         )
 
 
 class ReplayAndAuditTests(unittest.TestCase):
+    """Tests for ReplayAndAuditTests."""
+
     def test_replay_validates_hashes_and_expected_diff(self) -> None:
+        """Test that replay validates hashes and expected diff."""
         previous = normalize_content(b"<p>Price $10</p>", content_type="text/html")
         current = normalize_content(b"<p>Price $20</p>", content_type="text/html")
         expected = compare_content(
@@ -370,13 +437,14 @@ class ReplayAndAuditTests(unittest.TestCase):
             },
         }
         result = replay_manifest(manifest)
-        self.assertTrue(result["hashes_valid"])
+        assert result["hashes_valid"]
         tampered = json.loads(json.dumps(manifest))
         tampered["current"]["text"] = "tampered"
-        with self.assertRaisesRegex(MonitorError, "hash"):
+        with pytest.raises(MonitorError, match="hash"):
             replay_manifest(tampered)
 
     def test_audit_rejects_sensitive_fields(self) -> None:
+        """Test that audit rejects sensitive fields."""
         digest = configuration_digest({"threshold": 3})
         record = make_audit_record(
             "configuration_loaded",
@@ -384,8 +452,8 @@ class ReplayAndAuditTests(unittest.TestCase):
             run_id="run-1",
             metadata={"configuration_digest": digest},
         )
-        self.assertEqual(digest, record.metadata["configuration_digest"])
-        with self.assertRaisesRegex(MonitorError, "sensitive"):
+        assert digest == record.metadata["configuration_digest"]
+        with pytest.raises(MonitorError, match="sensitive"):
             make_audit_record(
                 "target_execution",
                 outcome="failed",
@@ -394,20 +462,21 @@ class ReplayAndAuditTests(unittest.TestCase):
             )
 
     def test_schemas_and_gas_dispatcher_are_safe_static_artifacts(self) -> None:
+        """Test that schemas and gas dispatcher are safe static artifacts."""
         schema_dir = (
             support.REPO_ROOT / ".claude" / "skills" / "weekly-web-monitor" / "schemas"
         )
         schemas = list(schema_dir.glob("*.json"))
-        self.assertGreaterEqual(len(schemas), 10)
+        assert len(schemas) >= 10
         for schema in schemas:
             with self.subTest(schema=schema.name):
                 value = json.loads(schema.read_text(encoding="utf-8"))
-                self.assertIn("$schema", value)
-                self.assertEqual("object", value["type"])
+                assert "$schema" in value
+                assert value["type"] == "object"
         gas = (support.SCRIPTS / "gas" / "Code.gs").read_text(encoding="utf-8")
-        self.assertIn("PropertiesService.getScriptProperties()", gas)
-        self.assertIn("'sending'", gas)
-        self.assertNotRegex(gas, r"https://hooks\.slack\.com/")
+        assert "PropertiesService.getScriptProperties()" in gas
+        assert "'sending'" in gas
+        assert not re.search(r"https://hooks\.slack\.com/", gas)
 
     def test_gas_dispatcher_poisons_the_wrong_notification_group(self) -> None:
         # The Outbox dispatcher fixes a single Slack destination for a
@@ -416,6 +485,7 @@ class ReplayAndAuditTests(unittest.TestCase):
         # since that would leak one team's notification to another team's
         # channel. Only running the real Code.gs through a JS engine (not a
         # Python re-implementation of its logic) proves this.
+        """Test that gas dispatcher poisons the wrong notification group."""
         node = shutil.which("node")
         if not node:
             self.skipTest("node is not available to execute Code.gs")
@@ -493,17 +563,21 @@ const byEventId = Object.fromEntries(
 console.log(JSON.stringify({{fetchCalls, byEventId}}));
 """
         result = subprocess.run(
-            [node, "-e", harness], capture_output=True, text=True, timeout=10
+            [node, "-e", harness],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
-        self.assertEqual(0, result.returncode, result.stderr)
+        assert result.returncode == 0, result.stderr
         outcome = json.loads(result.stdout)
-        self.assertEqual(1, len(outcome["fetchCalls"]))
-        self.assertEqual("hello-a", outcome["fetchCalls"][0]["body"]["text"])
-        self.assertEqual("sent", outcome["byEventId"]["event-allowed"]["status"])
-        self.assertEqual("poison", outcome["byEventId"]["event-mismatched"]["status"])
-        self.assertEqual(
-            "notification_group_mismatch",
-            outcome["byEventId"]["event-mismatched"]["last_error"],
+        assert len(outcome["fetchCalls"]) == 1
+        assert outcome["fetchCalls"][0]["body"]["text"] == "hello-a"
+        assert outcome["byEventId"]["event-allowed"]["status"] == "sent"
+        assert outcome["byEventId"]["event-mismatched"]["status"] == "poison"
+        assert (
+            outcome["byEventId"]["event-mismatched"]["last_error"]
+            == "notification_group_mismatch"
         )
 
     def test_gas_dispatcher_treats_existing_sending_row_as_delivery_claim(
@@ -517,6 +591,7 @@ console.log(JSON.stringify({{fetchCalls, byEventId}}));
         # it must be poisoned rather than dispatched again. Only running the
         # real Code.gs proves the upfront claimed-event index actually
         # covers "sending", not just "sent".
+        """Test that gas dispatcher treats existing sending row as delivery claim."""
         node = shutil.which("node")
         if not node:
             self.skipTest("node is not available to execute Code.gs")
@@ -595,14 +670,56 @@ console.log(JSON.stringify({{
 }}));
 """
         result = subprocess.run(
-            [node, "-e", harness], capture_output=True, text=True, timeout=10
+            [node, "-e", harness],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
-        self.assertEqual(0, result.returncode, result.stderr)
+        assert result.returncode == 0, result.stderr
         outcome = json.loads(result.stdout)
-        self.assertEqual(0, len(outcome["fetchCalls"]))
-        self.assertEqual("sending", outcome["rows"][0]["status"])
-        self.assertEqual("poison", outcome["rows"][1]["status"])
-        self.assertEqual("duplicate_event_id", outcome["rows"][1]["last_error"])
+        assert len(outcome["fetchCalls"]) == 0
+        assert outcome["rows"][0]["status"] == "sending"
+        assert outcome["rows"][1]["status"] == "poison"
+        assert outcome["rows"][1]["last_error"] == "duplicate_event_id"
+
+
+class ReplayCliTest(unittest.TestCase):
+    """Tests for replay.py's `main` CLI entry point's stdout/stderr contract."""
+
+    def test_usage_error_writes_to_stderr(self) -> None:
+        """Test that incorrect argc writes a usage message to stderr and returns 2."""
+        with patch("sys.stderr", new_callable=StringIO) as stderr:
+            code = replay_main(["replay.py"])
+        assert code == 2
+        assert "usage" in stderr.getvalue()
+
+    def test_success_writes_json_result_to_stdout(self) -> None:
+        """Test that a valid manifest writes the JSON replay result to stdout."""
+        previous = normalize_content(b"<p>Price $10</p>", content_type="text/html")
+        current = normalize_content(b"<p>Price $20</p>", content_type="text/html")
+        manifest = {
+            "previous": previous.as_dict(),
+            "current": current.as_dict(),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                code = replay_main(["replay.py", str(manifest_path)])
+        assert code == 0
+        payload = json.loads(stdout.getvalue())
+        assert payload["hashes_valid"] is True
+
+    def test_invalid_input_writes_error_json_to_stdout(self) -> None:
+        """Test that a missing manifest file writes {"error": ...} JSON to stdout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "does-not-exist.json"
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                code = replay_main(["replay.py", str(missing)])
+        assert code == 1
+        payload = json.loads(stdout.getvalue())
+        assert payload["error"]["code"] == "replay_invalid"
 
 
 if __name__ == "__main__":

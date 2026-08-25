@@ -27,13 +27,91 @@ dev = [
 [tool.ruff]
 line-length = 88
 exclude = ["build", ".venv", ".agents", ".claude"]
+preview = true
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "S", "UP"]
+select = [
+  "F",        # Pyflakes (F)
+  "E",        # pycodestyle error (E)
+  "W",        # pycodestyle warning (W)
+  "C90",      # mccabe (C90)
+  "I",        # isort (I)
+  "N",        # pep8-naming (N)
+  "D",        # pydocstyle (D)
+  "UP",       # pyupgrade (UP)
+  "S",        # flake8-bandit (S)
+  "B",        # flake8-bugbear (B)
+  "C4",       # flake8-comprehensions (C4)
+  "SIM",      # flake8-simplify (SIM)
+  "ARG",      # flake8-unused-arguments (ARG)
+  "PLC",      # Pylint convention (PLC)
+  "PLE",      # Pylint error (PLE)
+  "PLR",      # Pylint refactor (PLR)
+  "PLW",      # Pylint warning (PLW)
+  "FLY",      # flynt (FLY)
+  "PERF",     # Perflint (PERF)
+  "FURB",     # refurb (FURB)
+  "RUF",      # Ruff-specific rules (RUF)
+  "YTT",      # flake8-2020 (YTT)
+  "ANN",      # flake8-annotations (ANN)
+  "ASYNC",    # flake8-async (ASYNC)
+  "BLE",      # flake8-blind-except (BLE)
+  "FBT",      # flake8-boolean-trap (FBT)
+  "A",        # flake8-builtins (A)
+  "COM",      # flake8-commas (COM)
+  "DTZ",      # flake8-datetimez (DTZ)
+  "T10",      # flake8-debugger (T10)
+  "EM",       # flake8-errmsg (EM)
+  "EXE",      # flake8-executable (EXE)
+  "FA",       # flake8-future-annotations (FA)
+  "ISC",      # flake8-implicit-str-concat (ISC)
+  "ICN",      # flake8-import-conventions (ICN)
+  "LOG",      # flake8-logging (LOG)
+  "G",        # flake8-logging-format (G)
+  "INP",      # flake8-no-pep420 (INP)
+  "PIE",      # flake8-pie (PIE)
+  "T20",      # flake8-print (T20)
+  "PYI",      # flake8-pyi (PYI)
+  "PT",       # flake8-pytest-style (PT)
+  "Q",        # flake8-quotes (Q)
+  "RSE",      # flake8-raise (RSE)
+  "SLF",      # flake8-self (SLF)
+  "SLOT",     # flake8-slots (SLOT)
+  "TID",      # flake8-tidy-imports (TID)
+  "TCH",      # flake8-type-checking (TCH)
+  "INT",      # flake8-gettext (INT)
+  "PTH",      # flake8-use-pathlib (PTH)
+  "TD",       # flake8-todos (TD)
+  "FIX",      # flake8-fixme (FIX)
+  "ERA",      # eradicate (ERA)
+  "PGH",      # pygrep-hooks (PGH)
+  "TRY",      # tryceratops (TRY)
+  "DOC",      # pydoclint (DOC)
+]
+ignore = [
+  "COM812",  # missing-trailing-comma (conflicts with the formatter)
+  "FBT001",  # boolean-type-hint-positional-argument
+  "FBT002",  # boolean-default-value-positional-argument
+  # RUF201 (rule-codes-in-selectors) would otherwise rewrite the codes above
+  # (and per-file-ignores below) back to diagnostic names; this repo
+  # deliberately keeps short rule codes for ignore/per-file-ignores.
+  "RUF201",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "skills/weekly-web-monitor/scripts/html_normalizer.py" = ["S101"]
-"tests/**/*.py" = ["E501", "S101", "S603", "UP037"]
+"tests/**/*.py" = [
+  "E501",    # line-too-long
+  "S101",    # assert (use of assert is acceptable in tests)
+  "S603",    # subprocess-without-shell-equals-true
+  "UP037",   # quoted-annotation
+  "PLC2701", # import-private-name
+  "PLR0904", # too-many-public-methods
+  "PLR2004", # magic-value-comparison
+  "PLR6301", # no-self-use
+  "S106",    # hardcoded-password-func-arg
+  "SLF001",  # private-member-access
+]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -43,16 +121,31 @@ max-args = 10
 max-public-methods = 40
 
 [tool.pyright]
-include = ["skills/weekly-web-monitor/scripts"]
-exclude = ["build", ".venv", ".agents", ".claude", "tests"]
+exclude = ["build", ".venv", ".agents", ".claude"]
 extraPaths = ["skills/weekly-web-monitor/scripts"]
 venvPath = "."
 venv = ".venv"
-typeCheckingMode = "basic"
+typeCheckingMode = "strict"
+
+[[tool.pyright.executionEnvironments]]
+# The test suite deliberately does white-box testing of internal helpers
+# (e.g. `_main`, `_PinnedHTTPConnection`, `_add_object`) -- the same
+# already-established policy as ruff's SLF001 (private-member-access)
+# relaxation for tests in [tool.ruff.lint.per-file-ignores] above.
+root = "tests"
+extraPaths = [".", "skills/weekly-web-monitor/scripts"]
+reportPrivateUsage = false
+
+[[tool.pyright.executionEnvironments]]
+# Explicit fallback environment for every other file (declaring any
+# executionEnvironments makes pyright require one; without this, files
+# outside `tests` would silently stop inheriting `extraPaths` above).
+root = "."
+extraPaths = ["skills/weekly-web-monitor/scripts"]
 
 [tool.pytest.ini_options]
 addopts = [
-  "--cov",
+  "--cov=skills/weekly-web-monitor/scripts",
   "--cov-branch",
   "--capture=no",
 ]
@@ -64,7 +157,17 @@ python_functions = ["test_*"]
 minversion = "6.0"
 
 [tool.coverage.run]
+source = ["skills/weekly-web-monitor/scripts"]
 omit = ["tests/**"]
 
 [tool.coverage.report]
 show_missing = true
+# Staged floor while the coverage-hardening sweep is in progress (target is
+# 100, matching mt5cli). Ratchet this up commit-by-commit as each file's
+# missing coverage is closed with real tests -- never raise it above the
+# coverage actually measured by the current test run, and never lower it.
+fail_under = 79
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "^\\s+\\.\\.\\.$",
+]

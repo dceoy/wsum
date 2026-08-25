@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 import hashlib
+import operator
 import re
 import unicodedata
-import xml.etree.ElementTree as ET
-from collections.abc import Iterator
+
+# xml.etree is used deliberately here, without an external XML library:
+# DOCTYPE/ENTITY declarations are rejected before parsing (see
+# normalize_feed's pre-parse checks below), which is this module's XXE
+# mitigation in place of e.g. defusedxml.
+import xml.etree.ElementTree as ET  # ruff: ignore[suspicious-xml-etree-import]
+from dataclasses import dataclass
 from html.parser import HTMLParser
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urljoin, urlsplit
 
 from errors import MonitorError
 from models import validate_http_url
 from network_policy import canonicalize_fragment_identity, canonicalize_url
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 MAX_STABLE_ID_CHARS = 1_000
 
@@ -27,11 +36,11 @@ MAX_CONTENT_LINK_ANNOTATIONS = 5_000
 MAX_CONTENT_LINK_URL_CHARS = 300
 
 
+@dataclass(slots=True)
 class _ContentLinkBudget:
-    __slots__ = ("remaining",)
+    """A shared, mutable remaining-link-annotation counter for one feed."""
 
-    def __init__(self, remaining: int) -> None:
-        self.remaining = remaining
+    remaining: int
 
 
 def _local_name(tag: str) -> str:
@@ -51,6 +60,9 @@ def _xml_base_scope(element: ET.Element, parent_base: str) -> str:
     inherited base, so a feed with no xml:base anywhere resolves exactly as
     it did before this attribute was recognized (``link``/the feed's own
     alternate link stays the sole base).
+
+    Returns:
+        The effective base URI at ``element``.
     """
     value = element.attrib.get(_XML_BASE_ATTR, "").strip()
     if not value:
@@ -59,11 +71,15 @@ def _xml_base_scope(element: ET.Element, parent_base: str) -> str:
 
 
 class _TextParser(HTMLParser):
+    """Strip HTML markup down to its visible text content."""
+
     def __init__(self) -> None:
+        """Create a parser with an empty accumulated text buffer."""
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
 
     def handle_data(self, data: str) -> None:
+        """Accumulate one chunk of visible text."""
         self.parts.append(data)
 
 
@@ -109,17 +125,17 @@ def _content_link_destination(
         except ValueError:
             scheme = resolved.partition(":")[0].lower()
         if not base_url and not scheme:
+            msg = "feed_content_relative_link"
             raise MonitorError(
-                "feed_content_relative_link",
+                msg,
                 "feed entry content link has no base URL to resolve against",
             ) from None
         if scheme not in {"http", "https"}:
             return ""
         raise
     if budget.remaining <= 0:
-        raise MonitorError(
-            "feed_too_large", "feed entry has too many link destinations"
-        )
+        msg = "feed_too_large"
+        raise MonitorError(msg, "feed entry has too many link destinations")
     budget.remaining -= 1
     fragment = canonicalize_fragment_identity(urlsplit(resolved).fragment)
     identity = f"{canonical}#{fragment}" if fragment else canonical
@@ -269,7 +285,12 @@ def _all_text_with_links(
 
 
 def _bounded_stable_id(value: str) -> str:
-    """Keep a bounded feed-entry key without losing long-ID identity."""
+    """Keep a bounded feed-entry key without losing long-ID identity.
+
+    Returns:
+        ``value`` unchanged if within the bound, else its prefix plus a
+        SHA-256 digest suffix of the complete value.
+    """
     if len(value) <= MAX_STABLE_ID_CHARS:
         return value
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -300,15 +321,17 @@ def _entry_link(element: ET.Element) -> str:
             # base-URI inheritance that this bounded normalizer does not
             # implement. Reject them explicitly instead of silently omitting
             # a destination whose later changes would then be invisible.
+            msg = "feed_relative_link"
             raise MonitorError(
-                "feed_relative_link",
+                msg,
                 "feed entry link must be an absolute HTTP(S) URL",
             )
         try:
             return validate_http_url(value, "feed entry link")
         except MonitorError as exc:
+            msg = "feed_unsafe_link"
             raise MonitorError(
-                "feed_unsafe_link",
+                msg,
                 "feed entry contains an unsafe link",
             ) from exc
     return ""
@@ -337,23 +360,26 @@ def _external_content_sources(element: ET.Element) -> tuple[str, ...]:
         try:
             parsed = urlsplit(value)
         except ValueError as exc:
+            msg = "feed_unsafe_content_source"
             raise MonitorError(
-                "feed_unsafe_content_source",
+                msg,
                 "feed entry contains an unsafe external content source",
             ) from exc
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             # Atom permits xml:base inheritance, but this bounded normalizer
             # does not implement base-URI inheritance. Reject relative
             # sources instead of silently omitting their identity.
+            msg = "feed_relative_content_source"
             raise MonitorError(
-                "feed_relative_content_source",
+                msg,
                 "Atom content src must be an absolute HTTP(S) URL",
             )
         try:
             canonical, _ = canonicalize_url(value)
         except MonitorError as exc:
+            msg = "feed_unsafe_content_source"
             raise MonitorError(
-                "feed_unsafe_content_source",
+                msg,
                 "feed entry contains an unsafe external content source",
             ) from exc
         # canonicalize_url always strips the fragment, so a content src
@@ -367,45 +393,93 @@ def _external_content_sources(element: ET.Element) -> tuple[str, ...]:
     return tuple(sources)
 
 
-def normalize_feed(
-    xml: bytes,
-    *,
-    base_url: str = "",
-    max_entries: int = 1_000,
-    max_input_bytes: int = 10_000_000,
-    max_elements: int = 20_000,
-) -> tuple[str, dict[str, str]]:
+_PULL_PARSE_CHUNK_BYTES = 65_536
+_ENCODING_SNIFF_BYTES = 512
+
+
+def _validate_feed_input(xml: bytes, max_input_bytes: int) -> None:
+    """Reject an oversized, non-UTF, or DOCTYPE/ENTITY-bearing feed.
+
+    Raises:
+        MonitorError: If ``xml`` fails any of these checks.
+    """
     if len(xml) > max_input_bytes:
-        raise MonitorError("response_too_large", "feed exceeds the input size limit")
-    if b"\x00" in xml[:512]:
-        raise MonitorError(
-            "feed_unsupported_encoding", "UTF-16/32 feeds are not supported"
-        )
+        msg = "response_too_large"
+        raise MonitorError(msg, "feed exceeds the input size limit")
+    if b"\x00" in xml[:_ENCODING_SNIFF_BYTES]:
+        msg = "feed_unsupported_encoding"
+        raise MonitorError(msg, "UTF-16/32 feeds are not supported")
     if b"<!DOCTYPE" in xml.upper() or b"<!ENTITY" in xml.upper():
-        raise MonitorError(
-            "feed_unsafe_xml", "DOCTYPE and entity declarations are forbidden"
-        )
+        msg = "feed_unsafe_xml"
+        raise MonitorError(msg, "DOCTYPE and entity declarations are forbidden")
+
+
+def _feed_and_count_elements(
+    parser: ET.XMLPullParser[ET.Element], xml: bytes, max_elements: int
+) -> ET.Element | None:
+    """Feed ``xml`` to ``parser`` in chunks, bounding the element count.
+
+    Returns:
+        The first (root) element seen, or ``None`` if the document is empty.
+
+    Raises:
+        MonitorError: If the element count exceeds ``max_elements``.
+    """
+    root: ET.Element | None = None
+    element_count = 0
+    for offset in range(0, len(xml), _PULL_PARSE_CHUNK_BYTES):
+        parser.feed(xml[offset : offset + _PULL_PARSE_CHUNK_BYTES])
+        events = cast("Iterator[tuple[str, ET.Element]]", parser.read_events())
+        for _, element in events:
+            if root is None:
+                root = element
+            element_count += 1
+            if element_count > max_elements:
+                msg = "feed_element_limit"
+                raise MonitorError(
+                    msg,
+                    "feed XML element count exceeds the limit",
+                )
+    parser.close()
+    return root
+
+
+def _parse_feed_xml(xml: bytes, max_elements: int) -> ET.Element:
+    """Incrementally parse ``xml``, bounding the total element count.
+
+    Returns:
+        The parsed root element.
+
+    Raises:
+        MonitorError: If the element count exceeds ``max_elements``, the
+            XML is malformed, or it has no root element.
+    """
     try:
-        parser = ET.XMLPullParser(events=("start",))
-        root: ET.Element | None = None
-        element_count = 0
-        for offset in range(0, len(xml), 65_536):
-            parser.feed(xml[offset : offset + 65_536])
-            events = cast(Iterator[tuple[str, ET.Element]], parser.read_events())
-            for _, element in events:
-                if root is None:
-                    root = element
-                element_count += 1
-                if element_count > max_elements:
-                    raise MonitorError(
-                        "feed_element_limit",
-                        "feed XML element count exceeds the limit",
-                    )
-        parser.close()
+        root = _feed_and_count_elements(
+            ET.XMLPullParser(events=("start",)), xml, max_elements
+        )
     except ET.ParseError as exc:
-        raise MonitorError("feed_malformed", "feed XML is malformed") from exc
+        msg = "feed_malformed"
+        raise MonitorError(msg, "feed XML is malformed") from exc
     if root is None:
-        raise MonitorError("feed_malformed", "feed XML has no root element")
+        msg = "feed_malformed"
+        raise MonitorError(msg, "feed XML has no root element")
+    return root
+
+
+def _detect_feed_entries(
+    root: ET.Element, max_entries: int
+) -> tuple[list[ET.Element], str, list[ET.Element], str]:
+    """Detect the feed kind and extract its entries.
+
+    Returns:
+        A (entries, feed_kind, RSS channels (empty for Atom), feed-level
+        fallback link) tuple.
+
+    Raises:
+        MonitorError: If the root element is neither RSS/RDF nor Atom, or
+            the entry count exceeds ``max_entries`` or is zero.
+    """
     root_name = _local_name(root.tag)
     channels: list[ET.Element] = []
     if root_name in {"rss", "rdf"}:
@@ -420,68 +494,140 @@ def normalize_feed(
         feed_kind = "atom"
         feed_link = _feed_base_link(root)
     else:
-        raise MonitorError("feed_unsupported", "XML document is not RSS or Atom")
+        msg = "feed_unsupported"
+        raise MonitorError(msg, "XML document is not RSS or Atom")
     if len(entries) > max_entries:
-        raise MonitorError("feed_entry_limit", "feed entry count exceeds the limit")
+        msg = "feed_entry_limit"
+        raise MonitorError(msg, "feed entry count exceeds the limit")
     if not entries:
-        raise MonitorError("empty_extraction", "feed contains no entries")
+        msg = "empty_extraction"
+        raise MonitorError(msg, "feed contains no entries")
+    return entries, feed_kind, channels, feed_link
+
+
+def _compute_entry_base(
+    entry: ET.Element,
+    root: ET.Element,
+    root_name: str,
+    channels: list[ET.Element],
+    link: str,
+    feed_link: str,
+    base_url: str,
+) -> str:
+    """Resolve the xml:base-aware content-link base URI for one entry.
+
+    xml:base on the feed root, channel/feed container, or entry overrides
+    the base URI used to resolve relative content links, independent of
+    <link> (see :func:`_xml_base_scope`). The document's own fetched URL
+    is the base a present root-level xml:base resolves against; with no
+    root-level xml:base, ``base_url`` must not replace ``link or
+    feed_link`` as the inherited base, or a feed with no xml:base
+    anywhere would resolve every entry against the unchanging document
+    URL and silently miss a destination change confined to the
+    channel/feed <link>. ``base_url`` is still the right fallback when
+    there is no link at all to prefer over it.
+
+    Returns:
+        The effective base URI for resolving this entry's content links.
+    """
+    root_xml_base = root.attrib.get(_XML_BASE_ATTR, "").strip()
+    entry_base = _xml_base_scope(
+        root, base_url if root_xml_base else (link or feed_link or base_url)
+    )
+    if root_name in {"rss", "rdf"} and channels:
+        entry_base = _xml_base_scope(channels[0], entry_base)
+    return _xml_base_scope(entry, entry_base)
+
+
+def _normalize_one_entry(
+    entry: ET.Element,
+    *,
+    root: ET.Element,
+    root_name: str,
+    channels: list[ET.Element],
+    feed_link: str,
+    feed_kind: str,
+    base_url: str,
+    link_budget: _ContentLinkBudget,
+) -> tuple[str, tuple[str, ...]]:
+    """Normalize one feed entry into its stable ID and ordered text fields.
+
+    Returns:
+        A (stable_id, normalized fields) tuple.
+    """
+    title = _first_text(entry, "title")
+    link = _entry_link(entry)
+    stable_id = _first_text(entry, "guid", "id") or link
+    published = _first_text(entry, "pubdate", "published")
+    updated = _first_text(entry, "updated")
+    entry_base = _compute_entry_base(
+        entry, root, root_name, channels, link, feed_link, base_url
+    )
+    content = _all_text_with_links(
+        entry,
+        entry_base,
+        link_budget,
+        "description",
+        "summary",
+        "content",
+        "encoded",
+    )
+    content_sources = _external_content_sources(entry) if feed_kind == "atom" else ()
+    if not stable_id:
+        source_identity = "\n".join(content_sources)
+        stable_id = hashlib.sha256(
+            f"{title}\n{published}\n{content}\n{source_identity}".encode()
+        ).hexdigest()
+    stable_id = _bounded_stable_id(stable_id)
+    fields = (
+        f"ENTRY {stable_id}",
+        f"TITLE {title}" if title else "",
+        f"LINK {link}" if link else "",
+        f"PUBLISHED {published}" if published else "",
+        f"UPDATED {updated}" if updated else "",
+        f"CONTENT {content}" if content else "",
+        *(f"CONTENT_SRC {source}" for source in content_sources),
+    )
+    return stable_id, tuple(field for field in fields if field)
+
+
+def normalize_feed(
+    xml: bytes,
+    *,
+    base_url: str = "",
+    max_entries: int = 1_000,
+    max_input_bytes: int = 10_000_000,
+    max_elements: int = 20_000,
+) -> tuple[str, dict[str, str]]:
+    """Deterministically normalize an RSS/Atom feed into bounded, sorted text.
+
+    Denies (raising ``MonitorError`` from the called validation/parsing
+    helpers) if the input is invalid, oversized, unsafe, or not a
+    recognized RSS/Atom feed with at least one entry.
+
+    Returns:
+        A (normalized text, metadata) tuple.
+    """
+    _validate_feed_input(xml, max_input_bytes)
+    root = _parse_feed_xml(xml, max_elements)
+    root_name = _local_name(root.tag)
+    entries, feed_kind, channels, feed_link = _detect_feed_entries(root, max_entries)
 
     link_budget = _ContentLinkBudget(MAX_CONTENT_LINK_ANNOTATIONS)
-    normalized_entries: list[tuple[str, tuple[str, ...]]] = []
-    for entry in entries:
-        title = _first_text(entry, "title")
-        link = _entry_link(entry)
-        stable_id = _first_text(entry, "guid", "id") or link
-        published = _first_text(entry, "pubdate", "published")
-        updated = _first_text(entry, "updated")
-        # xml:base on the feed root, channel/feed container, or entry
-        # overrides the base URI used to resolve relative content links,
-        # independent of <link> (see _xml_base_scope). The document's own
-        # fetched URL is the base a present root-level xml:base resolves
-        # against; with no root-level xml:base, `base_url` must not replace
-        # `link or feed_link` as the inherited base, or a feed with no
-        # xml:base anywhere would resolve every entry against the
-        # unchanging document URL and silently miss a destination change
-        # confined to the channel/feed <link>. `base_url` is still the
-        # right fallback when there is no link at all to prefer over it.
-        root_xml_base = root.attrib.get(_XML_BASE_ATTR, "").strip()
-        entry_base = _xml_base_scope(
-            root, base_url if root_xml_base else (link or feed_link or base_url)
-        )
-        if root_name in {"rss", "rdf"} and channels:
-            entry_base = _xml_base_scope(channels[0], entry_base)
-        entry_base = _xml_base_scope(entry, entry_base)
-        content = _all_text_with_links(
+    normalized_entries = [
+        _normalize_one_entry(
             entry,
-            entry_base,
-            link_budget,
-            "description",
-            "summary",
-            "content",
-            "encoded",
+            root=root,
+            root_name=root_name,
+            channels=channels,
+            feed_link=feed_link,
+            feed_kind=feed_kind,
+            base_url=base_url,
+            link_budget=link_budget,
         )
-        content_sources = (
-            _external_content_sources(entry) if feed_kind == "atom" else ()
-        )
-        if not stable_id:
-            source_identity = "\n".join(content_sources)
-            stable_id = hashlib.sha256(
-                f"{title}\n{published}\n{content}\n{source_identity}".encode()
-            ).hexdigest()
-        stable_id = _bounded_stable_id(stable_id)
-        fields = (
-            f"ENTRY {stable_id}",
-            f"TITLE {title}" if title else "",
-            f"LINK {link}" if link else "",
-            f"PUBLISHED {published}" if published else "",
-            f"UPDATED {updated}" if updated else "",
-            f"CONTENT {content}" if content else "",
-            *(f"CONTENT_SRC {source}" for source in content_sources),
-        )
-        normalized_entries.append(
-            (stable_id, tuple(field for field in fields if field))
-        )
-    normalized_entries.sort(key=lambda item: item[0])
+        for entry in entries
+    ]
+    normalized_entries.sort(key=operator.itemgetter(0))
     text = "\n".join(
         line for _, fields in normalized_entries for line in (*fields, "END ENTRY")
     )

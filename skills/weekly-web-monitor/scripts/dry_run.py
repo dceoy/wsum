@@ -20,8 +20,17 @@ from memory_adapters import (
 from models import Target
 from routine import RoutineConfig, WeeklyMonitorRoutine
 
+_EXPECTED_ARGC = 2
+
 
 def run_fixture(value: dict[str, Any]) -> dict[str, Any]:
+    """Replay one or more monitor cycles against an in-memory fixture.
+
+    Returns:
+        A summary containing each cycle's run result, the Slack messages that
+        would have been sent, the resulting state target IDs, and the audit
+        record count.
+    """
     targets = [Target.from_mapping(item) for item in value["targets"]]
     store = MemoryOperationalStore(targets)
     drive_connector = MemoryDriveConnector()
@@ -63,8 +72,18 @@ def run_fixture(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: dry_run.py FIXTURE_JSON", file=sys.stderr)
+    """Run the CLI entry point: load the fixture named in ``argv[1]`` and run it.
+
+    On success, writes the JSON-encoded :func:`run_fixture` result to
+    stdout. On a handled failure, writes ``{"error": ...}`` to stdout
+    instead. Incorrect usage writes a usage message to stderr.
+
+    Returns:
+        0 on success, 1 if the fixture is invalid or the run fails, 2 for
+        incorrect CLI usage.
+    """
+    if len(argv) != _EXPECTED_ARGC:
+        sys.stderr.write("usage: dry_run.py FIXTURE_JSON\n")
         return 2
     try:
         value = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
@@ -79,14 +98,11 @@ def main(argv: list[str]) -> int:
                 "retryable": False,
             }
         )
-        print(
-            json.dumps(
-                {"error": error},
-                ensure_ascii=False,
-            )
-        )
+        json.dump({"error": error}, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
         return 1
-    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    json.dump(result, sys.stdout, ensure_ascii=False, sort_keys=True)
+    sys.stdout.write("\n")
     return 0
 
 
