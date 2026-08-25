@@ -493,8 +493,7 @@ def _text_content(node: Node, excluded: set[Node], ctx: _LinkContext) -> str:
             elif (
                 is_live
                 and child.tag == "input"
-                and child.attrs.get("type", "").strip().lower()
-                in _SUBMIT_INPUT_TYPES
+                and child.attrs.get("type", "").strip().lower() in _SUBMIT_INPUT_TYPES
             ):
                 # The visible value/alt label is real user-facing content
                 # even when the control has no formaction of its own (it

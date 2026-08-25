@@ -332,8 +332,7 @@ class WeeklyMonitorRoutine:
                 # run_id. Raise rather than let a caller retry the pair and
                 # silently no-op the append while replace_state runs again.
                 raise _PartialCommitError(
-                    f"State commit failed after Run {run.run_id} was "
-                    "already persisted"
+                    f"State commit failed after Run {run.run_id} was already persisted"
                 ) from exc
         return run
 
@@ -588,8 +587,7 @@ class WeeklyMonitorRoutine:
                         etag=fetched.etag or previous_state.etag,
                         last_modified=fetched.last_modified
                         or previous_state.last_modified,
-                        validated_url=fetched.final_url
-                        or previous_state.validated_url,
+                        validated_url=fetched.final_url or previous_state.validated_url,
                         consecutive_failures=0,
                     )
                     run = self._run_record(

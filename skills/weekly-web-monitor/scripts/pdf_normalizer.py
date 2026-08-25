@@ -7,7 +7,9 @@ import hashlib
 import re
 import unicodedata
 import zlib
+from collections.abc import Callable
 from io import BytesIO
+from typing import Any
 from urllib.parse import urlsplit
 
 from errors import MonitorError
@@ -530,9 +532,7 @@ def _validate_streams(pdf: bytes, limit: int) -> bool:
         # cannot be trusted, and scanning ahead for the next literal
         # "endstream" bytes instead would reintroduce the exact
         # false-boundary risk this /Length-based parse exists to avoid.
-        end_match = re.match(
-            rb"\r?\n?endstream\b", pdf[data_end : data_end + 16]
-        )
+        end_match = re.match(rb"\r?\n?endstream\b", pdf[data_end : data_end + 16])
         if end_match is None:
             raise MonitorError(
                 "pdf_malformed",
@@ -655,7 +655,7 @@ def _page_link_destinations(page: object, budget: _PdfLinkBudget) -> list[str]:
     return lines
 
 
-def _load_pdf_reader() -> tuple[object, type[Exception]]:
+def _load_pdf_reader() -> tuple[Callable[..., Any], type[Exception]]:
     """Load the optional parser only when a PDF actually needs normalization."""
     try:
         from pypdf import PdfReader

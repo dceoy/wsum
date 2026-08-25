@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 from errors import MonitorError
@@ -185,7 +185,7 @@ def _do_handshake_with_deadline(sock: ssl.SSLSocket, deadline: float) -> None:
 def _connect_pinned_socket(
     address: str,
     port: int,
-    timeout: float,
+    timeout: float | None,
     source_address: tuple[str, int] | None,
     deadline: float,
 ) -> socket.socket:
@@ -223,10 +223,11 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
         self._address = address
         self._allowed_addresses = allowed_addresses
         self._deadline = deadline
+        self._source_address: tuple[str, int] | None = None
 
     def connect(self) -> None:
         self.sock = _connect_pinned_socket(
-            self._address, self.port, self.timeout, self.source_address, self._deadline
+            self._address, self.port, self.timeout, self._source_address, self._deadline
         )
         validate_peer_address(self.sock.getpeername()[0], self._allowed_addresses)
 
@@ -246,10 +247,11 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self._address = address
         self._allowed_addresses = allowed_addresses
         self._deadline = deadline
+        self._source_address: tuple[str, int] | None = None
 
     def connect(self) -> None:
         raw_socket = _connect_pinned_socket(
-            self._address, self.port, self.timeout, self.source_address, self._deadline
+            self._address, self.port, self.timeout, self._source_address, self._deadline
         )
         wrapped: ssl.SSLSocket | None = None
         try:
@@ -263,10 +265,13 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
             # and driven separately under the same deadline, since it bypasses
             # this socket's recv overrides entirely (see
             # ``_do_handshake_with_deadline``).
-            self._context.sslsocket_class = _DeadlineSSLSocket
-            wrapped = self._context.wrap_socket(
+            ssl_context = cast(ssl.SSLContext, self._context)  # pyright: ignore[reportAttributeAccessIssue]
+            ssl_context.sslsocket_class = _DeadlineSSLSocket
+            wrapped = ssl_context.wrap_socket(
                 raw_socket, server_hostname=self.host, do_handshake_on_connect=False
             )
+            if wrapped is None:
+                raise OSError("TLS context returned no socket")
             wrapped._deadline = self._deadline  # type: ignore[attr-defined]
             _do_handshake_with_deadline(wrapped, self._deadline)
             self.sock = wrapped
@@ -543,6 +548,8 @@ def fetch_url(
                 # open for the response body to use; only the connection's
                 # reference to it is cleared.
                 sock = connection.sock
+                if sock is None:
+                    raise OSError("HTTP connection returned no socket")
                 sock.settimeout(min(active_config.timeout_seconds, remaining))
                 response = connection.getresponse()
                 break

@@ -421,18 +421,37 @@ class ReplayAndAuditTests(unittest.TestCase):
             self.skipTest("node is not available to execute Code.gs")
         gas = (support.SCRIPTS / "gas" / "Code.gs").read_text(encoding="utf-8")
         header = [
-            "event_id", "target_id", "payload", "status", "attempt_count",
-            "created_at", "updated_at", "next_attempt_at", "last_error",
+            "event_id",
+            "target_id",
+            "payload",
+            "status",
+            "attempt_count",
+            "created_at",
+            "updated_at",
+            "next_attempt_at",
+            "last_error",
         ]
         allowed_row = [
-            "event-allowed", "target-1",
+            "event-allowed",
+            "target-1",
             json.dumps({"message": "hello-a", "notification_group": "team-a"}),
-            "pending", 0, "", "", "", "",
+            "pending",
+            0,
+            "",
+            "",
+            "",
+            "",
         ]
         mismatched_row = [
-            "event-mismatched", "target-2",
+            "event-mismatched",
+            "target-2",
             json.dumps({"message": "hello-b", "notification_group": "team-b"}),
-            "pending", 0, "", "", "", "",
+            "pending",
+            0,
+            "",
+            "",
+            "",
+            "",
         ]
         harness = f"""
 'use strict';
@@ -481,9 +500,7 @@ console.log(JSON.stringify({{fetchCalls, byEventId}}));
         self.assertEqual(1, len(outcome["fetchCalls"]))
         self.assertEqual("hello-a", outcome["fetchCalls"][0]["body"]["text"])
         self.assertEqual("sent", outcome["byEventId"]["event-allowed"]["status"])
-        self.assertEqual(
-            "poison", outcome["byEventId"]["event-mismatched"]["status"]
-        )
+        self.assertEqual("poison", outcome["byEventId"]["event-mismatched"]["status"])
         self.assertEqual(
             "notification_group_mismatch",
             outcome["byEventId"]["event-mismatched"]["last_error"],
@@ -505,18 +522,37 @@ console.log(JSON.stringify({{fetchCalls, byEventId}}));
             self.skipTest("node is not available to execute Code.gs")
         gas = (support.SCRIPTS / "gas" / "Code.gs").read_text(encoding="utf-8")
         header = [
-            "event_id", "target_id", "payload", "status", "attempt_count",
-            "created_at", "updated_at", "next_attempt_at", "last_error",
+            "event_id",
+            "target_id",
+            "payload",
+            "status",
+            "attempt_count",
+            "created_at",
+            "updated_at",
+            "next_attempt_at",
+            "last_error",
         ]
         sending_row = [
-            "event-dup", "target-1",
+            "event-dup",
+            "target-1",
             json.dumps({"message": "hello", "notification_group": "team-a"}),
-            "sending", 1, "", "", "", "",
+            "sending",
+            1,
+            "",
+            "",
+            "",
+            "",
         ]
         duplicate_pending_row = [
-            "event-dup", "target-1",
+            "event-dup",
+            "target-1",
             json.dumps({"message": "hello", "notification_group": "team-a"}),
-            "pending", 0, "", "", "", "",
+            "pending",
+            0,
+            "",
+            "",
+            "",
+            "",
         ]
         rows_json = json.dumps([header, sending_row, duplicate_pending_row])
         harness = f"""

@@ -38,10 +38,11 @@ tree if it runs past the configured deadline).
 
 from __future__ import annotations
 
+import importlib
 import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from errors import MonitorError
 from fetch import FetchResult
@@ -124,9 +125,10 @@ def fetch_rendered(
         url, allowed_hosts=active.allowed_hosts, resolver=resolver
     )
     try:
-        from playwright.sync_api import Error as PlaywrightError
-        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-        from playwright.sync_api import sync_playwright
+        playwright_sync_api = cast(Any, importlib.import_module("playwright.sync_api"))
+        PlaywrightError = playwright_sync_api.Error
+        PlaywrightTimeoutError = playwright_sync_api.TimeoutError
+        sync_playwright = playwright_sync_api.sync_playwright
     except ImportError as exc:
         raise MonitorError(
             "browser_runtime_unavailable",
@@ -204,12 +206,18 @@ def fetch_rendered(
                         "browser runtime does not expose the response peer",
                     )
                 server_address = server_address_reader()
-                if not server_address or not server_address.get("ipAddress"):
+                if not isinstance(server_address, dict):
                     raise MonitorError(
                         "browser_peer_unavailable",
                         "browser response peer is unavailable",
                     )
-                guard.validate_response_peer(response.url, server_address["ipAddress"])
+                ip_address = server_address.get("ipAddress")
+                if not isinstance(ip_address, str) or not ip_address:
+                    raise MonitorError(
+                        "browser_peer_unavailable",
+                        "browser response peer is unavailable",
+                    )
+                guard.validate_response_peer(response.url, ip_address)
             except (MonitorError, TypeError, ValueError) as exc:
                 blocked_error = (
                     exc

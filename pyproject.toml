@@ -2,14 +2,69 @@
 name = "wsum"
 version = "0.1.0"
 description = "Deterministic connector-backed weekly website update monitoring"
-requires-python = ">=3.11"
-license = {text = "MIT"}
-dependencies = ["pypdf>=6,<7"]
+authors = [{name = "dceoy", email = "dceoy@users.noreply.github.com"}]
+maintainers = [{name = "dceoy", email = "dceoy@users.noreply.github.com"}]
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">= 3.11, < 3.15"
+dependencies = ["pypdf >= 6.15, < 7"]
+
+[project.urls]
+Repository = "https://github.com/dceoy/wsum.git"
+
+[tool.uv]
+exclude-newer = "7 days"
+
+[dependency-groups]
+dev = [
+  "ruff >= 0.15.18",
+  "pyright >= 1.1.410",
+  "pytest >= 9.1.1",
+  "pytest-cov >= 7.1.0",
+]
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+exclude = ["build", ".venv", ".agents", ".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "S", "UP"]
-ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"skills/weekly-web-monitor/scripts/html_normalizer.py" = ["S101"]
+"tests/**/*.py" = ["E501", "S101", "S603", "UP037"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.pylint]
+max-args = 10
+max-public-methods = 40
+
+[tool.pyright]
+include = ["skills/weekly-web-monitor/scripts"]
+exclude = ["build", ".venv", ".agents", ".claude", "tests"]
+extraPaths = ["skills/weekly-web-monitor/scripts"]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+addopts = [
+  "--cov",
+  "--cov-branch",
+  "--capture=no",
+]
+pythonpath = ["."]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+minversion = "6.0"
+
+[tool.coverage.run]
+omit = ["tests/**"]
+
+[tool.coverage.report]
+show_missing = true

@@ -6,7 +6,9 @@ import hashlib
 import re
 import unicodedata
 import xml.etree.ElementTree as ET
+from collections.abc import Iterator
 from html.parser import HTMLParser
+from typing import cast
 from urllib.parse import urljoin, urlsplit
 
 from errors import MonitorError
@@ -149,9 +151,7 @@ class _ContentTextParser(HTMLParser):
             )
             self._anchor_hrefs.append(href)
 
-    def handle_startendtag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
         if tag.lower() == "a":
             self._close_anchor()
@@ -257,9 +257,7 @@ def _all_text_with_links(
         # all of them.
         child_base = _xml_base_scope(child, base_url)
         value = "".join(child.itertext())
-        cleaned = (
-            _clean_with_links(value, child_base, budget) if value.strip() else ""
-        )
+        cleaned = _clean_with_links(value, child_base, budget) if value.strip() else ""
         structural = [
             f"[{destination}]"
             for destination in _element_link_destinations(child, child_base, budget)
@@ -393,7 +391,8 @@ def normalize_feed(
         element_count = 0
         for offset in range(0, len(xml), 65_536):
             parser.feed(xml[offset : offset + 65_536])
-            for _, element in parser.read_events():
+            events = cast(Iterator[tuple[str, ET.Element]], parser.read_events())
+            for _, element in events:
                 if root is None:
                     root = element
                 element_count += 1

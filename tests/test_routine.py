@@ -667,9 +667,7 @@ class RoutineTests(unittest.TestCase):
         )
         result = changed_routine.run(run_id="signal-2")
         self.assertEqual(1, result.metrics.minor)
-        self.assertEqual(
-            "non_material", self.store.runs["signal-2:one"].result
-        )
+        self.assertEqual("non_material", self.store.runs["signal-2:one"].result)
         self.assertNotEqual(baseline_hash, self.store.states["one"].normalized_hash)
         self.assertEqual(0, self.store.states["one"].consecutive_failures)
 
