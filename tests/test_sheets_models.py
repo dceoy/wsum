@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 import pytest
-import support  # ruff: ignore[unused-import]
+from tests import support  # noqa: F401
 from errors import MonitorError
 from models import Attempt, NotificationRecord, RunRecord, State, Target
 from sheets import (

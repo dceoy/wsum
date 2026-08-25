@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-import support  # ruff: ignore[unused-import]
+from tests import support  # noqa: F401
 from diff import DiffConfig
 from drive import SnapshotStore
 from errors import MonitorError

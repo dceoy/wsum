@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import fetch
 import pytest
-import support
+from tests import support
 from errors import MonitorError
 from fetch import FetchConfig, fetch_url
 from network_policy import (

@@ -7,7 +7,7 @@ import subprocess
 import unittest
 
 import pytest
-import support
+from tests import support
 from audit import configuration_digest, make_audit_record
 from diff import compare_content
 from drive import SnapshotStore

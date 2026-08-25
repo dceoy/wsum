@@ -10,7 +10,7 @@ from io import BytesIO
 from unittest.mock import patch
 
 import pytest
-import support  # ruff: ignore[unused-import]
+from tests import support  # noqa: F401
 from diff import DiffConfig, compare_content
 from errors import MonitorError
 from feed_normalizer import normalize_feed

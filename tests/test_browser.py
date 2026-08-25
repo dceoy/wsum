@@ -6,7 +6,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-import support
+from tests import support
 from errors import MonitorError
 from fetch_browser import BrowserFetchConfig, fetch_rendered
 from models import State
