@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 from io import StringIO
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import fetch
@@ -37,23 +38,44 @@ class FakeResponse:
         body: bytes = b"<html><body>ok</body></html>",
         headers: dict[str, str] | None = None,
     ) -> None:
+        """Build a fake response with the given status, body, and headers."""
         self.status = status
         self._body = body
         self._position = 0
         self._headers = {key.lower(): value for key, value in (headers or {}).items()}
 
     def getheader(self, name: str, default: str | None = None) -> str:
+        """Return the header value, or `default` if it is not present.
+
+        Returns:
+            The header value, or `default`.
+        """
         return self._headers.get(name.lower(), default or "")
 
     def read(self, amount: int) -> bytes:
+        """Read and return up to `amount` bytes from the body.
+
+        Returns:
+            The bytes read.
+        """
         chunk = self._body[self._position : self._position + amount]
         self._position += len(chunk)
         return chunk
 
     def read1(self, amount: int) -> bytes:
+        """Read and return up to `amount` bytes, like `read`.
+
+        Returns:
+            The bytes read.
+        """
         return self.read(amount)
 
     def isclosed(self) -> bool:
+        """Return whether the whole body has been read.
+
+        Returns:
+            True once every byte of the body has been consumed.
+        """
         return self._position >= len(self._body)
 
 
@@ -61,6 +83,7 @@ class FakeSocket:
     """A fake socket used to exercise connection-level behavior."""
 
     def settimeout(self, timeout: float) -> None:
+        """Record the requested socket timeout."""
         self.timeout = timeout
 
 
@@ -68,12 +91,15 @@ class FakeClock:
     """A fake monotonic clock for deterministic timeout tests."""
 
     def __init__(self) -> None:
+        """Start the clock at zero."""
         self.now = 0.0
 
     def monotonic(self) -> float:
+        """Return the current fake monotonic time."""
         return self.now
 
     def advance(self, seconds: float) -> None:
+        """Advance the fake clock by `seconds`."""
         self.now += seconds
 
 
@@ -83,20 +109,25 @@ class TrickleResponse(FakeResponse):
     def __init__(
         self, clock: FakeClock, seconds_per_byte: float, total_bytes: int
     ) -> None:
+        """Build a response that advances `clock` by `seconds_per_byte` per read."""
         super().__init__(200, b"x" * total_bytes, {"Content-Type": "text/html"})
         self._clock = clock
         self._seconds_per_byte = seconds_per_byte
         self.read_count = 0
 
     def read(self, amount: int) -> bytes:
+        """Advance the clock, then read at most one byte.
+
+        Returns:
+            At most one byte of the body.
+        """
         self._clock.advance(self._seconds_per_byte)
         self.read_count += 1
         return super().read(min(amount, 1))
 
 
 class _RealSlowTrickleServer:
-    """A real local TCP server that trickles an HTTP response body one byte
-    at a time.
+    """A real local TCP server that trickles an HTTP response body, one byte at a time.
 
     A hand-rolled fake ``read()`` cannot reproduce ``http.client``'s own
     buffered-socket read loop, which can perform many real recvs inside a
@@ -141,8 +172,7 @@ class _RealSlowTrickleServer:
 
 
 class _RealTruncatedServer:
-    """A real local TCP server that declares a ``Content-Length`` but closes
-    the connection after sending only part of the body.
+    """A local TCP server that declares a Content-Length but sends only part.
 
     ``HTTPResponse.read1()`` returns an empty byte string on premature EOF
     instead of raising ``IncompleteRead``, so only a real socket proves a
@@ -224,10 +254,10 @@ class _RealResetServer:
 
 
 class _RealSlowTrickleChunkedServer:
-    """A real local TCP server that sends valid headers immediately, then
-    trickles a padded chunk-size line (chunk-extension bytes before the
-    terminating CRLF) one byte at a time, without ever sending chunk data.
+    """Sends headers, then trickles a padded chunk-size line, never chunk data.
 
+    Trickles a padded chunk-size line (chunk-extension bytes before the
+    terminating CRLF) one byte at a time, without ever sending chunk data.
     ``http.client``'s chunked decoder parses the chunk-size line via the
     buffered file's own ``readline()``, independently of ``read1()``'s
     single-recv guarantee used for chunk data. A hand-rolled fake response
@@ -271,11 +301,10 @@ class _RealSlowTrickleChunkedServer:
 
 
 class _RealStalledChunkedServer:
-    """A real local TCP server that sends valid chunked headers immediately,
-    then goes completely silent (holds the connection open with no further
-    bytes) for the given duration.
+    """Sends valid chunked headers, then goes silent for the given duration.
 
-    Unlike a trickle, a single recv here can block for the peer's entire
+    Holds the connection open with no further bytes. Unlike a trickle, a
+    single recv here can block for the peer's entire
     silence. That only stays bounded by the fetch's total deadline if the
     per-recv timeout itself is clamped to whatever remains of the deadline;
     a per-op timeout set once before the read (and left at its original,
@@ -316,9 +345,7 @@ class _RealStalledChunkedServer:
 
 
 class _RealStalledTLSHandshakeServer:
-    """A real local TCP server that accepts a connection, sends the start of
-    a TLS handshake record, then goes completely silent for the given
-    duration.
+    """Sends the start of a TLS handshake, then goes silent for the given duration.
 
     ``ssl.SSLSocket.do_handshake()`` reads the raw fd directly through
     OpenSSL, independent of the ``recv``/``recv_into`` overrides that clamp
@@ -361,20 +388,28 @@ class FakeConnection:
     """A fake HTTP connection used to exercise fetch_url's transport layer."""
 
     def __init__(self, response: FakeResponse) -> None:
+        """Build a fake connection that will return `response`."""
         self.response = response
         self.closed = False
         self.request_headers: dict[str, str] = {}
         self.sock = FakeSocket()
 
     def request(self, method: str, path: str, headers: dict[str, str]) -> None:
+        """Record the request method, path, and headers."""
         self.method = method
         self.path = path
         self.request_headers = headers
 
     def getresponse(self) -> FakeResponse:
+        """Return the configured fake response.
+
+        Returns:
+            The configured response.
+        """
         return self.response
 
     def close(self) -> None:
+        """Mark the connection as closed."""
         self.closed = True
 
 
@@ -401,10 +436,10 @@ class NetworkPolicyTests(unittest.TestCase):
             ]
         )
 
-        def resolver(*_: object, **__: object) -> list[tuple]:
+        def resolver(*_: object, **__: object) -> list[tuple[Any, ...]]:
             return next(answers)
 
-        with pytest.raises(MonitorError, match="non-public|changed"):
+        with pytest.raises(MonitorError, match=r"non-public|changed"):
             resolve_public_url("https://example.com", resolver=resolver)
 
     def test_detects_separator_and_prefix_variants_of_credential_params(
@@ -475,9 +510,11 @@ class NetworkPolicyTests(unittest.TestCase):
         # detector. "+" is the same encoding for a query string.
         """Test that canonicalize url rejects percent and plus encoded credential names."""
         for query in ("api%20key=secret", "api+key=secret", "x.api.key=secret"):
-            with self.subTest(query=query):
-                with pytest.raises(MonitorError, match="credential-like"):
-                    canonicalize_url(f"https://example.com/?{query}")
+            with (
+                self.subTest(query=query),
+                pytest.raises(MonitorError, match="credential-like"),
+            ):
+                canonicalize_url(f"https://example.com/?{query}")
 
     def test_fragment_identity_rejects_a_fragment_that_is_itself_a_nested_url(
         self,
@@ -869,17 +906,17 @@ class FetchTests(unittest.TestCase):
         with (
             patch.object(fetch, "monotonic", clock.monotonic),
             patch.object(fetch, "_open_connection", return_value=connection),
+            pytest.raises(MonitorError) as raised,
         ):
-            with pytest.raises(MonitorError) as raised:
-                fetch_url(
-                    "https://example.com",
-                    resolver=support.public_resolver,
-                    config=FetchConfig(
-                        timeout_seconds=15.0,
-                        max_total_seconds=60.0,
-                        max_response_bytes=10_000_000,
-                    ),
-                )
+            fetch_url(
+                "https://example.com",
+                resolver=support.public_resolver,
+                config=FetchConfig(
+                    timeout_seconds=15.0,
+                    max_total_seconds=60.0,
+                    max_response_bytes=10_000_000,
+                ),
+            )
         assert raised.value.code == "fetch_timeout"
         assert raised.value.retryable
         # It must have bailed out via the deadline, not by reading everything:
@@ -921,13 +958,15 @@ class FetchTests(unittest.TestCase):
             "127.0.0.1", server.port, timeout=1.0
         )
         self.addCleanup(real_connection.close)
-        with patch.object(fetch, "_open_connection", return_value=real_connection):
-            with pytest.raises(MonitorError) as raised:
-                fetch_url(
-                    "http://example.com/",
-                    resolver=support.public_resolver,
-                    config=FetchConfig(timeout_seconds=1.0, max_total_seconds=2.0),
-                )
+        with (
+            patch.object(fetch, "_open_connection", return_value=real_connection),
+            pytest.raises(MonitorError) as raised,
+        ):
+            fetch_url(
+                "http://example.com/",
+                resolver=support.public_resolver,
+                config=FetchConfig(timeout_seconds=1.0, max_total_seconds=2.0),
+            )
         assert raised.value.code == "malformed_response"
         assert raised.value.retryable
 
@@ -939,13 +978,15 @@ class FetchTests(unittest.TestCase):
             "127.0.0.1", server.port, timeout=1.0
         )
         self.addCleanup(real_connection.close)
-        with patch.object(fetch, "_open_connection", return_value=real_connection):
-            with pytest.raises(MonitorError) as raised:
-                fetch_url(
-                    "http://example.com/",
-                    resolver=support.public_resolver,
-                    config=FetchConfig(timeout_seconds=1.0, max_total_seconds=2.0),
-                )
+        with (
+            patch.object(fetch, "_open_connection", return_value=real_connection),
+            pytest.raises(MonitorError) as raised,
+        ):
+            fetch_url(
+                "http://example.com/",
+                resolver=support.public_resolver,
+                config=FetchConfig(timeout_seconds=1.0, max_total_seconds=2.0),
+            )
         assert raised.value.code == "fetch_connection_failed"
         assert raised.value.retryable
 
@@ -963,13 +1004,15 @@ class FetchTests(unittest.TestCase):
         )
         self.addCleanup(real_connection.close)
         started = time.perf_counter()
-        with patch.object(fetch, "_open_connection", return_value=real_connection):
-            with pytest.raises(MonitorError) as raised:
-                fetch_url(
-                    "http://example.com/",
-                    resolver=support.public_resolver,
-                    config=FetchConfig(timeout_seconds=1.0, max_total_seconds=1.5),
-                )
+        with (
+            patch.object(fetch, "_open_connection", return_value=real_connection),
+            pytest.raises(MonitorError) as raised,
+        ):
+            fetch_url(
+                "http://example.com/",
+                resolver=support.public_resolver,
+                config=FetchConfig(timeout_seconds=1.0, max_total_seconds=1.5),
+            )
         elapsed = time.perf_counter() - started
         assert raised.value.code == "fetch_timeout"
         assert raised.value.retryable
@@ -1003,7 +1046,7 @@ class FetchTests(unittest.TestCase):
             )
         response = connection.getresponse()
         assert response.status == 200
-        chunks = []
+        chunks: list[bytes] = []
         while True:
             chunk = response.read1(65_536)
             if not chunk:
@@ -1043,13 +1086,17 @@ class FetchTests(unittest.TestCase):
             connection.request(
                 "GET", "/", headers={"Host": "example.com", "Connection": "close"}
             )
-        started = time.perf_counter()
-        with pytest.raises(TimeoutError):
+
+        def drain() -> None:
             response = connection.getresponse()
             while True:
                 chunk = response.read1(65_536)
                 if not chunk:
                     break
+
+        started = time.perf_counter()
+        with pytest.raises(TimeoutError):
+            drain()
         elapsed = time.perf_counter() - started
         # Fully trickling the ~44-byte chunk-size line would take over 2s;
         # bailing out near the 0.5s deadline proves every recv is checked,
@@ -1080,10 +1127,14 @@ class FetchTests(unittest.TestCase):
             connection.request(
                 "GET", "/", headers={"Host": "example.com", "Connection": "close"}
             )
-        started = time.perf_counter()
-        with pytest.raises(TimeoutError):
+
+        def read_one() -> None:
             response = connection.getresponse()
             response.read1(65_536)
+
+        started = time.perf_counter()
+        with pytest.raises(TimeoutError):
+            read_one()
         elapsed = time.perf_counter() - started
         # The server holds the connection open for 5s; bailing out near
         # the 0.5s deadline (not after ~5s) proves the recv itself is
@@ -1189,7 +1240,7 @@ class FetchTests(unittest.TestCase):
 
     def test_slow_initial_dns_resolution_is_bounded_by_the_total_deadline(self) -> None:
         """Test that slow initial dns resolution is bounded by the total deadline."""
-        def slow_resolver(*_: object, **__: object) -> list[tuple]:
+        def slow_resolver(*_: object, **__: object) -> list[tuple[Any, ...]]:
             time.sleep(30)
             return [(2, 1, 6, "", ("93.184.216.34", 443))]
 
@@ -1215,7 +1266,7 @@ class FetchTests(unittest.TestCase):
         connection = FakeConnection(response)
         call_count = {"n": 0}
 
-        def resolver(*_: object, **__: object) -> list[tuple]:
+        def resolver(*_: object, **__: object) -> list[tuple[Any, ...]]:
             call_count["n"] += 1
             # The first two calls are the initial resolution (with its DNS
             # rebinding stability check); only the redirect's resolution
@@ -1225,13 +1276,15 @@ class FetchTests(unittest.TestCase):
             return [(2, 1, 6, "", ("93.184.216.34", 443))]
 
         started = time.perf_counter()
-        with patch.object(fetch, "_open_connection", return_value=connection):
-            with pytest.raises(MonitorError) as raised:
-                fetch_url(
-                    "https://example.com",
-                    resolver=resolver,
-                    config=FetchConfig(timeout_seconds=0.5, max_total_seconds=1.0),
-                )
+        with (
+            patch.object(fetch, "_open_connection", return_value=connection),
+            pytest.raises(MonitorError) as raised,
+        ):
+            fetch_url(
+                "https://example.com",
+                resolver=resolver,
+                config=FetchConfig(timeout_seconds=0.5, max_total_seconds=1.0),
+            )
         elapsed = time.perf_counter() - started
         assert raised.value.code == "dns_resolution_failed"
         assert raised.value.retryable
@@ -1242,7 +1295,7 @@ class FetchTests(unittest.TestCase):
         release = threading.Event()
         pool = fetch._ResolverPool(worker_count=2)
 
-        def stuck_resolver(*_: object, **__: object) -> list[tuple]:
+        def stuck_resolver(*_: object, **__: object) -> list[tuple[Any, ...]]:
             release.wait()
             return [(2, 1, 6, "", ("93.184.216.34", 443))]
 
