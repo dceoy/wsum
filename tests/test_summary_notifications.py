@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from diff import compare_content
@@ -13,14 +14,22 @@ from memory_adapters import (
     MemorySlackConnector,
 )
 from models import NotificationRecord, Target
-from notifications import build_change_event, deliver_grouped
+from notifications import NotificationEvent, build_change_event, deliver_grouped
 from summary import build_summary_request
 from validate_summary import validate_summary
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def target(
     target_id: str = "one", group: str = "default", url: str | None = None
 ) -> Target:
+    """Build a minimal valid Target for tests.
+
+    Returns:
+        The constructed Target.
+    """
     return Target.from_mapping(
         {
             "target_id": target_id,
@@ -36,7 +45,12 @@ def target(
     )
 
 
-def request_and_summary() -> tuple[dict, dict]:
+def request_and_summary() -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build a summary request and its EvidenceSummaryClient response.
+
+    Returns:
+        A tuple of (summary request, summary response).
+    """
     item = target()
     diff = compare_content("Price: $10", "Price: $20")
     request = build_summary_request(item, diff)
@@ -68,7 +82,7 @@ class SummaryValidationTests(unittest.TestCase):
             source_url=request["target"]["source_url"],
         )
         assert validated["material"]
-        non_material = {
+        non_material: dict[str, Any] = {
             **summary,
             "material": False,
             "significance": "minor",
@@ -85,7 +99,7 @@ class SummaryValidationTests(unittest.TestCase):
     def test_missing_overlong_bad_url_and_unsupported_claims_fail(self) -> None:
         """Test that missing overlong bad url and unsupported claims fail."""
         request, summary = request_and_summary()
-        cases: list[tuple[dict, str]] = [
+        cases: list[tuple[dict[str, Any], str]] = [
             (
                 {key: value for key, value in summary.items() if key != "evidence"},
                 "fields",
@@ -184,7 +198,12 @@ class SummaryValidationTests(unittest.TestCase):
 class NotificationTests(unittest.TestCase):
     """Tests for NotificationTests."""
 
-    def _event(self, item: Target, digest: str):
+    def _event(self, item: Target, digest: str) -> NotificationEvent:
+        """Build a validated NotificationEvent for ``item`` at ``digest``.
+
+        Returns:
+            The constructed NotificationEvent.
+        """
         diff = compare_content("Price $10", "Price $20")
         request = build_summary_request(item, diff)
         summary = EvidenceSummaryClient().summarize(request)
@@ -221,7 +240,9 @@ class NotificationTests(unittest.TestCase):
                 super().__init__(items)
                 self.batches: list[list[str]] = []
 
-            def upsert_notifications_atomically(self, notifications) -> None:
+            def upsert_notifications_atomically(
+                self, notifications: Sequence[NotificationRecord]
+            ) -> None:
                 self.batches.append([item.status for item in notifications])
                 super().upsert_notifications_atomically(notifications)
 
@@ -241,7 +262,9 @@ class NotificationTests(unittest.TestCase):
         class FailingSentBatchStore(MemoryOperationalStore):
             """A notification store stub whose 'sent' batch commit always fails."""
 
-            def upsert_notifications_atomically(self, notifications) -> None:
+            def upsert_notifications_atomically(
+                self, notifications: Sequence[NotificationRecord]
+            ) -> None:
                 if notifications and notifications[0].status == "sent":
                     msg = "atomic batch failed"
                     raise RuntimeError(msg)
