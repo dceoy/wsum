@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from io import StringIO
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
 from diff import compare_content
@@ -16,6 +21,7 @@ from memory_adapters import (
 from models import NotificationRecord, Target
 from notifications import NotificationEvent, build_change_event, deliver_grouped
 from summary import build_summary_request
+from validate_summary import _main as validate_summary_main
 from validate_summary import validate_summary
 
 if TYPE_CHECKING:
@@ -364,6 +370,45 @@ class NotificationTests(unittest.TestCase):
         assert len(slack.messages) > 1
         assert all(item.status == "sent" for item in outcomes.values())
         assert "&lt;!channel&gt;" in slack.messages[0][1]
+
+
+class ValidateSummaryCliTest(unittest.TestCase):
+    """Tests for validate_summary.py's `_main` CLI stdout/stderr contract."""
+
+    def test_usage_error_writes_to_stderr(self) -> None:
+        """Test that incorrect argc writes a usage message to stderr and returns 2."""
+        with patch("sys.stderr", new_callable=StringIO) as stderr:
+            code = validate_summary_main(["validate_summary.py", "only-one-arg"])
+        assert code == 2
+        assert "usage" in stderr.getvalue()
+
+    def test_success_writes_json_result_to_stdout(self) -> None:
+        """Test that a valid summary writes the validated JSON result to stdout."""
+        request, summary = request_and_summary()
+        with tempfile.TemporaryDirectory() as tmp:
+            summary_path = Path(tmp) / "summary.json"
+            request_path = Path(tmp) / "request.json"
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                code = validate_summary_main(
+                    ["validate_summary.py", str(summary_path), str(request_path)]
+                )
+        assert code == 0
+        payload = json.loads(stdout.getvalue())
+        assert payload["material"] is True
+
+    def test_invalid_input_writes_error_json_to_stdout(self) -> None:
+        """Test that a missing input file writes {"error": ...} JSON to stdout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "does-not-exist.json"
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                code = validate_summary_main(
+                    ["validate_summary.py", str(missing), str(missing)]
+                )
+        assert code == 1
+        payload = json.loads(stdout.getvalue())
+        assert payload["error"]["code"] == "summary_invalid"
 
 
 if __name__ == "__main__":

@@ -136,17 +136,22 @@ def replay_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
 def main(argv: list[str]) -> int:
     """Run the CLI entry point: replay the manifest named in ``argv[1]``.
 
+    On success, writes the JSON-encoded :func:`replay_manifest` result to
+    stdout. On a handled failure, writes ``{"error": ...}`` JSON to stdout
+    instead. Incorrect usage writes a usage message to stderr.
+
     Returns:
         0 on success, 1 if the manifest is invalid or the replay fails, 2
         for incorrect CLI usage.
     """
     if len(argv) != _EXPECTED_ARGC:
+        sys.stderr.write("usage: replay.py MANIFEST_JSON\n")
         return 2
     try:
         value = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
-        replay_manifest(value)
+        result = replay_manifest(value)
     except (OSError, json.JSONDecodeError, MonitorError) as exc:
-        (
+        error = (
             exc.as_dict()
             if isinstance(exc, MonitorError)
             else {
@@ -155,7 +160,11 @@ def main(argv: list[str]) -> int:
                 "retryable": False,
             }
         )
+        json.dump({"error": error}, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
         return 1
+    json.dump(result, sys.stdout, ensure_ascii=False, sort_keys=True)
+    sys.stdout.write("\n")
     return 0
 
 

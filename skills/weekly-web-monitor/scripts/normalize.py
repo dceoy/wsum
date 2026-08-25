@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import codecs
 import hashlib
+import json
 import pathlib
 import re
 import sys
@@ -247,16 +248,31 @@ def normalize_content(
     )
 
 
+_MIN_ARGC = 2
+_MAX_ARGC = 3
+
+
 def _main(argv: list[str]) -> int:
-    if len(argv) not in {2, 3}:
+    """Run the CLI entry point: normalize the file named in ``argv[1]``.
+
+    On success, writes the JSON-encoded :class:`NormalizedContent` to
+    stdout. On a handled failure, writes ``{"error": ...}`` JSON to stdout
+    instead. Incorrect usage writes a usage message to stderr.
+
+    Returns:
+        0 on success, 1 if the input could not be read or normalized, 2
+        for incorrect CLI usage.
+    """
+    if len(argv) not in {_MIN_ARGC, _MAX_ARGC}:
+        sys.stderr.write("usage: normalize.py INPUT [CONTENT_TYPE]\n")
         return 2
     try:
         with pathlib.Path(argv[1]).open("rb") as stream:
-            normalize_content(
-                stream.read(), content_type=argv[2] if len(argv) == 3 else ""
+            result = normalize_content(
+                stream.read(), content_type=argv[2] if len(argv) == _MAX_ARGC else ""
             )
     except (OSError, MonitorError) as exc:
-        (
+        error = (
             exc.as_dict()
             if isinstance(exc, MonitorError)
             else {
@@ -265,7 +281,11 @@ def _main(argv: list[str]) -> int:
                 "retryable": False,
             }
         )
+        json.dump({"error": error}, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
         return 1
+    json.dump(result.as_dict(), sys.stdout, ensure_ascii=False, sort_keys=True)
+    sys.stdout.write("\n")
     return 0
 
 

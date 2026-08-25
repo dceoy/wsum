@@ -5,16 +5,21 @@ from __future__ import annotations
 import base64
 import builtins
 import codecs
+import json
+import tempfile
 import time
 import unittest
 import zlib
-from io import BytesIO
+from io import BytesIO, StringIO
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from diff import DiffConfig, compare_content
+from diff import _main as diff_main
 from errors import MonitorError
 from feed_normalizer import normalize_feed
+from normalize import _main as normalize_main
 from normalize import normalize_content
 from pdf_normalizer import _stream_filters, extract_pdf_text
 from pypdf import PdfWriter
@@ -2617,6 +2622,75 @@ class DiffTests(unittest.TestCase):
         assert section.after == ("Price $20",)
         assert "# Product" in section.context
         assert len(section.section_id) == 16
+
+
+class DiffCliTest(unittest.TestCase):
+    """Tests for diff.py's `_main` CLI entry point's stdout/stderr contract."""
+
+    def test_usage_error_writes_to_stderr(self) -> None:
+        """Test that incorrect argc writes a usage message to stderr and returns 2."""
+        with patch("sys.stderr", new_callable=StringIO) as stderr:
+            code = diff_main(["diff.py", "one-arg"])
+        assert code == 2
+        assert "usage" in stderr.getvalue()
+
+    def test_success_writes_json_diff_to_stdout(self) -> None:
+        """Test that a successful diff writes the JSON DiffResult to stdout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = Path(tmp) / "previous.txt"
+            current = Path(tmp) / "current.txt"
+            previous.write_text("Price $10", encoding="utf-8")
+            current.write_text("Price $20", encoding="utf-8")
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                code = diff_main(["diff.py", str(previous), str(current)])
+        assert code == 0
+        payload = json.loads(stdout.getvalue())
+        assert payload["result"] in {"minor", "material", "candidate_material"}
+
+    def test_read_failure_writes_error_json_to_stdout(self) -> None:
+        """Test that a missing input file writes {"error": ...} JSON to stdout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "does-not-exist.txt"
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                code = diff_main(["diff.py", str(missing), str(missing)])
+        assert code == 1
+        payload = json.loads(stdout.getvalue())
+        assert payload["error"]["code"] == "input_read_failed"
+
+
+class NormalizeCliTest(unittest.TestCase):
+    """Tests for normalize.py's `_main` CLI entry point's stdout/stderr contract."""
+
+    def test_usage_error_writes_to_stderr(self) -> None:
+        """Test that incorrect argc writes a usage message to stderr and returns 2."""
+        with patch("sys.stderr", new_callable=StringIO) as stderr:
+            code = normalize_main(["normalize.py"])
+        assert code == 2
+        assert "usage" in stderr.getvalue()
+
+    def test_success_writes_json_result_to_stdout(self) -> None:
+        """Test that a successful normalize writes the JSON result to stdout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "input.html"
+            source.write_text(
+                "<html><body><p>Hello</p></body></html>", encoding="utf-8"
+            )
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                code = normalize_main(["normalize.py", str(source), "text/html"])
+        assert code == 0
+        payload = json.loads(stdout.getvalue())
+        assert payload["kind"] == "html"
+        assert "Hello" in payload["text"]
+
+    def test_read_failure_writes_error_json_to_stdout(self) -> None:
+        """Test that a missing input file writes {"error": ...} JSON to stdout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "does-not-exist.html"
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                code = normalize_main(["normalize.py", str(missing)])
+        assert code == 1
+        payload = json.loads(stdout.getvalue())
+        assert payload["error"]["code"] == "input_read_failed"
 
 
 if __name__ == "__main__":

@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import http.client
+import json
 import socket
 import ssl
 import struct
 import threading
 import time
 import unittest
+from io import StringIO
 from unittest.mock import MagicMock, patch
 
 import fetch
 import pytest
 from errors import MonitorError
-from fetch import FetchConfig, fetch_url
+from fetch import FetchConfig, FetchResult, fetch_url
 from network_policy import (
     BrowserNetworkGuard,
     canonicalize_fragment_identity,
@@ -1257,6 +1259,54 @@ class FetchTests(unittest.TestCase):
             assert all(worker.is_alive() for worker in pool._workers)
         finally:
             release.set()
+
+
+class FetchCliTest(unittest.TestCase):
+    """Tests for fetch.py's `_main` CLI entry point's stdout/stderr contract."""
+
+    def test_usage_error_writes_to_stderr(self) -> None:
+        """Test that incorrect argc writes a usage message to stderr and returns 2."""
+        with patch("sys.stderr", new_callable=StringIO) as stderr:
+            code = fetch._main(["fetch.py"])
+        assert code == 2
+        assert "usage" in stderr.getvalue()
+
+    def test_success_writes_json_metadata_to_stdout(self) -> None:
+        """Test that a successful fetch writes the JSON FetchResult metadata."""
+        result = FetchResult(
+            result="fetched",
+            final_url="https://example.com/",
+            status=200,
+            content_type="text/html",
+            charset="utf-8",
+            content_length=5,
+            etag="",
+            last_modified="",
+            fetched_at="2026-01-01T00:00:00Z",
+            redirect_count=0,
+            body=b"hello",
+        )
+        with (
+            patch("fetch.fetch_url", return_value=result),
+            patch("sys.stdout", new_callable=StringIO) as stdout,
+        ):
+            code = fetch._main(["fetch.py", "https://example.com/"])
+        assert code == 0
+        payload = json.loads(stdout.getvalue())
+        assert payload["final_url"] == "https://example.com/"
+        assert "body" not in payload
+
+    def test_monitor_error_writes_error_json_to_stdout(self) -> None:
+        """Test that a MonitorError writes {"error": ...} JSON to stdout."""
+        error = MonitorError("fetch_timeout", "response read exceeded its timeout")
+        with (
+            patch("fetch.fetch_url", side_effect=error),
+            patch("sys.stdout", new_callable=StringIO) as stdout,
+        ):
+            code = fetch._main(["fetch.py", "https://example.com/"])
+        assert code == 1
+        payload = json.loads(stdout.getvalue())
+        assert payload["error"]["code"] == "fetch_timeout"
 
 
 if __name__ == "__main__":

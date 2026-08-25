@@ -291,21 +291,37 @@ def validate_summary(
     }
 
 
+_EXPECTED_ARGC = 3
+
+
 def _main(argv: list[str]) -> int:
-    if len(argv) != 3:
+    """Run the CLI entry point: validate the summary named in ``argv[1]``.
+
+    On success, writes the JSON-encoded validated summary to stdout. On a
+    handled failure, writes ``{"error": ...}`` JSON to stdout instead.
+    Incorrect usage writes a usage message to stderr.
+
+    Returns:
+        0 on success, 1 if the input files or summary are invalid, 2 for
+        incorrect CLI usage.
+    """
+    if len(argv) != _EXPECTED_ARGC:
+        sys.stderr.write(
+            "usage: validate_summary.py SUMMARY_JSON REQUEST_JSON\n"
+        )
         return 2
     try:
         with pathlib.Path(argv[1]).open(encoding="utf-8") as summary_stream:
             summary = json.load(summary_stream)
         with pathlib.Path(argv[2]).open(encoding="utf-8") as request_stream:
             request = json.load(request_stream)
-        validate_summary(
+        validated = validate_summary(
             summary,
             changed_sections=request["changed_sections"],
             source_url=request["target"]["source_url"],
         )
     except (OSError, KeyError, json.JSONDecodeError, MonitorError) as exc:
-        (
+        error = (
             exc.as_dict()
             if isinstance(exc, MonitorError)
             else {
@@ -314,7 +330,11 @@ def _main(argv: list[str]) -> int:
                 "retryable": False,
             }
         )
+        json.dump({"error": error}, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
         return 1
+    json.dump(validated, sys.stdout, ensure_ascii=False, sort_keys=True)
+    sys.stdout.write("\n")
     return 0
 
 

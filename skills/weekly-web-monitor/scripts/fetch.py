@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+import json
 import queue
 import select
 import socket
@@ -752,13 +753,30 @@ def fetch_url(
             connection.close()
 
 
+_EXPECTED_ARGC = 2
+
+
 def _main(argv: list[str]) -> int:
-    if len(argv) != 2:
+    """Run the CLI entry point: fetch the URL named in ``argv[1]``.
+
+    On success, writes the JSON-encoded :meth:`FetchResult.metadata` to
+    stdout. On a handled failure, writes ``{"error": ...}`` JSON to stdout
+    instead. Incorrect usage writes a usage message to stderr.
+
+    Returns:
+        0 on success, 1 if the fetch fails, 2 for incorrect CLI usage.
+    """
+    if len(argv) != _EXPECTED_ARGC:
+        sys.stderr.write("usage: fetch.py URL\n")
         return 2
     try:
-        fetch_url(argv[1])
-    except MonitorError:
+        result = fetch_url(argv[1])
+    except MonitorError as exc:
+        json.dump({"error": exc.as_dict()}, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
         return 1
+    json.dump(result.metadata(), sys.stdout, ensure_ascii=False, sort_keys=True)
+    sys.stdout.write("\n")
     return 0
 
 

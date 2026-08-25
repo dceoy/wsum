@@ -6,7 +6,11 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
+from io import StringIO
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from audit import configuration_digest, make_audit_record
@@ -23,6 +27,7 @@ from outbox import (
     enqueue_record,
     load_outbox,
 )
+from replay import main as replay_main
 from replay import replay_manifest
 
 from tests import support
@@ -625,6 +630,44 @@ console.log(JSON.stringify({{
         assert outcome["rows"][0]["status"] == "sending"
         assert outcome["rows"][1]["status"] == "poison"
         assert outcome["rows"][1]["last_error"] == "duplicate_event_id"
+
+
+class ReplayCliTest(unittest.TestCase):
+    """Tests for replay.py's `main` CLI entry point's stdout/stderr contract."""
+
+    def test_usage_error_writes_to_stderr(self) -> None:
+        """Test that incorrect argc writes a usage message to stderr and returns 2."""
+        with patch("sys.stderr", new_callable=StringIO) as stderr:
+            code = replay_main(["replay.py"])
+        assert code == 2
+        assert "usage" in stderr.getvalue()
+
+    def test_success_writes_json_result_to_stdout(self) -> None:
+        """Test that a valid manifest writes the JSON replay result to stdout."""
+        previous = normalize_content(b"<p>Price $10</p>", content_type="text/html")
+        current = normalize_content(b"<p>Price $20</p>", content_type="text/html")
+        manifest = {
+            "previous": previous.as_dict(),
+            "current": current.as_dict(),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                code = replay_main(["replay.py", str(manifest_path)])
+        assert code == 0
+        payload = json.loads(stdout.getvalue())
+        assert payload["hashes_valid"] is True
+
+    def test_invalid_input_writes_error_json_to_stdout(self) -> None:
+        """Test that a missing manifest file writes {"error": ...} JSON to stdout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "does-not-exist.json"
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                code = replay_main(["replay.py", str(missing)])
+        assert code == 1
+        payload = json.loads(stdout.getvalue())
+        assert payload["error"]["code"] == "replay_invalid"
 
 
 if __name__ == "__main__":

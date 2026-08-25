@@ -513,15 +513,35 @@ def compare_content(
     )
 
 
+_EXPECTED_ARGC = 3
+
+
 def _main(argv: list[str]) -> int:
-    if len(argv) != 3:
+    """Run the CLI entry point: diff the two files named in ``argv[1:3]``.
+
+    On success, writes the JSON-encoded :class:`DiffResult` to stdout. On a
+    read failure, writes ``{"error": ...}`` JSON to stdout instead.
+    Incorrect usage writes a usage message to stderr.
+
+    Returns:
+        0 on success, 1 if a file could not be read, 2 for incorrect CLI
+        usage.
+    """
+    if len(argv) != _EXPECTED_ARGC:
+        sys.stderr.write("usage: diff.py PREVIOUS CURRENT\n")
         return 2
     try:
         previous = pathlib.Path(argv[1]).read_text(encoding="utf-8")
         current = pathlib.Path(argv[2]).read_text(encoding="utf-8")
-        compare_content(previous, current)
+        result = compare_content(previous, current)
     except OSError:
+        json.dump(
+            {"error": {"code": "input_read_failed", "retryable": False}}, sys.stdout
+        )
+        sys.stdout.write("\n")
         return 1
+    json.dump(result.as_dict(), sys.stdout, ensure_ascii=False, sort_keys=True)
+    sys.stdout.write("\n")
     return 0
 
 
