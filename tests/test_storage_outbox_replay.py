@@ -7,7 +7,6 @@ import subprocess
 import unittest
 
 import pytest
-from tests import support
 from audit import configuration_digest, make_audit_record
 from diff import compare_content
 from drive import SnapshotStore
@@ -23,6 +22,8 @@ from outbox import (
     load_outbox,
 )
 from replay import replay_manifest
+
+from tests import support
 
 
 class DriveTests(unittest.TestCase):

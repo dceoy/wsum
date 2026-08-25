@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 
 import pytest
-from tests import support  # noqa: F401
 from diff import compare_content
 from errors import MonitorError
 from memory_adapters import (
@@ -15,6 +14,8 @@ from models import NotificationRecord, Target
 from notifications import build_change_event, deliver_grouped
 from summary import build_summary_request
 from validate_summary import validate_summary
+
+from tests import support  # ruff: ignore[unused-import]
 
 
 def target(

@@ -10,7 +10,6 @@ from io import BytesIO
 from unittest.mock import patch
 
 import pytest
-from tests import support  # noqa: F401
 from diff import DiffConfig, compare_content
 from errors import MonitorError
 from feed_normalizer import normalize_feed
@@ -26,6 +25,8 @@ from pypdf.generic import (
     RectangleObject,
     StreamObject,
 )
+
+from tests import support  # ruff: ignore[unused-import]
 
 
 def _pdf_stream(number: int, body: bytes, *, extra: bytes = b"") -> bytes:

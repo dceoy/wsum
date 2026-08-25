@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 
 import pytest
-from tests import support  # noqa: F401
 from errors import MonitorError
 from models import Attempt, NotificationRecord, RunRecord, State, Target
 from sheets import (
@@ -20,6 +19,8 @@ from sheets import (
     replace_state_payload,
     upsert_notification_payload,
 )
+
+from tests import support  # ruff: ignore[unused-import]
 
 
 def table(headers: tuple[str, ...], *rows: list[object]) -> list[list[object]]:

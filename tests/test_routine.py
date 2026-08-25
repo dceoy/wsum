@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from tests import support  # noqa: F401
 from diff import DiffConfig
 from drive import SnapshotStore
 from errors import MonitorError
@@ -22,6 +21,8 @@ from normalize import normalize_content
 from notifications import change_event_id, failure_event_id
 from retry import RetryConfig
 from routine import RoutineConfig, WeeklyMonitorRoutine
+
+from tests import support  # ruff: ignore[unused-import]
 
 
 def make_target(target_id: str = "one", group: str = "default") -> Target:

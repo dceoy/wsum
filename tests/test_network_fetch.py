@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 
 import fetch
 import pytest
-from tests import support
 from errors import MonitorError
 from fetch import FetchConfig, fetch_url
 from network_policy import (
@@ -21,6 +20,8 @@ from network_policy import (
     is_sensitive_query_name,
     resolve_public_url,
 )
+
+from tests import support
 
 
 class FakeResponse:
