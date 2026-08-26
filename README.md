@@ -3,6 +3,7 @@
 A small Agent Skill for detecting meaningful updates on websites and documents.
 Python is limited to deterministic fetch/read, normalization, hashing, and bounded
 diff generation. The agent handles persistence, summarization, and notification.
+The helper strictly decodes text and bounds HTTP, PDF, XML, and diff resources.
 
 The skill supports two persistence modes selected per run:
 
@@ -53,6 +54,11 @@ uv run python skills/web-update-monitor/scripts/monitor.py \
 The command prints one JSON object with `baseline`, `unchanged`, or `changed`
 status and a bounded unified diff. Promote the new snapshot only after the whole
 monitoring workflow succeeds.
+
+The external workflow keeps a durable notification ledger keyed by target and
+normalized hash. It records `pending`, `sending`, and `delivered` transitions
+before promoting a replacement snapshot; an indeterminate `sending` event is
+left for manual reconciliation rather than retried automatically.
 
 Run tests with:
 
