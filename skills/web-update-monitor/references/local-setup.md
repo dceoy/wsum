@@ -12,9 +12,7 @@ Choose a runtime root outside the repository for production. For development,
 ```text
 <runtime-root>/
 ├── targets.json
-├── state.json
-├── runs.json
-├── notifications.json
+├── operations.sqlite3
 └── snapshots/
     └── <target_id>/
         └── <normalized_sha256>/
@@ -23,9 +21,10 @@ Choose a runtime root outside the repository for production. For development,
             └── diff-<previous_sha256>.json
 ```
 
-Only `targets.json` is required before the first run. `state.json`, `runs.json`,
-`notifications.json`, and `snapshots/` are created as needed by
-`LocalOperationalStore` and `LocalSnapshotStore`.
+Only `targets.json` is required before the first run. `LocalOperationalStore`
+creates `operations.sqlite3`, and `LocalSnapshotStore` creates `snapshots/` as
+needed. The SQLite database stores current state, append-only run history, and
+notification delivery state in separate tables.
 
 ## targets.json
 
@@ -65,10 +64,17 @@ but overlapping invocations against the same target set are not supported.
 
 ## Persistence guarantees
 
-Operational JSON updates are serialized within the process and written by atomic
-rename. Run IDs remain append-only/idempotent, notification event IDs remain
-upserted/deduplicated, and state is replaced only after the routine has reached its
-normal commit point.
+SQLite primary keys preserve run-id idempotency and notification-event identity
+without rewriting an ever-growing JSON history file. State replacement and grouped
+notification updates use transactions, and SQLite serializes database writers across
+processes. Individual stored JSON records remain size-bounded; aggregate run and
+notification history is not subject to the former single-file 10 MB metadata cap.
+
+SQLite does not make the complete monitor pipeline an atomic transaction. The
+routine still performs claim checks before external fetch, snapshot, model, and
+Slack side effects. Two overlapping routine invocations can therefore both pass a
+claim check before either commits it. Keep invocations against the same target set
+non-overlapping; see [security.md](security.md).
 
 Snapshots use the same content-addressed layout as Drive. The stored
 `snapshot_ref` is a relative path of the form
@@ -78,6 +84,8 @@ snapshot artifacts are never overwritten with different bytes.
 
 ## Backup and retention
 
-Back up the entire runtime root as one unit if local history must survive host loss.
-Do not copy only `state.json` without the referenced snapshots. Apply retention only
-after confirming that the current baseline's snapshot remains present.
+Back up `targets.json`, `operations.sqlite3`, and `snapshots/` as one unit if local
+history must survive host loss. Do not copy only the database without the snapshots
+referenced by current state. Apply snapshot retention only after confirming that the
+current baseline remains present. Retain or archive operational database history
+according to the deployment's audit policy.
