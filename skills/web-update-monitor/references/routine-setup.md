@@ -25,6 +25,8 @@ repository.
 No Google Sheets or Google Drive connector is required. Use one trusted runtime root
 outside the repository and follow [local-setup.md](local-setup.md). Restrict access
 to the account running the monitor and back up state and snapshots as one unit.
+Local mode supports direct Slack delivery; the bundled GAS Outbox is not available
+because its durable `OutboxSheetsStore` requires Google Sheets.
 
 ## Common connector setup
 
@@ -93,18 +95,22 @@ model and known gaps.
 
 ## Delivery
 
-Use exactly one path:
+Use exactly one supported path for the selected persistence mode:
 
-- Direct Slack Connector: preferred minimal architecture.
-- GAS Outbox: use `scripts/gas/Code.gs`, store `SLACK_WEBHOOK_URL` and
+- Direct Slack Connector: preferred minimal architecture and supported by both
+  `google-drive` and `local` persistence.
+- GAS Outbox: supported only with `google-drive` persistence. Use
+  `scripts/gas/Code.gs`, store `SLACK_WEBHOOK_URL` and
   `ALLOWED_NOTIFICATION_GROUP` in Apps Script Properties, create a time-driven
   dispatcher trigger, and fix the destination in the webhook or dispatcher
   configuration. The dispatcher poisons any row whose `notification_group` does
   not match `ALLOWED_NOTIFICATION_GROUP` instead of delivering it to that webhook.
   Configure `RoutineConfig.delivery_mode=outbox`, inject `OutboxSheetsStore`, and
-  omit the direct Slack connector.
+  omit the direct Slack connector. Do not use `OutboxSheetsStore` from local mode,
+  because doing so would mix persistence backends.
 
-Disable one path before enabling the other.
+Disable one path before enabling the other. A future local Outbox requires a local
+`OutboxStore` implementation rather than a Google Sheets dependency.
 
 ## Rollback and safe disable
 
