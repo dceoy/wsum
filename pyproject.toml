@@ -14,7 +14,7 @@ dependencies = ["pypdf >= 6.15, < 7"]
 Repository = "https://github.com/dceoy/wsum.git"
 
 [tool.uv]
-exclude-newer = "7 days"
+exclude-newer = "1 week"
 
 [dependency-groups]
 dev = [
@@ -26,15 +26,125 @@ dev = [
 
 [tool.ruff]
 line-length = 88
-exclude = [".agents", ".claude", ".venv"]
+exclude = ["build", ".venv", ".agents", ".claude"]
+preview = true
 
 [tool.ruff.lint]
-select = ["B", "E", "F", "I", "SIM", "UP"]
+select = [
+  "F",      # Pyflakes (F)
+  "E",      # pycodestyle error (E)
+  "W",      # pycodestyle warning (W)
+  "C90",    # mccabe (C90)
+  "I",      # isort (I)
+  "N",      # pep8-naming (N)
+  "D",      # pydocstyle (D)
+  "UP",     # pyupgrade (UP)
+  "S",      # flake8-bandit (S)
+  "B",      # flake8-bugbear (B)
+  "C4",     # flake8-comprehensions (C4)
+  "SIM",    # flake8-simplify (SIM)
+  "ARG",    # flake8-unused-arguments (ARG)
+  "PLC",    # Pylint convention (PLC)
+  "PLE",    # Pylint error (PLE)
+  "PLR",    # Pylint refactor (PLR)
+  "PLW",    # Pylint warning (PLW)
+  "FLY",    # flynt (FLY)
+  "PERF",   # Perflint (PERF)
+  "FURB",   # refurb (FURB)
+  "RUF",    # Ruff-specific rules (RUF)
+  "YTT",    # flake8-2020 (YTT)
+  "ANN",    # flake8-annotations (ANN)
+  "ASYNC",  # flake8-async (ASYNC)
+  "BLE",    # flake8-blind-except (BLE)
+  "FBT",    # flake8-boolean-trap (FBT)
+  "A",      # flake8-builtins (A)
+  "COM",    # flake8-commas (COM)
+  "DTZ",    # flake8-datetimez (DTZ)
+  "T10",    # flake8-debugger (T10)
+  "EM",     # flake8-errmsg (EM)
+  "EXE",    # flake8-executable (EXE)
+  "FA",     # flake8-future-annotations (FA)
+  "ISC",    # flake8-implicit-str-concat (ISC)
+  "ICN",    # flake8-import-conventions (ICN)
+  "LOG",    # flake8-logging (LOG)
+  "G",      # flake8-logging-format (G)
+  "INP",    # flake8-no-pep420 (INP)
+  "PIE",    # flake8-pie (PIE)
+  "T20",    # flake8-print (T20)
+  "PYI",    # flake8-pyi (PYI)
+  "PT",     # flake8-pytest-style (PT)
+  "Q",      # flake8-quotes (Q)
+  "RSE",    # flake8-raise (RSE)
+  "SLF",    # flake8-self (SLF)
+  "SLOT",   # flake8-slots (SLOT)
+  "TID",    # flake8-tidy-imports (TID)
+  "TCH",    # flake8-type-checking (TCH)
+  "INT",    # flake8-gettext (INT)
+  "PTH",    # flake8-use-pathlib (PTH)
+  "TD",     # flake8-todos (TD)
+  "FIX",    # flake8-fixme (FIX)
+  "ERA",    # eradicate (ERA)
+  "PGH",    # pygrep-hooks (PGH)
+  "TRY",    # tryceratops (TRY)
+  "DOC",    # pydoclint (DOC)
+]
+ignore = [
+  "COM812",  # missing-trailing-comma
+  "FBT001",  # boolean-type-hint-positional-argument
+  "FBT002",  # boolean-default-value-positional-argument
+]
+
+[tool.ruff.lint.per-file-ignores]
+"skills/web-update-monitor/scripts/monitor.py" = [
+  "ANN401",  # Any is required at urllib callback boundaries
+  "BLE001",  # urllib exposes heterogeneous transport failures
+  "DOC201",  # concise helper docstrings are sufficient here
+  "DOC501",  # error details are represented by MonitorError messages
+  "EM101",   # CLI errors are intentionally direct literal messages
+  "INP001",  # skill scripts are executable helpers, not a Python package
+  "PLR2004", # protocol constants such as HTTP ports are self-explanatory
+  "T201",    # CLI writes its JSON result to stdout/stderr
+]
+"tests/**/*.py" = [
+  "D103",    # test names describe their behavior
+  "INP001",  # tests do not need to be a Python package
+  "PLC2701", # private helper imports are intentional white-box tests
+  "PLR2004", # literal limits make compact tests easier to read
+  "S101",    # assert is expected in pytest
+  "SLF001",  # private helper access is intentional in tests
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.pylint]
+max-args = 10
+max-public-methods = 40
 
 [tool.pyright]
-typeCheckingMode = "standard"
+exclude = ["build", ".venv", ".agents", ".claude"]
 extraPaths = ["skills/web-update-monitor/scripts"]
-exclude = [".agents", ".claude", ".venv"]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "strict"
 
 [tool.pytest.ini_options]
+addopts = [
+  "--cov=skills/web-update-monitor/scripts",
+  "--cov-branch",
+  "--capture=no",
+]
+pythonpath = ["."]
 testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+minversion = "6.0"
+
+[tool.coverage.run]
+source = ["skills/web-update-monitor/scripts"]
+omit = ["tests/**"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = ["if TYPE_CHECKING:"]
