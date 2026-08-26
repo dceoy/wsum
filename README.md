@@ -7,8 +7,9 @@ runtime:
 
 - `google-drive`: read targets and operational records through Google Sheets and
   store normalized snapshots in Google Drive.
-- `local`: store targets, operational state, run history, notification state, and
-  snapshots in a caller-selected local runtime directory.
+- `local`: read targets from `targets.json`, store operational state and history in
+  SQLite, and store content-addressed snapshots in a caller-selected local runtime
+  directory.
 
 The registered skill is `web-update-monitor` and lives in
 `.claude/skills/web-update-monitor/`. Start with its `SKILL.md` and references.
@@ -39,9 +40,10 @@ python3 .claude/skills/web-update-monitor/scripts/dry_run.py \
 
 GitHub stores code, schemas, documentation, and synthetic fixtures only. Never
 commit fetched or rendered pages, PDFs/feeds from monitored sites, normalized
-production snapshots, production diffs, logs, Sheets/Drive exports, credentials,
-cookies, browser profiles, webhook URLs, connector configuration, signed URLs,
-spreadsheet/Drive identifiers, or local runtime/replay artifacts.
+production snapshots, production diffs, logs, Sheets/Drive exports, SQLite
+databases, credentials, cookies, browser profiles, webhook URLs, connector
+configuration, signed URLs, spreadsheet/Drive identifiers, or local runtime/replay
+artifacts.
 
 Execution cadence is configured outside this repository. The skill may be invoked
 ad hoc or by any non-overlapping external schedule appropriate to the monitored
