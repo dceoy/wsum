@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import datetime
 
 from drive import SnapshotStore
@@ -144,3 +145,53 @@ def test_outbox_delivery_recognizes_legacy_pending_alert_without_requeueing() ->
     assert store.states["one"].consecutive_failures == _THRESHOLD + 1
     assert legacy_id in store.outbox
     assert stable_id not in store.outbox
+
+
+def test_recovered_target_does_not_reuse_stale_weekly_alert_for_new_episode() -> None:
+    """A recovered target must stop consulting weekly IDs before new failures."""
+    target = _target()
+    store = MemoryOperationalStore([target])
+    store.states["one"] = State(
+        target_id="one",
+        last_checked_at=_LEGACY_CHECKED_AT,
+        consecutive_failures=0,
+    )
+    legacy_id = _legacy_event_id()
+    store.upsert_notification(
+        NotificationRecord(
+            legacy_id,
+            "one",
+            "sent",
+            notified_at=_LEGACY_CHECKED_AT,
+            kind="failure",
+        )
+    )
+    slack = MemorySlackConnector()
+    routine = WebUpdateMonitorRoutine(
+        store=store,
+        snapshots=SnapshotStore(MemoryDriveConnector()),
+        summary_client=EvidenceSummaryClient(),
+        slack=slack,
+        fetcher=FixtureFetcher({"one": _transient()}),
+        config=RoutineConfig(
+            failure_alert_threshold=_THRESHOLD,
+            retry=RetryConfig(max_attempts=1),
+        ),
+        sleeper=lambda _: None,
+    )
+
+    first = routine.run(run_id="new-episode-1")
+    assert first.metrics.failed == 1
+    assert store.states["one"].consecutive_failures == 1
+    assert slack.messages == []
+
+    store.replace_state(
+        replace(store.states["one"], consecutive_failures=_THRESHOLD)
+    )
+    second = routine.run(run_id="new-episode-after-threshold-crash")
+
+    stable_id = failure_event_id("one", _LEGACY_CHECKED_AT, _THRESHOLD)
+    assert second.metrics.failed == 1
+    assert store.states["one"].consecutive_failures == _THRESHOLD + 1
+    assert len(slack.messages) == 1
+    assert store.notifications[stable_id].status == "sent"
