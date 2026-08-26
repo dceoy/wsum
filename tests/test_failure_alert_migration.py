@@ -185,9 +185,7 @@ def test_recovered_target_does_not_reuse_stale_weekly_alert_for_new_episode() ->
     assert store.states["one"].consecutive_failures == 1
     assert slack.messages == []
 
-    store.replace_state(
-        replace(store.states["one"], consecutive_failures=_THRESHOLD)
-    )
+    store.replace_state(replace(store.states["one"], consecutive_failures=_THRESHOLD))
     second = routine.run(run_id="new-episode-after-threshold-crash")
 
     stable_id = failure_event_id("one", _LEGACY_CHECKED_AT, _THRESHOLD)
