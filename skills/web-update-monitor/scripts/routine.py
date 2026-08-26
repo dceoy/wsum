@@ -461,7 +461,7 @@ class WebUpdateMonitorRoutine:
         material = f"failure{target_id}{year_week}{threshold}".encode()
         return hashlib.sha256(material).hexdigest()
 
-    def _failure_alert(  # noqa: C901, PLR0911, PLR0912
+    def _failure_alert(  # ruff: ignore[complex-structure, too-many-return-statements, too-many-branches]
         self,
         target: Target,
         state: State,
