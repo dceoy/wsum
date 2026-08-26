@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +22,7 @@ from models import NotificationRecord, RunRecord, State, Target
 from normalize import normalize_content
 from notifications import change_event_id, failure_event_id
 from retry import RetryConfig
-from routine import RoutineConfig, RoutineResult, WeeklyMonitorRoutine
+from routine import RoutineConfig, RoutineResult, WebUpdateMonitorRoutine
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -136,7 +135,7 @@ class RoutineTests(unittest.TestCase):
             The routine's result, and the fetcher used to produce it.
         """
         fetcher = FixtureFetcher({"one": fixture})
-        routine = WeeklyMonitorRoutine(
+        routine = WebUpdateMonitorRoutine(
             store=self.store,
             snapshots=self.snapshots,
             summary_client=EvidenceSummaryClient(),
@@ -178,11 +177,6 @@ class RoutineTests(unittest.TestCase):
     def test_operator_suppressed_change_advances_baseline_without_notified_result(
         self,
     ) -> None:
-        # An operator-suppressed NotificationRecord means this event was
-        # never sent and never will be, unlike the "sent" dedup case that
-        # legitimately reuses the same "suppressed" delivery outcome status.
-        # Conflating the two used to report a material change as "notified"
-        # even though deliver_grouped never called Slack for it.
         """Test that operator suppressed change advances baseline without notified result."""
         self.run_cycle(response(1000), "run-1")
         fixture = response(1200)
@@ -242,6 +236,20 @@ class RoutineTests(unittest.TestCase):
         assert recovered.metrics.baseline == 1
         assert self.store.states["one"].consecutive_failures == 0
 
+    def test_failure_alert_repeats_after_recovery(self) -> None:
+        """Alert once for each separate threshold-crossing failure episode."""
+        transient = MonitorError("fetch_timeout", "fixture timeout", retryable=True)
+        for index in range(1, 4):
+            self.run_cycle(transient, f"run-{index}", retry=RetryConfig(max_attempts=1))
+        assert len(self.slack.messages) == 1
+
+        self.run_cycle(response(1000), "run-4")
+        assert self.store.states["one"].consecutive_failures == 0
+
+        for index in range(5, 8):
+            self.run_cycle(transient, f"run-{index}", retry=RetryConfig(max_attempts=1))
+        assert len(self.slack.messages) == 2
+
     def test_suppressed_failure_alert_is_preserved_and_not_retried(self) -> None:
         """Test that suppressed failure alert is preserved and not retried."""
         transient = MonitorError("fetch_timeout", "fixture timeout", retryable=True)
@@ -251,8 +259,7 @@ class RoutineTests(unittest.TestCase):
                 f"run-{index}",
                 retry=RetryConfig(max_attempts=1),
             )
-        now = datetime.now(UTC).isocalendar()
-        event_id = failure_event_id("one", f"{now.year}-W{now.week:02d}", threshold=3)
+        event_id = failure_event_id("one", "run-3", threshold=3)
         suppressed = NotificationRecord(
             event_id,
             "one",
@@ -275,11 +282,6 @@ class RoutineTests(unittest.TestCase):
     def test_transient_state_read_failure_does_not_wipe_existing_baseline(
         self,
     ) -> None:
-        # get_state fails on the very first call (before the real previous
-        # state is ever loaded) but succeeds on a later call, simulating a
-        # transient read failure that a naive fix would paper over by
-        # persisting the empty placeholder State and destroying the
-        # existing baseline.
         """Test that transient state read failure does not wipe existing baseline."""
         self.run_cycle(response(1000), "run-1")
         baseline_hash = self.store.states["one"].normalized_hash
@@ -312,7 +314,7 @@ class RoutineTests(unittest.TestCase):
                 return super().get_state(target_id)
 
         flaky_store = FlakyStateStore([self.target], dict(self.store.states))
-        routine = WeeklyMonitorRoutine(
+        routine = WebUpdateMonitorRoutine(
             store=flaky_store,
             snapshots=self.snapshots,
             summary_client=EvidenceSummaryClient(),
@@ -334,10 +336,6 @@ class RoutineTests(unittest.TestCase):
     def test_persistent_state_read_failure_still_records_run_without_state_write(
         self,
     ) -> None:
-        # get_state fails on every call, including _finish_failure's single
-        # retry. The run must still complete (not raise out of
-        # _process_target) and the real State row must be left completely
-        # untouched rather than replaced with the empty placeholder.
         """Test that persistent state read failure still records run without state write."""
         self.run_cycle(response(1000), "run-1")
         baseline_hash = self.store.states["one"].normalized_hash
@@ -364,7 +362,7 @@ class RoutineTests(unittest.TestCase):
                 raise MonitorError(msg, "simulated persistent failure")
 
         broken_store = AlwaysFailingStateStore([self.target], dict(self.store.states))
-        routine = WeeklyMonitorRoutine(
+        routine = WebUpdateMonitorRoutine(
             store=broken_store,
             snapshots=self.snapshots,
             summary_client=EvidenceSummaryClient(),
@@ -384,11 +382,6 @@ class RoutineTests(unittest.TestCase):
         assert broken_store.runs["run-2:one"].result == "failed"
 
     def test_run_is_written_before_state_on_success(self) -> None:
-        # If the process fails between the two independent connector writes
-        # in _persist_success, only the write ordering determines whether a
-        # retry with the same run_id finds a terminal Run to replay (safe)
-        # or an advanced State with no matching Run (silently drops the
-        # outcome the State change was based on). Run must land first.
         """Test that run is written before state on success."""
         calls: list[str] = []
 
@@ -406,7 +399,7 @@ class RoutineTests(unittest.TestCase):
                 super().replace_state(state)
 
         store = RecordingStore([self.target])
-        routine = WeeklyMonitorRoutine(
+        routine = WebUpdateMonitorRoutine(
             store=store,
             snapshots=self.snapshots,
             summary_client=EvidenceSummaryClient(),
@@ -421,12 +414,6 @@ class RoutineTests(unittest.TestCase):
     def test_partial_commit_does_not_revert_state_behind_a_committed_run(
         self,
     ) -> None:
-        # append_run for a success outcome lands, then the paired
-        # replace_state raises. append_run dedups by run_id, so a naive
-        # routing through _finish_failure would append_run a no-op (the
-        # success row survives) but still replace_state with a reverted,
-        # failure-incremented baseline behind a Run that already says
-        # success. State must be left exactly as it was instead.
         """Test that partial commit does not revert state behind a committed run."""
         self.run_cycle(response(1000), "run-1")
         baseline_state = self.store.states["one"]
@@ -461,7 +448,7 @@ class RoutineTests(unittest.TestCase):
         store = PartialCommitStore(
             [self.target], dict(self.store.states), dict(self.store.runs)
         )
-        routine = WeeklyMonitorRoutine(
+        routine = WebUpdateMonitorRoutine(
             store=store,
             snapshots=self.snapshots,
             summary_client=EvidenceSummaryClient(),
@@ -503,7 +490,7 @@ class RoutineTests(unittest.TestCase):
         store.states = dict(self.store.states)
         store.runs = dict(self.store.runs)
         slack = MemorySlackConnector()
-        routine = WeeklyMonitorRoutine(
+        routine = WebUpdateMonitorRoutine(
             store=store,
             snapshots=self.snapshots,
             summary_client=EvidenceSummaryClient(),
@@ -532,7 +519,7 @@ class RoutineTests(unittest.TestCase):
             "good": response(1000),
             "bad": MonitorError("selector_no_match", "fixture"),
         })
-        routine = WeeklyMonitorRoutine(
+        routine = WebUpdateMonitorRoutine(
             store=store,
             snapshots=SnapshotStore(MemoryDriveConnector()),
             summary_client=EvidenceSummaryClient(),
@@ -567,7 +554,7 @@ class RoutineTests(unittest.TestCase):
             longest.target_id: response(1000),
         })
         slack = MemorySlackConnector()
-        routine = WeeklyMonitorRoutine(
+        routine = WebUpdateMonitorRoutine(
             store=store,
             snapshots=self.snapshots,
             summary_client=EvidenceSummaryClient(),
@@ -607,7 +594,7 @@ class RoutineTests(unittest.TestCase):
                 del record
                 raise RuntimeError
 
-        routine = WeeklyMonitorRoutine(
+        routine = WebUpdateMonitorRoutine(
             store=self.store,
             snapshots=self.snapshots,
             summary_client=EvidenceSummaryClient(),
@@ -629,7 +616,7 @@ class RoutineTests(unittest.TestCase):
             Returns:
                 The routine's result.
             """
-            routine = WeeklyMonitorRoutine(
+            routine = WebUpdateMonitorRoutine(
                 store=self.store,
                 snapshots=self.snapshots,
                 summary_client=EvidenceSummaryClient(),
@@ -648,7 +635,7 @@ class RoutineTests(unittest.TestCase):
         assert len(self.store.outbox) == 1
         assert next(iter(self.store.outbox.values())).status == "pending"
         with pytest.raises(MonitorError, match="requires only"):
-            WeeklyMonitorRoutine(
+            WebUpdateMonitorRoutine(
                 store=self.store,
                 snapshots=self.snapshots,
                 summary_client=EvidenceSummaryClient(),
@@ -678,7 +665,7 @@ class RoutineTests(unittest.TestCase):
                     retryable=True,
                 )
 
-        routine = WeeklyMonitorRoutine(
+        routine = WebUpdateMonitorRoutine(
             store=self.store,
             snapshots=self.snapshots,
             summary_client=FailingSummary(),
@@ -723,7 +710,7 @@ class RoutineTests(unittest.TestCase):
             failure_alert_threshold=3,
             diff=DiffConfig(max_diff_lines=1_000),
         )
-        baseline_routine = WeeklyMonitorRoutine(
+        baseline_routine = WebUpdateMonitorRoutine(
             store=self.store,
             snapshots=self.snapshots,
             summary_client=UnreachableSummary(),
@@ -737,7 +724,7 @@ class RoutineTests(unittest.TestCase):
         baseline_hash = self.store.states["one"].normalized_hash
         assert baseline_hash
 
-        oversized_routine = WeeklyMonitorRoutine(
+        oversized_routine = WebUpdateMonitorRoutine(
             store=self.store,
             snapshots=self.snapshots,
             summary_client=UnreachableSummary(),
@@ -757,10 +744,6 @@ class RoutineTests(unittest.TestCase):
     def test_non_material_over_ordinary_truncation_still_advances_baseline(
         self,
     ) -> None:
-        # 40 changed paragraphs with one price change buried among them: this
-        # truncates under a small max_sections, but the price section is
-        # prioritized into the retained evidence, so a genuine non-material
-        # verdict from the model is trusted and the baseline still advances.
         """Test that non material over ordinary truncation still advances baseline."""
         baseline_paragraphs = [
             "Price: ¥10" if index == 35 else f"Note {index} original"
@@ -776,7 +759,7 @@ class RoutineTests(unittest.TestCase):
             failure_alert_threshold=3,
             diff=DiffConfig(max_sections=30),
         )
-        baseline_routine = WeeklyMonitorRoutine(
+        baseline_routine = WebUpdateMonitorRoutine(
             store=self.store,
             snapshots=self.snapshots,
             summary_client=NonMaterialSummary(),
@@ -790,7 +773,7 @@ class RoutineTests(unittest.TestCase):
         baseline_hash = self.store.states["one"].normalized_hash
         assert baseline_hash
 
-        changed_routine = WeeklyMonitorRoutine(
+        changed_routine = WebUpdateMonitorRoutine(
             store=self.store,
             snapshots=self.snapshots,
             summary_client=NonMaterialSummary(),
@@ -809,12 +792,6 @@ class RoutineTests(unittest.TestCase):
     def test_truncated_non_signal_sections_with_non_material_verdict_fail_closed(
         self,
     ) -> None:
-        # None of the changed sections match a recognized price/spec/terms/
-        # availability/eligibility pattern, so signal_section_truncated is
-        # False; but the diff is candidate_material on changed ratio alone,
-        # and truncation still drops sections the model never saw. A
-        # non-material verdict over that incomplete evidence must not be
-        # trusted just because no *recognized* pattern was cut.
         """Test that truncated non signal sections with non material verdict fail closed."""
         baseline_paragraphs: list[str] = []
         changed_paragraphs: list[str] = []
@@ -833,7 +810,7 @@ class RoutineTests(unittest.TestCase):
             failure_alert_threshold=3,
             diff=DiffConfig(max_sections=3),
         )
-        baseline_routine = WeeklyMonitorRoutine(
+        baseline_routine = WebUpdateMonitorRoutine(
             store=self.store,
             snapshots=self.snapshots,
             summary_client=NonMaterialSummary(),
@@ -847,7 +824,7 @@ class RoutineTests(unittest.TestCase):
         baseline_hash = self.store.states["one"].normalized_hash
         assert baseline_hash
 
-        changed_routine = WeeklyMonitorRoutine(
+        changed_routine = WebUpdateMonitorRoutine(
             store=self.store,
             snapshots=self.snapshots,
             summary_client=NonMaterialSummary(),
@@ -869,11 +846,6 @@ class RoutineTests(unittest.TestCase):
     def test_truncated_signal_sections_with_non_material_verdict_fail_closed(
         self,
     ) -> None:
-        # Five separate price changes but only two sections fit the budget:
-        # some signal-bearing evidence is unavoidably dropped, so a
-        # non-material verdict cannot be trusted to advance the baseline.
-        # Anchor paragraphs between each price keep them as distinct diff
-        # opcodes instead of collapsing into a single contiguous replace.
         """Test that truncated signal sections with non material verdict fail closed."""
         baseline_paragraphs: list[str] = []
         changed_paragraphs: list[str] = []
@@ -886,7 +858,7 @@ class RoutineTests(unittest.TestCase):
             failure_alert_threshold=3,
             diff=DiffConfig(max_sections=2),
         )
-        baseline_routine = WeeklyMonitorRoutine(
+        baseline_routine = WebUpdateMonitorRoutine(
             store=self.store,
             snapshots=self.snapshots,
             summary_client=NonMaterialSummary(),
@@ -900,7 +872,7 @@ class RoutineTests(unittest.TestCase):
         baseline_hash = self.store.states["one"].normalized_hash
         assert baseline_hash
 
-        changed_routine = WeeklyMonitorRoutine(
+        changed_routine = WebUpdateMonitorRoutine(
             store=self.store,
             snapshots=self.snapshots,
             summary_client=NonMaterialSummary(),
