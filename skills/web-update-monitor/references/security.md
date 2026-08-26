@@ -3,11 +3,12 @@
 ## Assets and trust boundaries
 
 Protect connector credentials, Slack destinations, Sheets configuration/state,
-Drive snapshots, audit records, operator identity, and network reachability.
+local operational databases, Drive/local snapshots, audit records, operator
+identity, and network reachability.
 
 Trust runtime-owned connector configuration and reviewed deterministic code. Treat
-Sheets target fields, DNS, HTTP headers/bodies, redirects, rendered DOM, PDF/feed
-parsers, normalized text, diffs, and every model response as lower-trust.
+target fields, DNS, HTTP headers/bodies, redirects, rendered DOM, PDF/feed parsers,
+normalized text, diffs, and every model response as lower-trust.
 
 The critical boundaries are:
 
@@ -15,7 +16,7 @@ The critical boundaries are:
 2. Fetched bytes to deterministic parsers.
 3. Bounded normalized diff to Claude.
 4. Validated structured summary to Slack/Outbox.
-5. Connector responses to operational state.
+5. Persistence responses to operational state.
 
 ## Attack paths and controls
 
@@ -89,23 +90,21 @@ in-process timeout. Because that is not implemented by this code,
 done after the browser process has been placed under a verified external
 wall-clock/liveness supervisor.
 
-Known gap: `SheetsStore` has no atomic create-if-absent/conditional-write primitive
-(the Sheets Values API cannot express one), so the claim-before-side-effects
-sequence in `_process_target` (run lookup), `_persist_success` (Run/State write
-order), and `deliver_grouped`/`_queue_outbox_message`
-(`get_notification`-then-`upsert_notification`) are each a non-atomic
-read-modify-write, not a lease. Two Routine invocations that overlap -- the same
-`run_id` re-entered concurrently, or different `run_id` values racing the same
-target/notification event -- can both observe "no row" and both act, producing a
-duplicate Slack send or, if both appends use the same deterministic event ID,
-`sheet_duplicate_id` on `load_notifications()` that breaks subsequent notification
-reads entirely. The `_store_lock`/`RLock` only serializes writes within one process;
-it provides no cross-instance coordination. Closing this gap requires a store-level
-atomic claim primitive or a different backend; until then, do not schedule or
-manually trigger overlapping Routine invocations against the same target set, and
-treat the "zero duplicate notifications" SLO in
-[operations.md](operations.md) as conditioned on that operational constraint,
-not as a guarantee the code enforces.
+Known gap: neither persistence backend exposes a store-level lease that atomically
+covers a complete target run or notification delivery. `SheetsStore` cannot express
+an atomic create-if-absent/conditional write through the Sheets Values API. Local
+mode uses SQLite transactions and primary keys, so separate processes no longer
+lose unrelated state/run/notification writes through whole-file read-modify-write,
+but the routine-level sequence is still `get_run` or `get_notification` followed by
+external fetch/snapshot/model/Slack work and a later persistence write. Two Routine
+invocations that overlap can therefore both observe "not claimed" before either
+commits and both perform external side effects. The in-process `_store_lock` only
+serializes one Routine instance; SQLite serializes database writes, not the entire
+external side-effect sequence. Closing this gap requires a store-level atomic claim
+or lease integrated into orchestration. Until then, do not schedule or manually
+trigger overlapping Routine invocations against the same target set, and treat the
+"zero duplicate notifications" SLO in [operations.md](operations.md) as conditioned
+on that operational constraint, not as a guarantee the code enforces.
 
 The bundled PDF extractor intentionally supports a conservative text subset. Complex
 PDFs fail closed. Add a new parser only after isolated fuzzing and checklist review.
@@ -114,6 +113,8 @@ PDFs fail closed. Add a new parser only after isolated fuzzing and checklist rev
 
 - Sheets: ranges listed in [routine-setup.md](routine-setup.md), no whole-Drive scope.
 - Drive: one snapshot root; delete omitted by default.
+- Local: one trusted runtime root containing `targets.json`, `operations.sqlite3`,
+  and content-addressed snapshots; no broader filesystem access.
 - Slack: send-only to an approved destination mapping; no history/user access.
 - GAS: Spreadsheet-bound Outbox plus Apps Script Properties and the one Slack URL.
 - Web/browser: public HTTP(S) egress only, no inbound service or persistent profile.
@@ -136,12 +137,13 @@ PDFs fail closed. Add a new parser only after isolated fuzzing and checklist rev
 
 If exposure or malicious behavior is suspected, disable the external schedule and
 targets, disable delivery, revoke connector bindings, rotate credentials in Google,
-Slack, and Apps Script, preserve state/audit metadata, and quarantine affected Drive
-artifacts. Do not open suspicious fetched content in a privileged browser. Review
-target/configuration changes, run IDs, event IDs, error codes, and connector audit
-logs without copying response bodies into tickets or GitHub.
+Slack, and Apps Script, preserve state/audit metadata, and quarantine affected
+snapshot artifacts. Do not open suspicious fetched content in a privileged browser.
+Review target/configuration changes, run IDs, event IDs, error codes, and connector
+or local persistence audit evidence without copying response bodies into tickets or
+GitHub.
 
 Residual risks include compromised public origins, parser implementation defects,
-browser-engine vulnerabilities, connector platform compromise, and delivery
-ambiguity between an external send and state persistence. Fail closed and keep the
-last valid baseline for all of them.
+browser-engine vulnerabilities, connector platform compromise, local host
+compromise, and delivery ambiguity between an external send and state persistence.
+Fail closed and keep the last valid baseline for all of them.
