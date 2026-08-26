@@ -1,4 +1,4 @@
-"""Local filesystem persistence adapters for the weekly web monitor."""
+"""Local filesystem persistence adapters for the web monitor."""
 
 from __future__ import annotations
 
@@ -94,10 +94,14 @@ def _object_map(value: object, label: str) -> dict[str, object]:
     Raises:
         MonitorError: If ``value`` is not an object with string keys.
     """
-    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+    if not isinstance(value, dict):
         msg = "local_storage_invalid"
         raise MonitorError(msg, f"{label} must be a JSON object")
-    return cast("dict[str, object]", value)
+    raw = cast("dict[object, object]", value)
+    if not all(isinstance(key, str) for key in raw):
+        msg = "local_storage_invalid"
+        raise MonitorError(msg, f"{label} must be a JSON object")
+    return cast("dict[str, object]", raw)
 
 
 def _mapping(value: object, label: str) -> Mapping[str, object]:
@@ -180,7 +184,7 @@ def _run_from_mapping(value: Mapping[str, object]) -> RunRecord:
             result=str(item_map.get("result", "")),
             error_code=str(item_map.get("error_code", "")),
         )
-        for item in raw_attempts
+        for item in cast("list[object]", raw_attempts)
         for item_map in (_mapping(item, "run attempt"),)
     )
     return RunRecord(
@@ -251,7 +255,10 @@ class LocalOperationalStore:
         if not isinstance(raw, list):
             msg = "local_storage_invalid"
             raise MonitorError(msg, "targets.json must contain a JSON array")
-        targets = [Target.from_mapping(_mapping(item, "target")) for item in raw]
+        targets = [
+            Target.from_mapping(_mapping(item, "target"))
+            for item in cast("list[object]", raw)
+        ]
         target_ids = [target.target_id for target in targets]
         if len(target_ids) != len(set(target_ids)):
             msg = "local_storage_invalid"
