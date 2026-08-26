@@ -399,6 +399,7 @@ def _do_handshake_with_deadline(sock: ssl.SSLSocket, deadline: float) -> None:
 def _wrap_tls(sock: socket.socket, host: str, deadline: float) -> _DeadlineSSLSocket:
     """Wrap a pinned socket while preserving hostname verification and SNI."""
     context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.sslsocket_class = _DeadlineSSLSocket
     wrapped = context.wrap_socket(
         sock,
