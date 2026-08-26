@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -91,26 +90,31 @@ def change_event_id(target_id: str, normalized_hash: str) -> str:
     return hashlib.sha256(f"{target_id}{normalized_hash}".encode()).hexdigest()
 
 
-def failure_event_id(target_id: str, year_week: str, threshold: int) -> str:
-    """Return the stable dedup ID for a weekly failure-threshold notification.
+def failure_event_id(target_id: str, episode_id: str, threshold: int) -> str:
+    """Return the stable dedup ID for one failure episode threshold crossing.
+
+    ``episode_id`` is supplied by the caller and should identify the invocation
+    that first crossed the configured consecutive-failure threshold. This keeps
+    failure-alert identity independent from hourly/daily/weekly scheduling cadence.
 
     Returns:
-        A SHA-256 hex digest derived from ``target_id``, ``year_week``, and
+        A SHA-256 hex digest derived from ``target_id``, ``episode_id``, and
         ``threshold``.
 
     Raises:
-        MonitorError: If ``target_id``, ``year_week``, or ``threshold`` is
-            invalid.
+        MonitorError: If any input is invalid.
     """
     validate_target_id(target_id)
     if (
-        not re.fullmatch(r"\d{4}-W\d{2}", year_week)
+        not episode_id
+        or len(episode_id) > 200
+        or any(not char.isprintable() for char in episode_id)
         or not _MIN_THRESHOLD <= threshold <= _MAX_THRESHOLD
     ):
         msg = "notification_invalid"
         raise MonitorError(msg, "failure event inputs are invalid")
-    material = f"failure{target_id}{year_week}{threshold}"
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    material = f"failure{target_id}{episode_id}{threshold}"
+    return hashlib.sha256(material.encode()).hexdigest()
 
 
 def escape_slack_text(value: str) -> str:
