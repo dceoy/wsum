@@ -439,6 +439,11 @@ class WebUpdateMonitorRoutine:
             )
         return reference
 
+    @staticmethod
+    def _failure_episode_id(state: State) -> str:
+        """Return the stable identity for the current consecutive-failure episode."""
+        return state.last_checked_at or "initial"
+
     def _failure_alert(
         self,
         target: Target,
@@ -447,9 +452,13 @@ class WebUpdateMonitorRoutine:
         run_id: str,
     ) -> None:
         threshold = self.config.failure_alert_threshold
-        if state.consecutive_failures != threshold:
+        if state.consecutive_failures < threshold:
             return
-        event_id = failure_event_id(target.target_id, run_id, threshold)
+        event_id = failure_event_id(
+            target.target_id,
+            self._failure_episode_id(state),
+            threshold,
+        )
         message = (
             "*Web監視エラー*\n"
             f"{escape_slack_text(target.name)} ({target.target_id}) の監視が "
@@ -474,6 +483,16 @@ class WebUpdateMonitorRoutine:
             existing = self.store.get_notification(event_id)
             if existing and existing.status in {"sent", "pending", "suppressed"}:
                 return
+            if state.consecutive_failures == threshold:
+                crossing_event_id = failure_event_id(
+                    target.target_id,
+                    run_id,
+                    threshold,
+                )
+                if crossing_event_id != event_id:
+                    crossing = self.store.get_notification(crossing_event_id)
+                    if crossing and crossing.status in {"sent", "pending", "suppressed"}:
+                        return
             self.store.upsert_notification(
                 NotificationRecord(
                     event_id,
@@ -586,7 +605,6 @@ class WebUpdateMonitorRoutine:
                 pass
         failed_state = replace(
             previous_state,
-            last_checked_at=utc_now(),
             consecutive_failures=previous_state.consecutive_failures + 1,
         )
         error_attempts = (
