@@ -12,7 +12,11 @@ _TIMESTAMP = "2026-08-26T00:00:00Z"
 
 
 def _run(index: int) -> RunRecord:
-    """Build one terminal run record."""
+    """Build one terminal run record.
+
+    Returns:
+        A deterministic terminal run record.
+    """
     return RunRecord(
         run_id=f"run-{index}",
         target_id="target",
@@ -26,7 +30,11 @@ def _run(index: int) -> RunRecord:
 
 
 def _notification(index: int) -> NotificationRecord:
-    """Build one notification record."""
+    """Build one notification record.
+
+    Returns:
+        A deterministic sent notification record.
+    """
     return NotificationRecord(
         event_id=f"{index:064x}",
         target_id="target",
