@@ -453,17 +453,15 @@ class WebUpdateMonitorRoutine:
         if state.consecutive_failures <= threshold or not state.last_checked_at:
             return None
         try:
-            checked_at = datetime.fromisoformat(
-                state.last_checked_at.replace("Z", "+00:00")
-            )
+            checked_at = datetime.fromisoformat(state.last_checked_at)
         except ValueError:
             return None
         calendar = checked_at.isocalendar()
         year_week = f"{calendar.year}-W{calendar.week:02d}"
-        material = f"failure{target_id}{year_week}{threshold}".encode("utf-8")
+        material = f"failure{target_id}{year_week}{threshold}".encode()
         return hashlib.sha256(material).hexdigest()
 
-    def _failure_alert(
+    def _failure_alert(  # noqa: C901, PLR0911, PLR0912
         self,
         target: Target,
         state: State,
