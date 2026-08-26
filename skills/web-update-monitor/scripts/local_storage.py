@@ -268,7 +268,9 @@ class LocalOperationalStore:
             connection.close()
             msg = "local_storage_io"
             raise MonitorError(
-                msg, "local operational database could not be configured", retryable=True
+                msg,
+                "local database could not be configured",
+                retryable=True,
             ) from exc
         else:
             return connection
