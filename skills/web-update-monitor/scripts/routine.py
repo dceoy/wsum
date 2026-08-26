@@ -187,6 +187,10 @@ class _PartialCommitError(Exception):
     """
 
 
+class _FailureIdMigrationError(Exception):
+    """The one-time legacy failure-ID migration boundary could not be persisted."""
+
+
 @dataclass(slots=True)
 class _TargetRunContext:
     """Mutable per-target run state, tracked so exception handlers see progress."""
@@ -446,6 +450,43 @@ class WebUpdateMonitorRoutine:
         return state.last_checked_at or "initial"
 
     @staticmethod
+    def _failure_id_migration_event_id(target_id: str) -> str:
+        """Return the durable marker ID that retires legacy weekly lookup."""
+        material = f"failure-id-migration-v2:{target_id}".encode()
+        return hashlib.sha256(material).hexdigest()
+
+    def _failure_id_migration_complete(self, target_id: str) -> bool:
+        """Return whether this target has crossed the one-time migration boundary."""
+        event_id = self._failure_id_migration_event_id(target_id)
+        with self._store_lock:
+            return self.store.get_notification(event_id) is not None
+
+    def _ensure_failure_id_migration_boundary(self, state: State) -> None:
+        """Persist the migration boundary before a healthy state can fail again.
+
+        Raises:
+            _FailureIdMigrationError: If the marker cannot be read or persisted.
+        """
+        if state.consecutive_failures != 0:
+            return
+        event_id = self._failure_id_migration_event_id(state.target_id)
+        try:
+            with self._store_lock:
+                if self.store.get_notification(event_id) is not None:
+                    return
+                self.store.upsert_notification(
+                    NotificationRecord(
+                        event_id,
+                        state.target_id,
+                        "suppressed",
+                        kind="failure",
+                    )
+                )
+        except Exception as exc:
+            msg = "failure-ID migration marker could not be persisted"
+            raise _FailureIdMigrationError(msg) from exc
+
+    @staticmethod
     def _legacy_weekly_failure_event_id(
         target_id: str, state: State, threshold: int
     ) -> str | None:
@@ -476,8 +517,12 @@ class WebUpdateMonitorRoutine:
             self._failure_episode_id(state),
             threshold,
         )
-        legacy_event_id = self._legacy_weekly_failure_event_id(
-            target.target_id, state, threshold
+        legacy_event_id = (
+            None
+            if self._failure_id_migration_complete(target.target_id)
+            else self._legacy_weekly_failure_event_id(
+                target.target_id, state, threshold
+            )
         )
         message = (
             "*Web監視エラー*\n"
@@ -1011,6 +1056,8 @@ class WebUpdateMonitorRoutine:
         Raises:
             _PartialCommitError: If a prior failure's Run record landed but
                 its paired state update did not.
+            _FailureIdMigrationError: If a healthy state cannot persist the
+                one-time legacy failure-ID migration boundary before fetching.
         """
         started_at = utc_now()
         ctx = _TargetRunContext(previous_state=State(target.target_id))
@@ -1020,10 +1067,11 @@ class WebUpdateMonitorRoutine:
                 return claimed
             ctx.previous_state = self._state(target)
             ctx.state_loaded = True
+            self._ensure_failure_id_migration_boundary(ctx.previous_state)
             return self._run_target_pipeline_in_workspace(
                 run_id, target, started_at, ctx
             )
-        except _PartialCommitError:
+        except (_PartialCommitError, _FailureIdMigrationError):
             raise
         except MonitorError as exc:
             return self._finish_failure(
