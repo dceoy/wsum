@@ -257,16 +257,28 @@ class LocalOperationalStore:
                 self._database_path,
                 timeout=_SQLITE_TIMEOUT_SECONDS,
             )
-            connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
-            return connection
         except sqlite3.Error as exc:
             msg = "local_storage_io"
             raise MonitorError(
                 msg, "local operational database could not be opened", retryable=True
             ) from exc
+        try:
+            connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
+        except sqlite3.Error as exc:
+            connection.close()
+            msg = "local_storage_io"
+            raise MonitorError(
+                msg, "local operational database could not be configured", retryable=True
+            ) from exc
+        else:
+            return connection
 
     def _initialize_database(self) -> None:
-        """Create the operational tables if this runtime root is new."""
+        """Create the operational tables if this runtime root is new.
+
+        Raises:
+            MonitorError: If the database cannot be initialized or secured.
+        """
         with self._lock:
             connection = self._connect()
             try:
@@ -314,6 +326,9 @@ class LocalOperationalStore:
 
         Returns:
             The decoded record mapping, or ``None`` when absent.
+
+        Raises:
+            MonitorError: If the operational database cannot be read.
         """
         with self._lock:
             connection = self._connect()
@@ -332,7 +347,11 @@ class LocalOperationalStore:
         return _decode_record(row[0], label) if row is not None else None
 
     def _write_one(self, statement: str, parameters: tuple[str, str]) -> None:
-        """Execute one transactional operational write."""
+        """Execute one transactional operational write.
+
+        Raises:
+            MonitorError: If the operational record cannot be written.
+        """
         with self._lock:
             connection = self._connect()
             try:
@@ -351,7 +370,11 @@ class LocalOperationalStore:
         statement: str,
         parameters: Sequence[tuple[str, str]],
     ) -> None:
-        """Execute one all-or-nothing batch of operational writes."""
+        """Execute one all-or-nothing batch of operational writes.
+
+        Raises:
+            MonitorError: If the operational records cannot be written.
+        """
         with self._lock:
             connection = self._connect()
             try:
@@ -360,7 +383,9 @@ class LocalOperationalStore:
             except sqlite3.Error as exc:
                 msg = "local_storage_io"
                 raise MonitorError(
-                    msg, "local operational records could not be written", retryable=True
+                    msg,
+                    "local operational records could not be written",
+                    retryable=True,
                 ) from exc
             finally:
                 connection.close()
