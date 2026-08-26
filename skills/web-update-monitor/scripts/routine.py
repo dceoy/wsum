@@ -491,7 +491,11 @@ class WebUpdateMonitorRoutine:
                 )
                 if crossing_event_id != event_id:
                     crossing = self.store.get_notification(crossing_event_id)
-                    if crossing and crossing.status in {"sent", "pending", "suppressed"}:
+                    if crossing and crossing.status in {
+                        "sent",
+                        "pending",
+                        "suppressed",
+                    }:
                         return
             self.store.upsert_notification(
                 NotificationRecord(
