@@ -49,10 +49,10 @@ def _legacy_event_id() -> str:
     Returns:
         The legacy SHA-256 event ID.
     """
-    checked_at = datetime.fromisoformat(_LEGACY_CHECKED_AT.replace("Z", "+00:00"))
+    checked_at = datetime.fromisoformat(_LEGACY_CHECKED_AT)
     calendar = checked_at.isocalendar()
     year_week = f"{calendar.year}-W{calendar.week:02d}"
-    material = f"failureone{year_week}{_THRESHOLD}".encode("utf-8")
+    material = f"failureone{year_week}{_THRESHOLD}".encode()
     return hashlib.sha256(material).hexdigest()
 
 
