@@ -181,8 +181,10 @@ def test_recovered_target_does_not_reuse_stale_weekly_alert_for_new_episode() ->
     )
 
     first = routine.run(run_id="new-episode-1")
+    marker_id = routine._failure_id_migration_event_id("one")
     assert first.metrics.failed == 1
     assert store.states["one"].consecutive_failures == 1
+    assert store.notifications[marker_id].status == "suppressed"
     assert slack.messages == []
 
     store.replace_state(replace(store.states["one"], consecutive_failures=_THRESHOLD))
