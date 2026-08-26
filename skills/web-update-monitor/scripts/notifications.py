@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 _MIN_THRESHOLD = 1
 _MAX_THRESHOLD = 100
+_MAX_EPISODE_ID_LENGTH = 200
 _MIN_MAX_MESSAGE_CHARS = 500
 _MAX_MAX_MESSAGE_CHARS = 10_000
 
@@ -107,7 +108,7 @@ def failure_event_id(target_id: str, episode_id: str, threshold: int) -> str:
     validate_target_id(target_id)
     if (
         not episode_id
-        or len(episode_id) > 200
+        or len(episode_id) > _MAX_EPISODE_ID_LENGTH
         or any(not char.isprintable() for char in episode_id)
         or not _MIN_THRESHOLD <= threshold <= _MAX_THRESHOLD
     ):
@@ -232,16 +233,11 @@ def _partition_by_dedup_status(
             outcomes[event.event_id] = DeliveryOutcome(event.event_id, "suppressed")
             continue
         if existing and existing.status == "suppressed":
-            # An operator-suppressed record means this event was never sent
-            # and never will be, unlike the "sent" dedup case above. Tag it
-            # distinctly so callers do not count it as a delivered notification.
             outcomes[event.event_id] = DeliveryOutcome(
                 event.event_id, "suppressed", error_code="operator_suppressed"
             )
             continue
         if existing and existing.status == "pending":
-            # A pending record may mean delivery succeeded before the final state
-            # update. Fail closed instead of risking a duplicate message.
             outcomes[event.event_id] = DeliveryOutcome(
                 event.event_id, "pending", error_code="delivery_ambiguous"
             )
@@ -316,9 +312,6 @@ def _deliver_chunk(
             for event in chunk
         }
     except Exception:  # ruff: ignore[blind-except] -- any connector failure is ambiguous by
-        # design: SlackConnector is a third-party-implemented boundary whose
-        # failure modes cannot be enumerated. Preserve the pending state and
-        # require operator resolution rather than risk duplicating a send.
         return {
             event.event_id: DeliveryOutcome(
                 event.event_id,
@@ -340,11 +333,6 @@ def _deliver_chunk(
     try:
         store.upsert_notifications_atomically(sent_records)
     except Exception:  # ruff: ignore[blind-except] -- any store failure here is ambiguous by
-        # design: NotificationStore is a third-party-implemented boundary.
-        # Slack accepted the complete chunk, but no per-event sent state
-        # was committed. The store's atomic batch contract guarantees
-        # that every event remains pending instead of leaving a partial
-        # group that cannot be reconciled consistently.
         return {
             event.event_id: DeliveryOutcome(
                 event.event_id,
