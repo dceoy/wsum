@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import tempfile
 import threading
@@ -444,6 +445,24 @@ class WebUpdateMonitorRoutine:
         """Return the stable identity for the current consecutive-failure episode."""
         return state.last_checked_at or "initial"
 
+    @staticmethod
+    def _legacy_weekly_failure_event_id(
+        target_id: str, state: State, threshold: int
+    ) -> str | None:
+        """Return the pre-migration weekly ID for an already-active incident."""
+        if state.consecutive_failures <= threshold or not state.last_checked_at:
+            return None
+        try:
+            checked_at = datetime.fromisoformat(
+                state.last_checked_at.replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None
+        calendar = checked_at.isocalendar()
+        year_week = f"{calendar.year}-W{calendar.week:02d}"
+        material = f"failure{target_id}{year_week}{threshold}".encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
+
     def _failure_alert(
         self,
         target: Target,
@@ -459,6 +478,9 @@ class WebUpdateMonitorRoutine:
             self._failure_episode_id(state),
             threshold,
         )
+        legacy_event_id = self._legacy_weekly_failure_event_id(
+            target.target_id, state, threshold
+        )
         message = (
             "*Web監視エラー*\n"
             f"{escape_slack_text(target.name)} ({target.target_id}) の監視が "
@@ -466,7 +488,26 @@ class WebUpdateMonitorRoutine:
             f"エラーコード: {error_code}"
         )
         if self.config.delivery_mode == "outbox":
-            outcome = self._queue_outbox_message(event_id, target, message)
+            outcome: DeliveryOutcome | None = None
+            if legacy_event_id and self.outbox_store is not None:
+                with self._store_lock:
+                    current = self.outbox_store.get_outbox(event_id)
+                    legacy = (
+                        None
+                        if current is not None
+                        else self.outbox_store.get_outbox(legacy_event_id)
+                    )
+                if legacy is not None:
+                    if legacy.status == "sent":
+                        outcome = DeliveryOutcome(event_id, "suppressed")
+                    elif legacy.status in {"pending", "sending", "retry"}:
+                        outcome = DeliveryOutcome(event_id, "queued")
+                    else:
+                        outcome = DeliveryOutcome(
+                            event_id, "failed", error_code="outbox_poison"
+                        )
+            if outcome is None:
+                outcome = self._queue_outbox_message(event_id, target, message)
             self._audit(
                 "failure_alert",
                 target_id=target.target_id,
@@ -483,6 +524,11 @@ class WebUpdateMonitorRoutine:
             existing = self.store.get_notification(event_id)
             if existing and existing.status in {"sent", "pending", "suppressed"}:
                 return
+            if existing is None and legacy_event_id:
+                legacy = self.store.get_notification(legacy_event_id)
+                if legacy and legacy.status in {"sent", "pending", "suppressed"}:
+                    self.store.upsert_notification(replace(legacy, event_id=event_id))
+                    return
             if state.consecutive_failures == threshold:
                 crossing_event_id = failure_event_id(
                     target.target_id,
