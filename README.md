@@ -23,10 +23,10 @@ test suite:
 python3 -m pip install 'pypdf>=6,<7'
 ```
 
-Run the local test suite:
+Run the local test suite with the repository's uv environment:
 
 ```bash
-python3 -m unittest discover -s tests -v
+uv run pytest
 ```
 
 Run the end-to-end connector-free fixture:
