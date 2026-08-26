@@ -1,4 +1,0 @@
-interface:
-  display_name: "Web Monitor"
-  short_description: "Monitor website changes with selectable persistence"
-  default_prompt: "Use $web-monitor to run a safe website change check with either Google Drive or local persistence."

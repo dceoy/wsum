@@ -1,6 +1,6 @@
-# Website Update Monitor
+# Web Update Monitor
 
-A deterministic toolkit and Agent Skill for website change monitoring. The monitor
+A deterministic toolkit and Agent Skill for website update monitoring. The monitor
 uses the same SSRF-safe fetch, normalization, diff, summary-validation, retry,
 replay, and notification pipeline with one of two persistence modes selected at
 runtime:
@@ -10,8 +10,8 @@ runtime:
 - `local`: store targets, operational state, run history, notification state, and
   snapshots in a caller-selected local runtime directory.
 
-The registered skill lives in `.claude/skills/web-monitor/`. Start with its
-`SKILL.md` and references.
+The registered skill is `web-update-monitor` and lives in
+`.claude/skills/web-update-monitor/`. Start with its `SKILL.md` and references.
 
 HTML, plain-text, and feed monitoring use only the standard library. PDF
 normalization requires [`pypdf`](https://pypi.org/project/pypdf/); when running
@@ -31,7 +31,7 @@ python3 -m unittest discover -s tests -v
 Run the end-to-end connector-free fixture:
 
 ```bash
-python3 .claude/skills/web-monitor/scripts/dry_run.py \
+python3 .claude/skills/web-update-monitor/scripts/dry_run.py \
   tests/fixtures/dry-run.json
 ```
 

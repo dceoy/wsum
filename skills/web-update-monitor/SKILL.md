@@ -1,11 +1,11 @@
 ---
-name: web-monitor
-description: Monitor configured HTTP(S) websites, text PDFs, RSS/Atom feeds, and explicitly approved browser-rendered pages using either Google Sheets/Google Drive or local filesystem persistence. Use for ad hoc or externally scheduled website-change checks, deterministic SSRF-safe fetch/normalize/diff processing, bounded evidence-grounded summaries, deduplicated Japanese Slack notifications, replay, operations, and troubleshooting.
+name: web-update-monitor
+description: Monitor configured HTTP(S) websites, text PDFs, RSS/Atom feeds, and explicitly approved browser-rendered pages using either Google Sheets/Google Drive or local filesystem persistence. Use for ad hoc or externally scheduled website-update checks, deterministic SSRF-safe fetch/normalize/diff processing, bounded evidence-grounded summaries, deduplicated Japanese Slack notifications, replay, operations, and troubleshooting.
 ---
 
-# Web Monitor
+# Web Update Monitor
 
-Monitor website changes with one deterministic pipeline and a caller-selected
+Monitor website updates with one deterministic pipeline and a caller-selected
 persistence backend. The skill does not define or require a weekly cadence; run it
 ad hoc or from an external scheduler at the frequency appropriate to the targets.
 
@@ -136,14 +136,14 @@ python3 -m pip install 'pypdf>=6,<7'
 Run the connector-free fixture:
 
 ```bash
-python3 .claude/skills/web-monitor/scripts/dry_run.py \
+python3 .claude/skills/web-update-monitor/scripts/dry_run.py \
   tests/fixtures/dry-run.json
 ```
 
 Replay stored normalized artifacts without fetching:
 
 ```bash
-python3 .claude/skills/web-monitor/scripts/replay.py replay-manifest.json
+python3 .claude/skills/web-update-monitor/scripts/replay.py replay-manifest.json
 ```
 
 Run repository tests:
