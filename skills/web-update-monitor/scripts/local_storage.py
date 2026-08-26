@@ -1,9 +1,10 @@
-"""Local filesystem persistence adapters for the web monitor."""
+"""Local filesystem persistence adapters for the web update monitor."""
 
 from __future__ import annotations
 
 import json
 import secrets
+import sqlite3
 import threading
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
@@ -27,6 +28,8 @@ if TYPE_CHECKING:
     from normalize import NormalizedContent
 
 _MAX_METADATA_BYTES = 10_000_000
+_SQLITE_TIMEOUT_SECONDS = 30.0
+_SQLITE_BUSY_TIMEOUT_MS = 30_000
 _MIN_MAX_SNAPSHOT_BYTES = 1_024
 _MAX_MAX_SNAPSHOT_BYTES = 50_000_000
 _MAX_SNAPSHOT_REF_LENGTH = 1_000
@@ -85,25 +88,6 @@ def _load_json(path: Path, default: object) -> object:
         raise MonitorError(msg, "local storage file contains invalid JSON") from exc
 
 
-def _object_map(value: object, label: str) -> dict[str, object]:
-    """Validate a JSON object with string keys.
-
-    Returns:
-        A typed copy of the JSON object.
-
-    Raises:
-        MonitorError: If ``value`` is not an object with string keys.
-    """
-    if not isinstance(value, dict):
-        msg = "local_storage_invalid"
-        raise MonitorError(msg, f"{label} must be a JSON object")
-    raw = cast("dict[object, object]", value)
-    if not all(isinstance(key, str) for key in raw):
-        msg = "local_storage_invalid"
-        raise MonitorError(msg, f"{label} must be a JSON object")
-    return cast("dict[str, object]", raw)
-
-
 def _mapping(value: object, label: str) -> Mapping[str, object]:
     """Validate one JSON record mapping.
 
@@ -117,36 +101,6 @@ def _mapping(value: object, label: str) -> Mapping[str, object]:
         msg = "local_storage_invalid"
         raise MonitorError(msg, f"{label} must be a JSON object")
     return cast("Mapping[str, object]", value)
-
-
-def _write_json(path: Path, value: object) -> None:
-    """Atomically replace one local JSON document.
-
-    Raises:
-        MonitorError: If the parent directory or file cannot be written.
-    """
-    payload = (
-        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + "\n"
-    ).encode()
-    if len(payload) > _MAX_METADATA_BYTES:
-        msg = "local_storage_invalid"
-        raise MonitorError(msg, "local storage metadata exceeds the size limit")
-    temp_path: Path | None = None
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-        temp_path.write_bytes(payload)
-        temp_path.chmod(0o600)
-        temp_path.replace(path)
-    except OSError as exc:
-        msg = "local_storage_io"
-        raise MonitorError(
-            msg, "local storage file could not be written", retryable=True
-        ) from exc
-    finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
 
 
 def _integer(value: object, label: str) -> int:
@@ -216,14 +170,55 @@ def _notification_from_mapping(value: Mapping[str, object]) -> NotificationRecor
     )
 
 
+def _encode_record(value: Mapping[str, object]) -> str:
+    """Serialize one bounded operational record for SQLite storage.
+
+    Returns:
+        Compact deterministic JSON text.
+
+    Raises:
+        MonitorError: If the single record exceeds the metadata safety bound.
+    """
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if len(payload.encode()) > _MAX_METADATA_BYTES:
+        msg = "local_storage_invalid"
+        raise MonitorError(msg, "local storage record exceeds the size limit")
+    return payload
+
+
+def _decode_record(payload: object, label: str) -> Mapping[str, object]:
+    """Decode one SQLite JSON payload into a validated mapping.
+
+    Returns:
+        The decoded record mapping.
+
+    Raises:
+        MonitorError: If the payload is not bounded valid JSON object text.
+    """
+    if not isinstance(payload, str) or len(payload.encode()) > _MAX_METADATA_BYTES:
+        msg = "local_storage_invalid"
+        raise MonitorError(msg, f"{label} contains invalid JSON")
+    try:
+        return _mapping(json.loads(payload), label)
+    except json.JSONDecodeError as exc:
+        msg = "local_storage_invalid"
+        raise MonitorError(msg, f"{label} contains invalid JSON") from exc
+
+
 class LocalOperationalStore:
-    """Thread-safe JSON-backed operational and notification store."""
+    """SQLite-backed operational state, run history, and notification store."""
 
     def __init__(self, root: str | Path) -> None:
         """Bind the store to a caller-selected local runtime directory.
 
         Raises:
-            MonitorError: If the runtime directory cannot be created.
+            MonitorError: If the runtime directory or SQLite database cannot be
+                created safely.
         """
         try:
             self._root = Path(root).expanduser().resolve()
@@ -233,7 +228,142 @@ class LocalOperationalStore:
             raise MonitorError(
                 msg, "local runtime directory could not be created"
             ) from exc
+        self._database_path = self._root / "operations.sqlite3"
         self._lock = threading.RLock()
+        self._initialize_database()
+
+    def _connect(self) -> sqlite3.Connection:
+        """Open one bounded-wait SQLite connection.
+
+        Returns:
+            A new connection to the local operational database.
+
+        Raises:
+            MonitorError: If the database path is unsafe or cannot be opened.
+        """
+        try:
+            if self._database_path.exists() and (
+                self._database_path.is_symlink() or not self._database_path.is_file()
+            ):
+                msg = "local_storage_invalid"
+                raise MonitorError(msg, "local database path must be a regular file")
+        except OSError as exc:
+            msg = "local_storage_io"
+            raise MonitorError(
+                msg, "local database path could not be inspected", retryable=True
+            ) from exc
+        try:
+            connection = sqlite3.connect(
+                self._database_path,
+                timeout=_SQLITE_TIMEOUT_SECONDS,
+            )
+            connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
+            return connection
+        except sqlite3.Error as exc:
+            msg = "local_storage_io"
+            raise MonitorError(
+                msg, "local operational database could not be opened", retryable=True
+            ) from exc
+
+    def _initialize_database(self) -> None:
+        """Create the operational tables if this runtime root is new."""
+        with self._lock:
+            connection = self._connect()
+            try:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS state (
+                        target_id TEXT PRIMARY KEY,
+                        payload TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS runs (
+                        run_id TEXT PRIMARY KEY,
+                        payload TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS notifications (
+                        event_id TEXT PRIMARY KEY,
+                        payload TEXT NOT NULL
+                    );
+                    """
+                )
+                connection.commit()
+            except sqlite3.Error as exc:
+                msg = "local_storage_io"
+                raise MonitorError(
+                    msg,
+                    "local operational database could not be initialized",
+                    retryable=True,
+                ) from exc
+            finally:
+                connection.close()
+            try:
+                self._database_path.chmod(0o600)
+            except OSError as exc:
+                msg = "local_storage_io"
+                raise MonitorError(
+                    msg, "local operational database permissions could not be set"
+                ) from exc
+
+    def _select_payload(
+        self,
+        statement: str,
+        key: str,
+        label: str,
+    ) -> Mapping[str, object] | None:
+        """Read one record payload by primary key.
+
+        Returns:
+            The decoded record mapping, or ``None`` when absent.
+        """
+        with self._lock:
+            connection = self._connect()
+            try:
+                row = cast(
+                    "tuple[object] | None",
+                    connection.execute(statement, (key,)).fetchone(),
+                )
+            except sqlite3.Error as exc:
+                msg = "local_storage_io"
+                raise MonitorError(
+                    msg, "local operational record could not be read", retryable=True
+                ) from exc
+            finally:
+                connection.close()
+        return _decode_record(row[0], label) if row is not None else None
+
+    def _write_one(self, statement: str, parameters: tuple[str, str]) -> None:
+        """Execute one transactional operational write."""
+        with self._lock:
+            connection = self._connect()
+            try:
+                with connection:
+                    connection.execute(statement, parameters)
+            except sqlite3.Error as exc:
+                msg = "local_storage_io"
+                raise MonitorError(
+                    msg, "local operational record could not be written", retryable=True
+                ) from exc
+            finally:
+                connection.close()
+
+    def _write_many(
+        self,
+        statement: str,
+        parameters: Sequence[tuple[str, str]],
+    ) -> None:
+        """Execute one all-or-nothing batch of operational writes."""
+        with self._lock:
+            connection = self._connect()
+            try:
+                with connection:
+                    connection.executemany(statement, parameters)
+            except sqlite3.Error as exc:
+                msg = "local_storage_io"
+                raise MonitorError(
+                    msg, "local operational records could not be written", retryable=True
+                ) from exc
+            finally:
+                connection.close()
 
     def load_enabled_targets(self) -> list[Target]:
         """Load and validate enabled targets from ``targets.json``.
@@ -268,60 +398,56 @@ class LocalOperationalStore:
     def get_state(self, target_id: str) -> State | None:
         """Return the stored state for ``target_id``, if any."""
         validate_target_id(target_id)
-        with self._lock:
-            records = _object_map(
-                _load_json(self._root / "state.json", {}), "state.json"
-            )
-            raw = records.get(target_id)
-        return State.from_mapping(_mapping(raw, "state")) if raw is not None else None
+        value = self._select_payload(
+            "SELECT payload FROM state WHERE target_id = ?",
+            target_id,
+            "state",
+        )
+        return State.from_mapping(value) if value is not None else None
 
     def replace_state(self, state: State) -> None:
-        """Insert or replace one target state atomically."""
-        with self._lock:
-            path = self._root / "state.json"
-            records = _object_map(_load_json(path, {}), "state.json")
-            records[state.target_id] = state.as_dict()
-            _write_json(path, records)
+        """Insert or replace one target state transactionally."""
+        self._write_one(
+            """
+            INSERT INTO state (target_id, payload) VALUES (?, ?)
+            ON CONFLICT(target_id) DO UPDATE SET payload = excluded.payload
+            """,
+            (state.target_id, _encode_record(state.as_dict())),
+        )
 
     def get_run(self, run_id: str) -> RunRecord | None:
         """Return the stored run record for ``run_id``, if any."""
-        with self._lock:
-            records = _object_map(_load_json(self._root / "runs.json", {}), "runs.json")
-            raw = records.get(run_id)
-        return _run_from_mapping(_mapping(raw, "run")) if raw is not None else None
+        value = self._select_payload(
+            "SELECT payload FROM runs WHERE run_id = ?",
+            run_id,
+            "run",
+        )
+        return _run_from_mapping(value) if value is not None else None
 
     def append_run(self, run: RunRecord) -> None:
-        """Idempotently persist one run, keyed by ``run_id``."""
-        with self._lock:
-            path = self._root / "runs.json"
-            records = _object_map(_load_json(path, {}), "runs.json")
-            if run.run_id in records:
-                return
-            records[run.run_id] = run.as_dict()
-            _write_json(path, records)
+        """Idempotently persist one immutable run keyed by ``run_id``."""
+        self._write_one(
+            "INSERT OR IGNORE INTO runs (run_id, payload) VALUES (?, ?)",
+            (run.run_id, _encode_record(run.as_dict())),
+        )
 
     def get_notification(self, event_id: str) -> NotificationRecord | None:
         """Return the stored notification record for ``event_id``, if any."""
-        with self._lock:
-            records = _object_map(
-                _load_json(self._root / "notifications.json", {}),
-                "notifications.json",
-            )
-            raw = records.get(event_id)
-        return (
-            _notification_from_mapping(_mapping(raw, "notification"))
-            if raw is not None
-            else None
+        value = self._select_payload(
+            "SELECT payload FROM notifications WHERE event_id = ?",
+            event_id,
+            "notification",
         )
+        return _notification_from_mapping(value) if value is not None else None
 
     def upsert_notification(self, notification: NotificationRecord) -> None:
-        """Insert or replace one notification record atomically."""
+        """Insert or replace one notification record transactionally."""
         self.upsert_notifications_atomically((notification,))
 
     def upsert_notifications_atomically(
         self, notifications: Sequence[NotificationRecord]
     ) -> None:
-        """Insert or replace all notification records with one atomic file write.
+        """Insert or replace all notification records in one SQLite transaction.
 
         Raises:
             MonitorError: If ``notifications`` contains duplicate event IDs.
@@ -332,11 +458,16 @@ class LocalOperationalStore:
             raise MonitorError(msg, "notification batch contains duplicate IDs")
         if not notifications:
             return
-        with self._lock:
-            path = self._root / "notifications.json"
-            records = _object_map(_load_json(path, {}), "notifications.json")
-            records.update({item.event_id: item.as_dict() for item in notifications})
-            _write_json(path, records)
+        self._write_many(
+            """
+            INSERT INTO notifications (event_id, payload) VALUES (?, ?)
+            ON CONFLICT(event_id) DO UPDATE SET payload = excluded.payload
+            """,
+            tuple(
+                (item.event_id, _encode_record(item.as_dict()))
+                for item in notifications
+            ),
+        )
 
 
 class LocalSnapshotStore:
