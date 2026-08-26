@@ -20,10 +20,18 @@ class ConfirmedThenSuccessfulSlack:
     """Fail one confirmed send, then accept the retry."""
 
     def __init__(self) -> None:
+        """Initialize the send-call counter."""
         self.calls = 0
 
     def send_message(self, notification_group: str, message: str) -> str:
-        """Fail the first call and return a delivery reference thereafter."""
+        """Fail the first call and return a delivery reference thereafter.
+
+        Returns:
+            A deterministic delivery reference after the first call.
+
+        Raises:
+            ConfirmedDeliveryFailure: On the first send attempt.
+        """
         del notification_group, message
         self.calls += 1
         if self.calls == 1:
@@ -33,7 +41,11 @@ class ConfirmedThenSuccessfulSlack:
 
 
 def _target() -> Target:
-    """Build one deterministic monitor target."""
+    """Build one deterministic monitor target.
+
+    Returns:
+        A validated target fixture.
+    """
     return Target.from_mapping({
         "target_id": "one",
         "enabled": True,
