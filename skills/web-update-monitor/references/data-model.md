@@ -36,7 +36,9 @@ Both modes use the schemas under `schemas/` and the same logical fields.
 `normalized_hash`, `snapshot_ref`, `consecutive_failures`
 
 Replace one target state as a unit. Preserve `normalized_hash` and `snapshot_ref` on
-any fetch, parse, summary, snapshot, or notification failure. Reset
+any fetch, parse, summary, snapshot, or notification failure. `last_checked_at`
+advances after a successful terminal check and remains unchanged during a consecutive
+failure episode; failed attempts are timestamped by their Run records. Reset
 `consecutive_failures` only after a successful terminal check.
 
 ### Runs
@@ -55,10 +57,12 @@ existing terminal record before fetching, writing state, or notifying.
 
 `status` is `pending`, `sent`, `failed`, or `suppressed`. `kind` is `change` or
 `failure`. Derive a change event ID as `SHA256(target_id + normalized_hash)`.
-Derive a failure alert ID from the target, the run that first crosses the configured
-consecutive-failure threshold, and that threshold; this keeps failure episodes
-independent from scheduler cadence. Never automatically retry `pending`, because
-delivery may have succeeded before the final state write.
+Derive a failure alert ID from a canonical tuple containing the target, a stable
+failure-episode anchor (`last_checked_at`, or `initial` before the first successful
+check), and the configured consecutive-failure threshold. Confirmed delivery
+failures may retry with the same event ID while the streak remains at or above the
+threshold; never automatically retry `pending`, because delivery may have succeeded
+before the final state write.
 
 ### Optional Outbox
 
