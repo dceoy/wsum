@@ -1,7 +1,8 @@
-"""Weekly end-to-end monitor orchestration with per-target isolation."""
+"""End-to-end web update monitor orchestration with per-target isolation."""
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import tempfile
 import threading
@@ -108,7 +109,7 @@ _MAX_NOTIFICATION_CHARS = 3_500
 
 @dataclass(frozen=True, slots=True)
 class RoutineConfig:
-    """Validated tunables for one :class:`WeeklyMonitorRoutine`."""
+    """Validated tunables for one :class:`WebUpdateMonitorRoutine`."""
 
     max_concurrency: int = 2
     failure_alert_threshold: int = 3
@@ -186,6 +187,10 @@ class _PartialCommitError(Exception):
     """
 
 
+class _FailureIdMigrationError(Exception):
+    """The one-time legacy failure-ID migration boundary could not be persisted."""
+
+
 @dataclass(slots=True)
 class _TargetRunContext:
     """Mutable per-target run state, tracked so exception handlers see progress."""
@@ -239,8 +244,8 @@ class DefaultFetcher:
         )
 
 
-class WeeklyMonitorRoutine:
-    """Orchestrates a full weekly monitoring run across every enabled target."""
+class WebUpdateMonitorRoutine:
+    """Orchestrates one monitoring cycle across every enabled target."""
 
     def __init__(
         self,
@@ -402,22 +407,10 @@ class WeeklyMonitorRoutine:
 
     def _persist_success(self, state: State, run: RunRecord) -> RunRecord:
         with self._store_lock:
-            # Run is the durable idempotency checkpoint _process_target's
-            # claimed-run replay depends on (the get_run check near the top
-            # of _process_target). Writing it before State means that if the
-            # process fails between these two independent connector writes,
-            # a retry with the same run_id finds the terminal Run and
-            # replays it instead of re-fetching or re-notifying. The reverse
-            # order can advance State while the Run write never lands,
-            # silently dropping the result the State change was based on.
             self.store.append_run(run)
             try:
                 self.store.replace_state(state)
             except Exception as exc:
-                # append_run already landed and dedups by run_id, so it can
-                # no longer be made to record a different outcome for this
-                # run_id. Raise rather than let a caller retry the pair and
-                # silently no-op the append while replace_state runs again.
                 msg = (
                     f"State commit failed after Run {run.run_id} was already persisted"
                 )
@@ -451,7 +444,65 @@ class WeeklyMonitorRoutine:
             )
         return reference
 
-    def _failure_alert(
+    @staticmethod
+    def _failure_episode_id(state: State) -> str:
+        """Return the stable identity for the current consecutive-failure episode."""
+        return state.last_checked_at or "initial"
+
+    @staticmethod
+    def _failure_id_migration_event_id(target_id: str) -> str:
+        """Return the durable marker ID that retires legacy weekly lookup."""
+        material = f"failure-id-migration-v2:{target_id}".encode()
+        return hashlib.sha256(material).hexdigest()
+
+    def _failure_id_migration_complete(self, target_id: str) -> bool:
+        """Return whether this target has crossed the one-time migration boundary."""
+        event_id = self._failure_id_migration_event_id(target_id)
+        with self._store_lock:
+            return self.store.get_notification(event_id) is not None
+
+    def _ensure_failure_id_migration_boundary(self, state: State) -> None:
+        """Persist the migration boundary before a healthy state can fail again.
+
+        Raises:
+            _FailureIdMigrationError: If the marker cannot be read or persisted.
+        """
+        if state.consecutive_failures != 0:
+            return
+        event_id = self._failure_id_migration_event_id(state.target_id)
+        try:
+            with self._store_lock:
+                if self.store.get_notification(event_id) is not None:
+                    return
+                self.store.upsert_notification(
+                    NotificationRecord(
+                        event_id,
+                        state.target_id,
+                        "suppressed",
+                        kind="failure",
+                    )
+                )
+        except Exception as exc:
+            msg = "failure-ID migration marker could not be persisted"
+            raise _FailureIdMigrationError(msg) from exc
+
+    @staticmethod
+    def _legacy_weekly_failure_event_id(
+        target_id: str, state: State, threshold: int
+    ) -> str | None:
+        """Return the pre-migration weekly ID for an already-active incident."""
+        if state.consecutive_failures <= threshold or not state.last_checked_at:
+            return None
+        try:
+            checked_at = datetime.fromisoformat(state.last_checked_at)
+        except ValueError:
+            return None
+        calendar = checked_at.isocalendar()
+        year_week = f"{calendar.year}-W{calendar.week:02d}"
+        material = f"failure{target_id}{year_week}{threshold}".encode()
+        return hashlib.sha256(material).hexdigest()
+
+    def _failure_alert(  # ruff: ignore[complex-structure, too-many-return-statements, too-many-branches]
         self,
         target: Target,
         state: State,
@@ -461,9 +512,18 @@ class WeeklyMonitorRoutine:
         threshold = self.config.failure_alert_threshold
         if state.consecutive_failures < threshold:
             return
-        now = datetime.now(UTC)
-        year_week = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
-        event_id = failure_event_id(target.target_id, year_week, threshold)
+        event_id = failure_event_id(
+            target.target_id,
+            self._failure_episode_id(state),
+            threshold,
+        )
+        legacy_event_id = (
+            None
+            if self._failure_id_migration_complete(target.target_id)
+            else self._legacy_weekly_failure_event_id(
+                target.target_id, state, threshold
+            )
+        )
         message = (
             "*Web監視エラー*\n"
             f"{escape_slack_text(target.name)} ({target.target_id}) の監視が "
@@ -471,7 +531,26 @@ class WeeklyMonitorRoutine:
             f"エラーコード: {error_code}"
         )
         if self.config.delivery_mode == "outbox":
-            outcome = self._queue_outbox_message(event_id, target, message)
+            outcome: DeliveryOutcome | None = None
+            if legacy_event_id and self.outbox_store is not None:
+                with self._store_lock:
+                    current = self.outbox_store.get_outbox(event_id)
+                    legacy = (
+                        None
+                        if current is not None
+                        else self.outbox_store.get_outbox(legacy_event_id)
+                    )
+                if legacy is not None:
+                    if legacy.status == "sent":
+                        outcome = DeliveryOutcome(event_id, "suppressed")
+                    elif legacy.status in {"pending", "sending", "retry"}:
+                        outcome = DeliveryOutcome(event_id, "queued")
+                    else:
+                        outcome = DeliveryOutcome(
+                            event_id, "failed", error_code="outbox_poison"
+                        )
+            if outcome is None:
+                outcome = self._queue_outbox_message(event_id, target, message)
             self._audit(
                 "failure_alert",
                 target_id=target.target_id,
@@ -488,6 +567,25 @@ class WeeklyMonitorRoutine:
             existing = self.store.get_notification(event_id)
             if existing and existing.status in {"sent", "pending", "suppressed"}:
                 return
+            if existing is None and legacy_event_id:
+                legacy = self.store.get_notification(legacy_event_id)
+                if legacy and legacy.status in {"sent", "pending", "suppressed"}:
+                    self.store.upsert_notification(replace(legacy, event_id=event_id))
+                    return
+            if state.consecutive_failures == threshold:
+                crossing_event_id = failure_event_id(
+                    target.target_id,
+                    run_id,
+                    threshold,
+                )
+                if crossing_event_id != event_id:
+                    crossing = self.store.get_notification(crossing_event_id)
+                    if crossing and crossing.status in {
+                        "sent",
+                        "pending",
+                        "suppressed",
+                    }:
+                        return
             self.store.upsert_notification(
                 NotificationRecord(
                     event_id,
@@ -593,12 +691,6 @@ class WeeklyMonitorRoutine:
         state_loaded: bool = True,
     ) -> RunRecord:
         if not state_loaded:
-            # The real previous state was never loaded before this failure
-            # (get_run or _state itself raised), so previous_state is still
-            # the empty placeholder. Try once more here: if it succeeds we
-            # get a correct consecutive_failures count and can safely
-            # replace State; if it fails again, skip replace_state entirely
-            # rather than overwrite a real baseline with blank data.
             try:
                 previous_state = self._state(target)
                 state_loaded = True
@@ -606,7 +698,6 @@ class WeeklyMonitorRoutine:
                 pass
         failed_state = replace(
             previous_state,
-            last_checked_at=utc_now(),
             consecutive_failures=previous_state.consecutive_failures + 1,
         )
         error_attempts = (
@@ -808,12 +899,6 @@ class WeeklyMonitorRoutine:
             max_notification_chars=self.config.max_notification_chars,
         )
         if not validated["material"] and diff.truncated:
-            # A diff can be candidate_material for reasons outside the
-            # five recognized price/spec/terms/availability/
-            # eligibility patterns (e.g. changed ratio alone). Any
-            # truncation means the model judged materiality from an
-            # incomplete view, so a non-material verdict cannot be
-            # trusted regardless of which section was cut.
             msg = "truncated_diff_non_material"
             raise MonitorError(
                 msg,
@@ -954,7 +1039,7 @@ class WeeklyMonitorRoutine:
             delivery.
         """
         with tempfile.TemporaryDirectory(
-            prefix=f"weekly-web-monitor-{target.target_id}-"
+            prefix=f"web-update-monitor-{target.target_id}-"
         ) as temporary:
             workspace = Path(temporary)
             return self._run_target_pipeline(run_id, target, started_at, ctx, workspace)
@@ -970,31 +1055,23 @@ class WeeklyMonitorRoutine:
 
         Raises:
             _PartialCommitError: If a prior failure's Run record landed but
-                its paired state update did not -- propagated rather than
-                handled here (see the except clause below).
+                its paired state update did not.
+            _FailureIdMigrationError: If a healthy state cannot persist the
+                one-time legacy failure-ID migration boundary before fetching.
         """
         started_at = utc_now()
         ctx = _TargetRunContext(previous_state=State(target.target_id))
         try:
             claimed = self._claimed_run(run_id, target)
             if claimed is not None:
-                # A prior attempt for this exact run ID already reached a
-                # terminal outcome for this target; replay it instead of
-                # refetching, re-writing state, or re-notifying.
                 return claimed
             ctx.previous_state = self._state(target)
             ctx.state_loaded = True
+            self._ensure_failure_id_migration_boundary(ctx.previous_state)
             return self._run_target_pipeline_in_workspace(
                 run_id, target, started_at, ctx
             )
-        except _PartialCommitError:
-            # The Run for this run_id already landed durably; do not let
-            # the generic Exception handler below route this through
-            # _finish_failure, which would append_run a no-op (fine) but
-            # still replace_state with a reverted, failure-incremented
-            # baseline behind a Run that already says success. Propagate
-            # so the caller records a content-free failure without any
-            # further store write.
+        except (_PartialCommitError, _FailureIdMigrationError):
             raise
         except MonitorError as exc:
             return self._finish_failure(
@@ -1033,10 +1110,6 @@ class WeeklyMonitorRoutine:
             and outcome.error_code == "operator_suppressed"
         )
         if operator_suppressed:
-            # Unlike the "sent"/dedup "suppressed" cases below, this event was
-            # never delivered and never will be: keep it out of the notified
-            # result and delivered-notification audit outcome so operators and
-            # calculate_metrics do not mistake it for a confirmed send.
             attempts = (
                 *pending.attempts,
                 Attempt(len(pending.attempts) + 1, "notification_suppressed"),
@@ -1313,3 +1386,7 @@ class WeeklyMonitorRoutine:
             metrics,
             tuple(completed),
         )
+
+
+# Backward-compatible import for callers that used the pre-rename internal class.
+WeeklyMonitorRoutine = WebUpdateMonitorRoutine

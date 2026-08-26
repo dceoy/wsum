@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import re
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 _MIN_THRESHOLD = 1
 _MAX_THRESHOLD = 100
+_MAX_EPISODE_ID_LENGTH = 200
 _MIN_MAX_MESSAGE_CHARS = 500
 _MAX_MAX_MESSAGE_CHARS = 10_000
 
@@ -91,26 +92,34 @@ def change_event_id(target_id: str, normalized_hash: str) -> str:
     return hashlib.sha256(f"{target_id}{normalized_hash}".encode()).hexdigest()
 
 
-def failure_event_id(target_id: str, year_week: str, threshold: int) -> str:
-    """Return the stable dedup ID for a weekly failure-threshold notification.
+def failure_event_id(target_id: str, episode_id: str, threshold: int) -> str:
+    """Return the stable dedup ID for one failure episode threshold crossing.
+
+    ``episode_id`` is supplied by the caller and should identify one consecutive
+    failure episode independently from hourly/daily/weekly scheduling cadence.
 
     Returns:
-        A SHA-256 hex digest derived from ``target_id``, ``year_week``, and
-        ``threshold``.
+        A SHA-256 hex digest derived from the canonical tuple of ``target_id``,
+        ``episode_id``, and ``threshold``.
 
     Raises:
-        MonitorError: If ``target_id``, ``year_week``, or ``threshold`` is
-            invalid.
+        MonitorError: If any input is invalid.
     """
     validate_target_id(target_id)
     if (
-        not re.fullmatch(r"\d{4}-W\d{2}", year_week)
+        not episode_id
+        or len(episode_id) > _MAX_EPISODE_ID_LENGTH
+        or any(not char.isprintable() for char in episode_id)
         or not _MIN_THRESHOLD <= threshold <= _MAX_THRESHOLD
     ):
         msg = "notification_invalid"
         raise MonitorError(msg, "failure event inputs are invalid")
-    material = f"failure{target_id}{year_week}{threshold}"
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    material = json.dumps(
+        ["failure", target_id, episode_id, threshold],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(material).hexdigest()
 
 
 def escape_slack_text(value: str) -> str:
@@ -228,16 +237,11 @@ def _partition_by_dedup_status(
             outcomes[event.event_id] = DeliveryOutcome(event.event_id, "suppressed")
             continue
         if existing and existing.status == "suppressed":
-            # An operator-suppressed record means this event was never sent
-            # and never will be, unlike the "sent" dedup case above. Tag it
-            # distinctly so callers do not count it as a delivered notification.
             outcomes[event.event_id] = DeliveryOutcome(
                 event.event_id, "suppressed", error_code="operator_suppressed"
             )
             continue
         if existing and existing.status == "pending":
-            # A pending record may mean delivery succeeded before the final state
-            # update. Fail closed instead of risking a duplicate message.
             outcomes[event.event_id] = DeliveryOutcome(
                 event.event_id, "pending", error_code="delivery_ambiguous"
             )
@@ -312,9 +316,6 @@ def _deliver_chunk(
             for event in chunk
         }
     except Exception:  # ruff: ignore[blind-except] -- any connector failure is ambiguous by
-        # design: SlackConnector is a third-party-implemented boundary whose
-        # failure modes cannot be enumerated. Preserve the pending state and
-        # require operator resolution rather than risk duplicating a send.
         return {
             event.event_id: DeliveryOutcome(
                 event.event_id,
@@ -336,11 +337,6 @@ def _deliver_chunk(
     try:
         store.upsert_notifications_atomically(sent_records)
     except Exception:  # ruff: ignore[blind-except] -- any store failure here is ambiguous by
-        # design: NotificationStore is a third-party-implemented boundary.
-        # Slack accepted the complete chunk, but no per-event sent state
-        # was committed. The store's atomic batch contract guarantees
-        # that every event remains pending instead of leaving a partial
-        # group that cannot be reconciled consistently.
         return {
             event.event_id: DeliveryOutcome(
                 event.event_id,

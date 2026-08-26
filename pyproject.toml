@@ -1,7 +1,7 @@
 [project]
 name = "wsum"
 version = "0.1.0"
-description = "Deterministic connector-backed weekly website update monitoring"
+description = "Deterministic website update monitoring with Google Drive or local persistence"
 authors = [{name = "dceoy", email = "dceoy@users.noreply.github.com"}]
 maintainers = [{name = "dceoy", email = "dceoy@users.noreply.github.com"}]
 license = "MIT"
@@ -99,7 +99,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"skills/weekly-web-monitor/scripts/html_normalizer.py" = ["S101"]
+"skills/web-update-monitor/scripts/html_normalizer.py" = ["S101"]
 "tests/**/*.py" = [
   "E501",    # line-too-long
   "S101",    # assert (use of assert is acceptable in tests)
@@ -122,7 +122,7 @@ max-public-methods = 40
 
 [tool.pyright]
 exclude = ["build", ".venv", ".agents", ".claude"]
-extraPaths = ["skills/weekly-web-monitor/scripts"]
+extraPaths = ["skills/web-update-monitor/scripts"]
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "strict"
@@ -133,7 +133,7 @@ typeCheckingMode = "strict"
 # already-established policy as ruff's SLF001 (private-member-access)
 # relaxation for tests in [tool.ruff.lint.per-file-ignores] above.
 root = "tests"
-extraPaths = [".", "skills/weekly-web-monitor/scripts"]
+extraPaths = [".", "skills/web-update-monitor/scripts"]
 reportPrivateUsage = false
 
 [[tool.pyright.executionEnvironments]]
@@ -141,11 +141,11 @@ reportPrivateUsage = false
 # executionEnvironments makes pyright require one; without this, files
 # outside `tests` would silently stop inheriting `extraPaths` above).
 root = "."
-extraPaths = ["skills/weekly-web-monitor/scripts"]
+extraPaths = ["skills/web-update-monitor/scripts"]
 
 [tool.pytest.ini_options]
 addopts = [
-  "--cov=skills/weekly-web-monitor/scripts",
+  "--cov=skills/web-update-monitor/scripts",
   "--cov-branch",
   "--capture=no",
 ]
@@ -157,7 +157,7 @@ python_functions = ["test_*"]
 minversion = "6.0"
 
 [tool.coverage.run]
-source = ["skills/weekly-web-monitor/scripts"]
+source = ["skills/web-update-monitor/scripts"]
 omit = ["tests/**"]
 
 [tool.coverage.report]

@@ -18,7 +18,7 @@ from memory_adapters import (
     MemorySlackConnector,
 )
 from models import Target
-from routine import RoutineConfig, WeeklyMonitorRoutine
+from routine import RoutineConfig, WebUpdateMonitorRoutine
 
 _EXPECTED_ARGC = 2
 
@@ -49,7 +49,7 @@ def run_fixture(value: dict[str, Any]) -> dict[str, Any]:
             )
             for target_id, item in cycle.items()
         }
-        routine = WeeklyMonitorRoutine(
+        routine = WebUpdateMonitorRoutine(
             store=store,
             snapshots=snapshots,
             summary_client=EvidenceSummaryClient(),

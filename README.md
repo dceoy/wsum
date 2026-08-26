@@ -1,13 +1,18 @@
-# Website Update Monitor
+# Web Update Monitor
 
-A deterministic toolkit and Agent Skill for weekly website change monitoring. It reads configuration/state through Google Sheets connectors, fetches
-public HTTP(S) resources under a strict SSRF policy, normalizes HTML/PDF/RSS/Atom
-content, scores bounded diffs, validates evidence-grounded Japanese summaries,
-stores normalized artifacts through Google Drive, and sends idempotent grouped
-Slack notifications.
+A deterministic toolkit and Agent Skill for website update monitoring. The monitor
+uses the same SSRF-safe fetch, normalization, diff, summary-validation, retry,
+replay, and notification pipeline with one of two persistence modes selected at
+runtime:
 
-The implementation lives in
-`.claude/skills/weekly-web-monitor/`. Start with its `SKILL.md` and references.
+- `google-drive`: read targets and operational records through Google Sheets and
+  store normalized snapshots in Google Drive.
+- `local`: read targets from `targets.json`, store operational state and history in
+  SQLite, and store content-addressed snapshots in a caller-selected local runtime
+  directory.
+
+The registered skill is `web-update-monitor` and lives in
+`.claude/skills/web-update-monitor/`. Start with its `SKILL.md` and references.
 
 HTML, plain-text, and feed monitoring use only the standard library. PDF
 normalization requires [`pypdf`](https://pypi.org/project/pypdf/); when running
@@ -18,16 +23,16 @@ test suite:
 python3 -m pip install 'pypdf>=6,<7'
 ```
 
-Run the local test suite:
+Run the local test suite with the repository's uv environment:
 
 ```bash
-python3 -m unittest discover -s tests -v
+uv run pytest
 ```
 
 Run the end-to-end connector-free fixture:
 
 ```bash
-python3 .claude/skills/weekly-web-monitor/scripts/dry_run.py \
+python3 .claude/skills/web-update-monitor/scripts/dry_run.py \
   tests/fixtures/dry-run.json
 ```
 
@@ -35,9 +40,12 @@ python3 .claude/skills/weekly-web-monitor/scripts/dry_run.py \
 
 GitHub stores code, schemas, documentation, and synthetic fixtures only. Never
 commit fetched or rendered pages, PDFs/feeds from monitored sites, normalized
-production snapshots, production diffs, logs, Sheets/Drive exports, credentials,
-cookies, browser profiles, webhook URLs, connector configuration, signed URLs,
-spreadsheet/Drive identifiers, or local runtime/replay artifacts.
+production snapshots, production diffs, logs, Sheets/Drive exports, SQLite
+databases, credentials, cookies, browser profiles, webhook URLs, connector
+configuration, signed URLs, spreadsheet/Drive identifiers, or local runtime/replay
+artifacts.
 
-The weekly schedule and all connector identifiers, destination mappings, and
-credentials are configured outside this repository.
+Execution cadence is configured outside this repository. The skill may be invoked
+ad hoc or by any non-overlapping external schedule appropriate to the monitored
+targets; connector identifiers, destination mappings, credentials, and production
+local runtime roots also remain deployment configuration.

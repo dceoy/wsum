@@ -129,11 +129,6 @@ class DriveTests(unittest.TestCase):
         self,
     ) -> None:
         """Test that retention plan retains the entire current reference group."""
-        # The current baseline's hash can fall outside the newest
-        # ``retain_snapshots`` groups (as here, with retain_snapshots=1 and
-        # the oldest snapshot still the active baseline). The whole group --
-        # not just the file matching current_ref -- must be retained so its
-        # metadata/diff audit artifacts survive alongside normalized.txt.
         connector = MemoryDriveConnector()
         store = SnapshotStore(connector)
         references: list[str] = []
@@ -166,7 +161,7 @@ class OutboxTests(unittest.TestCase):
     """Tests for OutboxTests."""
 
     def test_sheet_parsing_duplicate_detection_and_raw_upsert(self) -> None:
-        """Test that sheet parsing duplicate detection and raw upsert."""
+        """Test that snapshot sheet parsing duplicate detection and raw upsert."""
         record = enqueue_record(
             "e" * 64,
             "one",
@@ -230,10 +225,6 @@ class OutboxTests(unittest.TestCase):
         assert connector.options == ["RAW"]
 
     def test_rejects_reordered_outbox_header_columns(self) -> None:
-        # upsert_outbox writes OUTBOX_COLUMNS in fixed A:I order, so a header
-        # row that merely contains every required column out of order would
-        # otherwise load fine and then have the next write silently place
-        # values (e.g. status/attempt_count) under the wrong headers.
         """Test that rejects reordered outbox header columns."""
         reordered = [
             "event_id",
@@ -463,9 +454,7 @@ class ReplayAndAuditTests(unittest.TestCase):
 
     def test_schemas_and_gas_dispatcher_are_safe_static_artifacts(self) -> None:
         """Test that schemas and gas dispatcher are safe static artifacts."""
-        schema_dir = (
-            support.REPO_ROOT / ".claude" / "skills" / "weekly-web-monitor" / "schemas"
-        )
+        schema_dir = support.REPO_ROOT / "skills" / "web-update-monitor" / "schemas"
         schemas = list(schema_dir.glob("*.json"))
         assert len(schemas) >= 10
         for schema in schemas:
@@ -479,12 +468,6 @@ class ReplayAndAuditTests(unittest.TestCase):
         assert not re.search(r"https://hooks\.slack\.com/", gas)
 
     def test_gas_dispatcher_poisons_the_wrong_notification_group(self) -> None:
-        # The Outbox dispatcher fixes a single Slack destination for a
-        # single notification_group. A row tagged for a different group
-        # must be poisoned, not silently delivered to that one webhook,
-        # since that would leak one team's notification to another team's
-        # channel. Only running the real Code.gs through a JS engine (not a
-        # Python re-implementation of its logic) proves this.
         """Test that gas dispatcher poisons the wrong notification group."""
         node = shutil.which("node")
         if not node:
@@ -583,14 +566,6 @@ console.log(JSON.stringify({{fetchCalls, byEventId}}));
     def test_gas_dispatcher_treats_existing_sending_row_as_delivery_claim(
         self,
     ) -> None:
-        # A "sending" row means a prior invocation already dispatched this
-        # event and the outcome is ambiguous (see dispatchRow_'s own
-        # comment: "sending" is never retried automatically). If a
-        # pending/retry row for the same event ID exists too -- e.g. after
-        # an ambiguous Slack response or a concurrent duplicate enqueue --
-        # it must be poisoned rather than dispatched again. Only running the
-        # real Code.gs proves the upfront claimed-event index actually
-        # covers "sending", not just "sent".
         """Test that gas dispatcher treats existing sending row as delivery claim."""
         node = shutil.which("node")
         if not node:
