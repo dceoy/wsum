@@ -89,29 +89,29 @@ select = [
   "DOC",    # pydoclint (DOC)
 ]
 ignore = [
-  "COM812",  # missing-trailing-comma
-  "FBT001",  # boolean-type-hint-positional-argument
-  "FBT002",  # boolean-default-value-positional-argument
+  "missing-trailing-comma",  # missing-trailing-comma
+  "boolean-type-hint-positional-argument",  # boolean-type-hint-positional-argument
+  "boolean-default-value-positional-argument",  # boolean-default-value-positional-argument
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "skills/web-update-monitor/scripts/monitor.py" = [
-  "ANN401",  # Any is required at urllib callback boundaries
-  "BLE001",  # urllib exposes heterogeneous transport failures
-  "DOC201",  # concise helper docstrings are sufficient here
-  "DOC501",  # error details are represented by MonitorError messages
-  "EM101",   # CLI errors are intentionally direct literal messages
-  "INP001",  # skill scripts are executable helpers, not a Python package
-  "PLR2004", # protocol constants such as HTTP ports are self-explanatory
-  "T201",    # CLI writes its JSON result to stdout/stderr
+  "any-type",  # Any is required at urllib callback boundaries
+  "blind-except",  # urllib exposes heterogeneous transport failures
+  "docstring-missing-returns",  # concise helper docstrings are sufficient here
+  "docstring-missing-exception",  # error details are represented by MonitorError messages
+  "raw-string-in-exception",   # CLI errors are intentionally direct literal messages
+  "implicit-namespace-package",  # skill scripts are executable helpers, not a Python package
+  "magic-value-comparison", # protocol constants such as HTTP ports are self-explanatory
+  "print",    # CLI writes its JSON result to stdout/stderr
 ]
 "tests/**/*.py" = [
-  "D103",    # test names describe their behavior
-  "INP001",  # tests do not need to be a Python package
-  "PLC2701", # private helper imports are intentional white-box tests
-  "PLR2004", # literal limits make compact tests easier to read
-  "S101",    # assert is expected in pytest
-  "SLF001",  # private helper access is intentional in tests
+  "undocumented-public-function",    # test names describe their behavior
+  "implicit-namespace-package",  # tests do not need to be a Python package
+  "import-private-name", # private helper imports are intentional white-box tests
+  "magic-value-comparison", # literal limits make compact tests easier to read
+  "assert",    # assert is expected in pytest
+  "private-member-access",  # private helper access is intentional in tests
 ]
 
 [tool.ruff.lint.pydocstyle]
