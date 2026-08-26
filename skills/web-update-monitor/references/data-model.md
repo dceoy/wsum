@@ -5,9 +5,9 @@ one mode for a run.
 
 - `google-drive`: Google Sheets is authoritative for targets and operational state;
   Google Drive is authoritative for normalized snapshots and bounded diff artifacts.
-- `local`: `targets.json` is authoritative for target configuration; local JSON
-  files are authoritative for operational state; the local `snapshots/` tree stores
-  normalized snapshots and bounded diffs.
+- `local`: `targets.json` is authoritative for target configuration;
+  `operations.sqlite3` is authoritative for state, run history, and notification
+  state; the local `snapshots/` tree stores normalized snapshots and bounded diffs.
 
 GitHub contains code, schemas, documentation, and non-sensitive test fixtures only.
 Production monitoring data never belongs in the repository.
@@ -55,8 +55,10 @@ existing terminal record before fetching, writing state, or notifying.
 
 `status` is `pending`, `sent`, `failed`, or `suppressed`. `kind` is `change` or
 `failure`. Derive a change event ID as `SHA256(target_id + normalized_hash)`.
-Never automatically retry `pending`, because delivery may have succeeded before the
-final state write.
+Derive a failure alert ID from the target, the run that first crosses the configured
+consecutive-failure threshold, and that threshold; this keeps failure episodes
+independent from scheduler cadence. Never automatically retry `pending`, because
+delivery may have succeeded before the final state write.
 
 ### Optional Outbox
 
@@ -103,16 +105,18 @@ Use one trusted runtime root outside the repository:
 ```text
 <runtime-root>/
 ├── targets.json
-├── state.json
-├── runs.json
-├── notifications.json
+├── operations.sqlite3
 └── snapshots/
 ```
 
-`targets.json` is the only file required before the first run. The local adapters
-create the other JSON files and snapshot directories as needed using bounded reads,
-validated relative paths, and atomic replacement. See [local-setup.md](local-setup.md)
-for the exact layout and wiring.
+`targets.json` is the only file required before the first run. The local operational
+adapter creates the SQLite database and stores State, Runs, and Notifications in
+primary-keyed tables; the snapshot adapter creates content-addressed filesystem
+artifacts. SQLite transactions prevent whole-history lost updates and remove the
+former aggregate JSON-file metadata limit, but overlapping complete routine
+invocations remain unsupported because external side effects are not part of a
+store-level atomic claim transaction. See [local-setup.md](local-setup.md) for the
+exact layout and wiring.
 
 ## Prohibited GitHub data
 
@@ -120,7 +124,7 @@ Never commit:
 
 - Raw or rendered HTML, fetched responses, PDFs, feeds, screenshots, or page dumps.
 - Normalized production snapshots, production diffs, run logs, audit exports,
-  Sheets/Drive exports, or local runtime data.
+  Sheets/Drive exports, SQLite databases, or local runtime data.
 - Credentials, cookies, browser profiles, `.env` files, service-account keys,
   OAuth tokens, API keys, webhook URLs, signed URLs, or spreadsheet/Drive IDs.
 - Local workspaces, replay manifests containing operational content, caches, or
