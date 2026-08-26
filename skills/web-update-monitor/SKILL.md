@@ -106,8 +106,8 @@ isolate targets so one failure cannot abort the run.
 Scheduling is an external deployment concern. The skill supports manual, hourly,
 daily, weekly, or other practical cadences without changing its data model or
 pipeline. Use a stable external run ID for retries of the same invocation and do not
-run overlapping invocations against the same target set because the Google Sheets
-store has no cross-instance claim primitive.
+run overlapping invocations against the same target set because neither persistence
+backend atomically claims the complete external side-effect sequence.
 
 ## Outputs
 
@@ -119,11 +119,13 @@ content.
 
 ## Delivery choices
 
-Use direct Slack Connector delivery by default. Enable the optional GAS Outbox only
-when delivery credentials must stay outside the model, the destination must be fixed
-centrally, independent retries are required, stronger delivery state is required,
-or the Slack Connector is unavailable. Never enable direct and Outbox delivery for
-the same deployment.
+Use direct Slack Connector delivery by default; it is supported by both persistence
+modes. The optional GAS Outbox is supported only with `google-drive` persistence
+because its bundled durable store is `OutboxSheetsStore`. Enable it when delivery
+credentials must stay outside the model, the destination must be fixed centrally,
+independent retries are required, stronger delivery state is required, or the Slack
+Connector is unavailable. Do not use `OutboxSheetsStore` with `local` persistence,
+and never enable direct and Outbox delivery for the same deployment.
 
 ## Deterministic commands
 
@@ -146,8 +148,8 @@ Replay stored normalized artifacts without fetching:
 python3 .claude/skills/web-update-monitor/scripts/replay.py replay-manifest.json
 ```
 
-Run repository tests:
+Run repository tests with the repository's uv environment:
 
 ```bash
-python3 -m unittest discover -s tests -v
+uv run pytest
 ```
