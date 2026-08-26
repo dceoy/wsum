@@ -1,4 +1,4 @@
-"""Weekly end-to-end monitor orchestration with per-target isolation."""
+"""End-to-end web update monitor orchestration with per-target isolation."""
 
 from __future__ import annotations
 
@@ -108,7 +108,7 @@ _MAX_NOTIFICATION_CHARS = 3_500
 
 @dataclass(frozen=True, slots=True)
 class RoutineConfig:
-    """Validated tunables for one :class:`WeeklyMonitorRoutine`."""
+    """Validated tunables for one :class:`WebUpdateMonitorRoutine`."""
 
     max_concurrency: int = 2
     failure_alert_threshold: int = 3
@@ -239,8 +239,8 @@ class DefaultFetcher:
         )
 
 
-class WeeklyMonitorRoutine:
-    """Orchestrates a full weekly monitoring run across every enabled target."""
+class WebUpdateMonitorRoutine:
+    """Orchestrates one monitoring cycle across every enabled target."""
 
     def __init__(
         self,
@@ -402,22 +402,10 @@ class WeeklyMonitorRoutine:
 
     def _persist_success(self, state: State, run: RunRecord) -> RunRecord:
         with self._store_lock:
-            # Run is the durable idempotency checkpoint _process_target's
-            # claimed-run replay depends on (the get_run check near the top
-            # of _process_target). Writing it before State means that if the
-            # process fails between these two independent connector writes,
-            # a retry with the same run_id finds the terminal Run and
-            # replays it instead of re-fetching or re-notifying. The reverse
-            # order can advance State while the Run write never lands,
-            # silently dropping the result the State change was based on.
             self.store.append_run(run)
             try:
                 self.store.replace_state(state)
             except Exception as exc:
-                # append_run already landed and dedups by run_id, so it can
-                # no longer be made to record a different outcome for this
-                # run_id. Raise rather than let a caller retry the pair and
-                # silently no-op the append while replace_state runs again.
                 msg = (
                     f"State commit failed after Run {run.run_id} was already persisted"
                 )
@@ -459,11 +447,9 @@ class WeeklyMonitorRoutine:
         run_id: str,
     ) -> None:
         threshold = self.config.failure_alert_threshold
-        if state.consecutive_failures < threshold:
+        if state.consecutive_failures != threshold:
             return
-        now = datetime.now(UTC)
-        year_week = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
-        event_id = failure_event_id(target.target_id, year_week, threshold)
+        event_id = failure_event_id(target.target_id, run_id, threshold)
         message = (
             "*Web監視エラー*\n"
             f"{escape_slack_text(target.name)} ({target.target_id}) の監視が "
@@ -593,12 +579,6 @@ class WeeklyMonitorRoutine:
         state_loaded: bool = True,
     ) -> RunRecord:
         if not state_loaded:
-            # The real previous state was never loaded before this failure
-            # (get_run or _state itself raised), so previous_state is still
-            # the empty placeholder. Try once more here: if it succeeds we
-            # get a correct consecutive_failures count and can safely
-            # replace State; if it fails again, skip replace_state entirely
-            # rather than overwrite a real baseline with blank data.
             try:
                 previous_state = self._state(target)
                 state_loaded = True
@@ -808,12 +788,6 @@ class WeeklyMonitorRoutine:
             max_notification_chars=self.config.max_notification_chars,
         )
         if not validated["material"] and diff.truncated:
-            # A diff can be candidate_material for reasons outside the
-            # five recognized price/spec/terms/availability/
-            # eligibility patterns (e.g. changed ratio alone). Any
-            # truncation means the model judged materiality from an
-            # incomplete view, so a non-material verdict cannot be
-            # trusted regardless of which section was cut.
             msg = "truncated_diff_non_material"
             raise MonitorError(
                 msg,
@@ -954,7 +928,7 @@ class WeeklyMonitorRoutine:
             delivery.
         """
         with tempfile.TemporaryDirectory(
-            prefix=f"weekly-web-monitor-{target.target_id}-"
+            prefix=f"web-update-monitor-{target.target_id}-"
         ) as temporary:
             workspace = Path(temporary)
             return self._run_target_pipeline(run_id, target, started_at, ctx, workspace)
@@ -970,17 +944,13 @@ class WeeklyMonitorRoutine:
 
         Raises:
             _PartialCommitError: If a prior failure's Run record landed but
-                its paired state update did not -- propagated rather than
-                handled here (see the except clause below).
+                its paired state update did not.
         """
         started_at = utc_now()
         ctx = _TargetRunContext(previous_state=State(target.target_id))
         try:
             claimed = self._claimed_run(run_id, target)
             if claimed is not None:
-                # A prior attempt for this exact run ID already reached a
-                # terminal outcome for this target; replay it instead of
-                # refetching, re-writing state, or re-notifying.
                 return claimed
             ctx.previous_state = self._state(target)
             ctx.state_loaded = True
@@ -988,13 +958,6 @@ class WeeklyMonitorRoutine:
                 run_id, target, started_at, ctx
             )
         except _PartialCommitError:
-            # The Run for this run_id already landed durably; do not let
-            # the generic Exception handler below route this through
-            # _finish_failure, which would append_run a no-op (fine) but
-            # still replace_state with a reverted, failure-incremented
-            # baseline behind a Run that already says success. Propagate
-            # so the caller records a content-free failure without any
-            # further store write.
             raise
         except MonitorError as exc:
             return self._finish_failure(
@@ -1033,10 +996,6 @@ class WeeklyMonitorRoutine:
             and outcome.error_code == "operator_suppressed"
         )
         if operator_suppressed:
-            # Unlike the "sent"/dedup "suppressed" cases below, this event was
-            # never delivered and never will be: keep it out of the notified
-            # result and delivered-notification audit outcome so operators and
-            # calculate_metrics do not mistake it for a confirmed send.
             attempts = (
                 *pending.attempts,
                 Attempt(len(pending.attempts) + 1, "notification_suppressed"),
@@ -1313,3 +1272,7 @@ class WeeklyMonitorRoutine:
             metrics,
             tuple(completed),
         )
+
+
+# Backward-compatible import for callers that used the pre-rename internal class.
+WeeklyMonitorRoutine = WebUpdateMonitorRoutine
