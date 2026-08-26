@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -94,13 +95,12 @@ def change_event_id(target_id: str, normalized_hash: str) -> str:
 def failure_event_id(target_id: str, episode_id: str, threshold: int) -> str:
     """Return the stable dedup ID for one failure episode threshold crossing.
 
-    ``episode_id`` is supplied by the caller and should identify the invocation
-    that first crossed the configured consecutive-failure threshold. This keeps
-    failure-alert identity independent from hourly/daily/weekly scheduling cadence.
+    ``episode_id`` is supplied by the caller and should identify one consecutive
+    failure episode independently from hourly/daily/weekly scheduling cadence.
 
     Returns:
-        A SHA-256 hex digest derived from ``target_id``, ``episode_id``, and
-        ``threshold``.
+        A SHA-256 hex digest derived from the canonical tuple of ``target_id``,
+        ``episode_id``, and ``threshold``.
 
     Raises:
         MonitorError: If any input is invalid.
@@ -114,8 +114,12 @@ def failure_event_id(target_id: str, episode_id: str, threshold: int) -> str:
     ):
         msg = "notification_invalid"
         raise MonitorError(msg, "failure event inputs are invalid")
-    material = f"failure{target_id}{episode_id}{threshold}"
-    return hashlib.sha256(material.encode()).hexdigest()
+    material = json.dumps(
+        ["failure", target_id, episode_id, threshold],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(material).hexdigest()
 
 
 def escape_slack_text(value: str) -> str:
