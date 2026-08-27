@@ -101,13 +101,22 @@ def test_feed_destination_identity_tracks_xml_base_without_raw_url() -> None:
         "https://example.com/item?token=secret",
         "https://example.com/item?key=secret",
         "https://example.com/item?safe=1;token=secret",
+        "https://example.com/item?api_token=secret",
+        "https://example.com/item?api-token=secret",
         (
             "https://hooks.slack.com/services/"
             "T00000000/B00000000/"
             "XXXXXXXXXXXXXXXXXXXXXXXX"
         ),
     ],
-    ids=["query-credential", "key-credential", "semicolon-credential", "webhook"],
+    ids=[
+        "query-credential",
+        "key-credential",
+        "semicolon-credential",
+        "underscore-api-token",
+        "hyphen-api-token",
+        "webhook",
+    ],
 )
 def test_feed_rejects_credential_bearing_destinations(destination: str) -> None:
     body = f'<rss><channel><link href="{destination}"/></channel></rss>'.encode()

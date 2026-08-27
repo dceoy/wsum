@@ -215,6 +215,8 @@ def test_private_literal_ip_is_rejected() -> None:
         "http://93.184.216.34/?token=secret",
         "http://93.184.216.34/?api%20key=secret",
         "http://93.184.216.34/?key=secret",
+        "http://93.184.216.34/?api_token=secret",
+        "http://93.184.216.34/?api-token=secret",
         "http://93.184.216.34/?safe=1;token=secret",
         "http://93.184.216.34/?next=https%253A%252F%252Fexample.com%252F%253Ftoken%253Dsecret",
         "http://93.184.216.34/?next=https%3A%2F%2F%5B%3A%3Abad%5D%2F%3Ftoken%3Dsecret",
@@ -223,12 +225,16 @@ def test_private_literal_ip_is_rejected() -> None:
         "http://[ff02::1]/",
         "http://[64:ff9b::1]/",
         "http://[2002::1]/",
+        "http://[fec0::1]/",
+        "http://[4000::1]/",
         "http://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
     ],
     ids=[
         "token-query",
         "encoded-query-name",
         "generic-key-query",
+        "underscore-api-token-query",
+        "hyphen-api-token-query",
         "semicolon-query",
         "nested-token-query",
         "malformed-nested-url",
@@ -237,6 +243,8 @@ def test_private_literal_ip_is_rejected() -> None:
         "ipv6-multicast",
         "nat64-transition",
         "6to4-transition",
+        "site-local",
+        "reserved",
         "webhook",
     ],
 )
@@ -674,12 +682,11 @@ def test_normalize_valid_pdf_extracts_text() -> None:
 def test_pypdf_recovery_input_limit_is_applied_and_restored() -> None:
     pytest.importorskip("pypdf")
     from pypdf import filters  # ruff: ignore[import-outside-top-level]
-    from pypdf.errors import LimitReachedError  # ruff: ignore[import-outside-top-level]
 
     original = filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH
     with monitor._pypdf_output_limits(2):  # pyright: ignore[reportPrivateUsage]
         assert filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH == 2
-        with pytest.raises(LimitReachedError, match="Recovery limit"):
+        with pytest.raises(MonitorError, match="recovery input"):
             filters.decompress(b"\x00" * 10)
     assert original == filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH
 

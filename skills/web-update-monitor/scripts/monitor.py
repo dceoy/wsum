@@ -99,6 +99,7 @@ _MAX_HTML_DESTINATIONS = 500
 _SENSITIVE_QUERY_NAMES = frozenset({
     "access-token",
     "api-key",
+    "api-token",
     "apikey",
     "auth",
     "auth-token",
@@ -192,6 +193,7 @@ _NON_PUBLIC_IPV6_NETWORKS = (
     ipaddress.ip_network("64:ff9b::/96"),
     ipaddress.ip_network("64:ff9b:1::/48"),
     ipaddress.ip_network("2002::/16"),
+    ipaddress.ip_network("fec0::/10"),
 )
 _PDF_LIMIT_LOCK = threading.Lock()
 
@@ -285,11 +287,13 @@ class _ResolverPool:
         if timeout <= 0:
             raise TimeoutError("DNS resolution exceeded the fetch deadline")
         self._ensure_started()
+        deadline = monotonic() + timeout
         if not self._capacity.acquire(timeout=timeout):
             raise TimeoutError("DNS resolution exceeded the fetch deadline")
         job = _ResolverJob(resolver, args, kwargs)
         self._jobs.put(job)
-        if not job.done.wait(timeout):
+        remaining = deadline - monotonic()
+        if remaining <= 0 or not job.done.wait(remaining):
             raise TimeoutError("DNS resolution exceeded the fetch deadline")
         if job.error is not None:
             raise job.error
@@ -512,6 +516,7 @@ def _resolve_addresses(host: str, port: int, deadline: float | None) -> tuple[st
     if any(
         not address.is_global
         or address.is_multicast
+        or address.is_reserved
         or any(
             address.version == 6 and address in network
             for network in _NON_PUBLIC_IPV6_NETWORKS
@@ -1166,10 +1171,19 @@ def _pypdf_output_limits(limit: int) -> Generator[Callable[[int], None], None, N
             for name in previous:
                 setattr(filters, name, value)
 
+        original_decompress = filters.decompress
+
+        def bounded_decompress(data: bytes) -> bytes:
+            if len(data) > limit:
+                raise MonitorError("PDF Flate recovery input exceeds the size limit")
+            return original_decompress(data)
+
+        filters.decompress = bounded_decompress
         set_limit(limit)
         try:
             yield set_limit
         finally:
+            filters.decompress = original_decompress
             for name, value in previous.items():
                 setattr(filters, name, value)
 
@@ -1541,6 +1555,12 @@ def _write_snapshot_atomic(path: Path, body: bytes) -> None:
             os.fsync(stream.fileno())
         Path(temporary_path).replace(path)
         temporary_path = None
+        if hasattr(os, "O_DIRECTORY"):
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     finally:
         if temporary_path is not None:
             with suppress(FileNotFoundError):
