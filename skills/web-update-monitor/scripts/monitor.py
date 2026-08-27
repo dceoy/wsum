@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 _DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 _DEFAULT_MAX_DIFF_LINES = 200
 _DEFAULT_MAX_DIFF_BYTES = 65_536
+_DEFAULT_MAX_DIFF_COMPLEXITY = 4_000_000
 _DEFAULT_TIMEOUT = 30.0
 _DEFAULT_MAX_REDIRECTS = 10
 _DEFAULT_MAX_PDF_DECOMPRESSED_BYTES = 20 * 1024 * 1024
@@ -708,6 +709,45 @@ def _parse_content_type(value: str) -> tuple[str, str | None]:
     return message.get_content_type().lower(), charset
 
 
+def _sniff_content_type(body: bytes) -> str:
+    """Detect the structural document type from a bounded byte prefix."""
+    if body.startswith(b"%PDF-"):
+        return "application/pdf"
+    sample = body[:8_192].removeprefix(codecs.BOM_UTF8).lstrip().lower()
+    if re.search(rb"<(?:\w+:)?(?:rss|feed|rdf)\b", sample):
+        return "application/rss+xml"
+    xml_declaration = re.match(rb"<\?xml\b[^>]*\?>", sample)
+    if xml_declaration is not None:
+        after_declaration = sample[xml_declaration.end() :].lstrip()
+        if re.match(rb"<(?:!doctype\s+html|(?:\w+:)?html)\b", after_declaration):
+            return "text/html"
+        return "application/xml"
+    if re.search(
+        rb"<(?:!doctype\s+html|html|head|body|main|article|section|div|h[1-6]|p|table|script)\b",
+        sample,
+    ):
+        return "text/html"
+    return "text/plain"
+
+
+def _normalization_content_type(document: Document) -> str:
+    """Cross-check declared MIME type with bytes and select the parser type."""
+    declared = document.content_type
+    sniffed = _sniff_content_type(document.body)
+    supported = {"application/pdf", "text/plain", *_XML_CONTENT_TYPES, *_HTML_CONTENT_TYPES}
+    if declared not in supported:
+        raise MonitorError("declared content type is unsupported")
+    if declared == "text/plain":
+        return sniffed
+    if declared in _XML_CONTENT_TYPES and sniffed in _XML_CONTENT_TYPES:
+        return sniffed
+    if declared in _HTML_CONTENT_TYPES and sniffed in _HTML_CONTENT_TYPES:
+        return sniffed
+    if declared == sniffed:
+        return sniffed
+    raise MonitorError("declared content type does not match detected document type")
+
+
 def _encoding_name(value: str) -> str:
     candidate = value.strip().strip("\"'")
     if not candidate or len(candidate) > 64:
@@ -763,7 +803,7 @@ def _local_name(tag: str) -> str:
 
 
 class _FeedTextTarget:
-    """Collect feed text and link destinations in XML document order."""
+    """Collect feed structure, text, and link destinations in XML document order."""
 
     def __init__(self, max_chars: int) -> None:
         self._max_chars = max_chars
@@ -777,15 +817,23 @@ class _FeedTextTarget:
         self._parts.append(value)
 
     def start(self, tag: str, attrs: dict[str, str]) -> None:
-        if _local_name(tag) not in {"link", "enclosure"}:
+        local_tag = _local_name(tag)
+        self._append(f"\n[{local_tag}:start]\n")
+        if local_tag not in {"link", "enclosure"}:
             return
-        for name, value in attrs.items():
-            if _local_name(name) in {"href", "url"} and value:
-                self._append(value)
+        destinations = sorted(
+            (
+                (_local_name(name), value)
+                for name, value in attrs.items()
+                if _local_name(name) in {"href", "url"} and value
+            ),
+            key=lambda item: item[0],
+        )
+        for name, value in destinations:
+            self._append(f"[{local_tag}:{name}] {value}\n")
 
-    @staticmethod
-    def end(tag: str) -> None:
-        del tag
+    def end(self, tag: str) -> None:
+        self._append(f"\n[{_local_name(tag)}:end]\n")
 
     def data(self, data: str) -> None:
         self._append(data)
@@ -987,17 +1035,24 @@ def normalize_document(
     """Convert HTML/XML, text, or PDF bytes into stable plain text."""
     if max_pdf_decompressed_bytes <= 0 or max_pdf_extracted_chars <= 0:
         raise MonitorError("numeric limits must be positive")
-    if document.content_type == "application/pdf":
+    content_type = _normalization_content_type(document)
+    normalized_document = Document(
+        document.body,
+        document.source_url,
+        content_type,
+        document.charset,
+    )
+    if content_type == "application/pdf":
         return _normalize_pdf(
             document.body,
             max_decompressed_bytes=max_pdf_decompressed_bytes,
             max_extracted_chars=max_pdf_extracted_chars,
         )
 
-    text = _decode_document(document)
-    if document.content_type in _XML_CONTENT_TYPES:
+    text = _decode_document(normalized_document)
+    if content_type in _XML_CONTENT_TYPES:
         return _normalize_feed(text, max_chars=_DEFAULT_MAX_XML_CHARS)
-    if document.content_type in _HTML_CONTENT_TYPES:
+    if content_type in _HTML_CONTENT_TYPES:
         parser = _TextExtractor()
         parser.feed(text)
         parser.close()
@@ -1032,13 +1087,25 @@ def _bounded_diff(
     max_diff_lines: int,
     max_diff_bytes: int,
 ) -> tuple[str, bool]:
-    """Render a unified diff without materializing data beyond either bound."""
+    """Render a unified diff under output and pre-computation complexity bounds."""
+    previous_lines = previous.splitlines()
+    current_lines = current.splitlines()
+    if len(previous_lines) * len(current_lines) > _DEFAULT_MAX_DIFF_COMPLEXITY:
+        marker = "\n".join(
+            [
+                "--- previous",
+                "+++ current",
+                "@@ diff omitted: complexity limit exceeded @@",
+            ][:max_diff_lines]
+        )
+        return _utf8_prefix(marker, max_diff_bytes), True
+
     parts: list[str] = []
     size = 0
     for emitted_lines, line in enumerate(
         unified_diff(
-            previous.splitlines(),
-            current.splitlines(),
+            previous_lines,
+            current_lines,
             fromfile="previous",
             tofile="current",
             lineterm="",
