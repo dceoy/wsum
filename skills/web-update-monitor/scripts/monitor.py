@@ -55,6 +55,7 @@ _HTML_DESTINATION_ATTRS = {
 }
 _MAX_HTML_DESTINATIONS = 500
 _WHITESPACE_RE = re.compile(r"[ \t\f\v]+")
+_FEED_CONTENT_TYPES = {"application/atom+xml", "application/rss+xml"}
 _XML_CONTENT_TYPES = {
     "application/atom+xml",
     "application/rss+xml",
@@ -723,7 +724,8 @@ def _sniff_content_type(body: bytes) -> str:
             return "text/html"
         return "application/xml"
     if re.search(
-        rb"<(?:!doctype\s+html|html|head|body|main|article|section|div|h[1-6]|p|table|script)\b",
+        rb"<(?:!doctype\s+html|html|head|body|main|article|section|div|"
+        rb"h[1-6]|p|table|script|a|area|form|button|input)\b",
         sample,
     ):
         return "text/html"
@@ -734,7 +736,12 @@ def _normalization_content_type(document: Document) -> str:
     """Cross-check declared MIME type with bytes and select the parser type."""
     declared = document.content_type
     sniffed = _sniff_content_type(document.body)
-    supported = {"application/pdf", "text/plain", *_XML_CONTENT_TYPES, *_HTML_CONTENT_TYPES}
+    supported = {
+        "application/pdf",
+        "text/plain",
+        *_XML_CONTENT_TYPES,
+        *_HTML_CONTENT_TYPES,
+    }
     if declared not in supported:
         raise MonitorError("declared content type is unsupported")
     if declared == "text/plain":
@@ -805,8 +812,9 @@ def _local_name(tag: str) -> str:
 class _FeedTextTarget:
     """Collect feed structure, text, and link destinations in XML document order."""
 
-    def __init__(self, max_chars: int) -> None:
+    def __init__(self, max_chars: int, *, preserve_structure: bool) -> None:
         self._max_chars = max_chars
+        self._preserve_structure = preserve_structure
         self._size = 0
         self._parts: list[str] = []
 
@@ -818,7 +826,8 @@ class _FeedTextTarget:
 
     def start(self, tag: str, attrs: dict[str, str]) -> None:
         local_tag = _local_name(tag)
-        self._append(f"\n[{local_tag}:start]\n")
+        if self._preserve_structure:
+            self._append(f"\n[{local_tag}:start]\n")
         if local_tag not in {"link", "enclosure"}:
             return
         destinations = sorted(
@@ -826,14 +835,17 @@ class _FeedTextTarget:
                 (_local_name(name), value)
                 for name, value in attrs.items()
                 if _local_name(name) in {"href", "url"} and value
-            ),
-            key=lambda item: item[0],
+            )
         )
         for name, value in destinations:
-            self._append(f"[{local_tag}:{name}] {value}\n")
+            if self._preserve_structure:
+                self._append(f"[{local_tag}:{name}] {value}\n")
+            else:
+                self._append(value)
 
     def end(self, tag: str) -> None:
-        self._append(f"\n[{_local_name(tag)}:end]\n")
+        if self._preserve_structure:
+            self._append(f"\n[{_local_name(tag)}:end]\n")
 
     def data(self, data: str) -> None:
         self._append(data)
@@ -847,10 +859,10 @@ class _FeedTextTarget:
         raise MonitorError("DOCTYPE declarations are not supported")
 
 
-def _normalize_feed(text: str, *, max_chars: int) -> str:
+def _normalize_feed(text: str, *, max_chars: int, preserve_structure: bool) -> str:
     if re.search(r"<!DOCTYPE|<!ENTITY", text, re.IGNORECASE):
         raise MonitorError("DOCTYPE and entity declarations are not supported")
-    target = _FeedTextTarget(max_chars)
+    target = _FeedTextTarget(max_chars, preserve_structure=preserve_structure)
     parser = ET.XMLParser(target=target)  # ruff: ignore[suspicious-xml-element-tree-usage]
     try:
         parser.feed(text)
@@ -1051,7 +1063,11 @@ def normalize_document(
 
     text = _decode_document(normalized_document)
     if content_type in _XML_CONTENT_TYPES:
-        return _normalize_feed(text, max_chars=_DEFAULT_MAX_XML_CHARS)
+        return _normalize_feed(
+            text,
+            max_chars=_DEFAULT_MAX_XML_CHARS,
+            preserve_structure=content_type in _FEED_CONTENT_TYPES,
+        )
     if content_type in _HTML_CONTENT_TYPES:
         parser = _TextExtractor()
         parser.feed(text)
