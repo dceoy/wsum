@@ -45,6 +45,14 @@ _DEFAULT_MAX_PDF_EXTRACTED_CHARS = 10 * 1024 * 1024
 _DEFAULT_MAX_XML_CHARS = 10 * 1024 * 1024
 _RESOLVER_WORKERS = 4
 _SKIP_TAGS = {"script", "style", "noscript", "template"}
+_HTML_DESTINATION_ATTRS = {
+    "a": ("href",),
+    "area": ("href",),
+    "button": ("formaction",),
+    "form": ("action",),
+    "input": ("formaction",),
+}
+_MAX_HTML_DESTINATIONS = 500
 _WHITESPACE_RE = re.compile(r"[ \t\f\v]+")
 _XML_CONTENT_TYPES = {
     "application/atom+xml",
@@ -250,12 +258,29 @@ class _TextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._skip_depth = 0
+        self._destination_count = 0
         self.parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        del attrs
-        if tag.lower() in _SKIP_TAGS:
+        tag = tag.lower()
+        if tag in _SKIP_TAGS:
             self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
+        destinations = _HTML_DESTINATION_ATTRS.get(tag, ())
+        if not destinations:
+            return
+        values = {name.lower(): value for name, value in attrs if name and value}
+        for name in destinations:
+            value = values.get(name)
+            if not value:
+                continue
+            self._destination_count += 1
+            if self._destination_count > _MAX_HTML_DESTINATIONS:
+                raise MonitorError("HTML has too many monitored destinations")
+            digest = hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
+            self.parts.append(f"[{tag}:{name}:sha256:{digest}]")
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() in _SKIP_TAGS and self._skip_depth:
