@@ -47,6 +47,7 @@ _DEFAULT_MAX_PDF_DECOMPRESSED_BYTES = 20 * 1024 * 1024
 _DEFAULT_MAX_PDF_EXTRACTED_CHARS = 10 * 1024 * 1024
 _DEFAULT_MAX_PDF_PAGES = 1_000
 _DEFAULT_MAX_PDF_OBJECTS = 10_000
+_DEFAULT_MAX_SNAPSHOT_BYTES = 40 * 1024 * 1024
 _DEFAULT_MAX_XML_CHARS = 10 * 1024 * 1024
 _RESOLVER_WORKERS = 4
 _SKIP_TAGS = {"script", "style", "noscript", "template"}
@@ -92,6 +93,7 @@ _HTML_BLOCK_TAGS = {
     "tr",
     "ul",
 }
+_HTML_LINE_BREAK_TAGS = {"br"}
 _MAX_HTML_DESTINATIONS = 500
 _SENSITIVE_QUERY_NAMES = frozenset({
     "access-token",
@@ -334,13 +336,17 @@ class _TextExtractor(HTMLParser):
         self._destination_count = 0
         self.parts: list[str] = []
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+    def handle_starttag(  # ruff: ignore[complex-structure]
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
         tag = tag.lower()
         if tag in _SKIP_TAGS:
             self._skip_depth += 1
             return
         if self._skip_depth:
             return
+        if tag in _HTML_LINE_BREAK_TAGS:
+            self.parts.append("\n")
         if tag in _HTML_BLOCK_TAGS and self.parts and not self.parts[-1].endswith("\n"):
             self.parts.append("\n")
         values = {name.lower(): value for name, value in attrs if name and value}
@@ -406,11 +412,11 @@ def _nested_url_has_credentials(value: str, *, depth: int) -> bool:
         try:
             parsed = urlsplit(candidate)
         except ValueError:
-            return False
+            return True
         try:
             host = parsed.hostname or ""
         except ValueError:
-            return False
+            return True
         has_credentials = (
             parsed.username is not None
             or parsed.password is not None
@@ -807,12 +813,17 @@ def fetch_document(url: str, *, timeout: float, max_bytes: int) -> Document:
 
 
 def read_document(
-    path: Path, *, source_url: str, content_type: str, max_bytes: int
+    path: Path,
+    *,
+    source_url: str,
+    content_type: str,
+    max_bytes: int,
+    deadline: float | None = None,
 ) -> Document:
     """Read a local document supplied by the caller."""
     body = _read_regular_file_limited(path, max_bytes, "--input")
     if source_url:
-        _validate_public_url(source_url)
+        _resolve_public_url(source_url, deadline=deadline)
     inferred, charset = _parse_content_type(content_type or _guess_content_type(path))
     return Document(body, source_url or path.resolve().as_uri(), inferred, charset)
 
@@ -822,7 +833,7 @@ def _read_regular_file_limited(path: Path, max_bytes: int, label: str) -> bytes:
     if max_bytes <= 0:
         raise MonitorError("numeric limits must be positive")
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
         message = f"{label} must be a regular file"
         raise MonitorError(message) from exc
@@ -998,6 +1009,7 @@ class _FeedTextTarget:
         self._preserve_structure = preserve_structure
         self._base_url = base_url
         self._base_stack: list[str] = []
+        self._text_destination_stack: list[list[str] | None] = []
         self._size = 0
         self._parts: list[str] = []
 
@@ -1019,10 +1031,6 @@ class _FeedTextTarget:
                     base_url = urljoin(base_url, value.strip())
                 break
         self._base_stack.append(base_url)
-        if self._preserve_structure:
-            self._append(f"\n[{local_tag}:start]\n")
-        if not self._preserve_structure or local_tag not in {"link", "enclosure"}:
-            return
         destinations = sorted(
             (
                 (_local_name(name), value)
@@ -1030,6 +1038,14 @@ class _FeedTextTarget:
                 if _local_name(name) in {"href", "url"} and value
             )
         )
+        is_text_destination = (
+            self._preserve_structure and local_tag == "link" and not destinations
+        )
+        self._text_destination_stack.append([] if is_text_destination else None)
+        if self._preserve_structure:
+            self._append(f"\n[{local_tag}:start]\n")
+        if not self._preserve_structure or local_tag not in {"link", "enclosure"}:
+            return
         for name, value in destinations:
             destination = urljoin(base_url, value.strip())
             if _destination_has_credentials(destination):
@@ -1038,13 +1054,34 @@ class _FeedTextTarget:
             self._append(f"[{local_tag}:{name}:sha256:{digest}]\n")
 
     def end(self, tag: str) -> None:
+        text_destination = (
+            self._text_destination_stack.pop() if self._text_destination_stack else None
+        )
+        if text_destination is not None:
+            value = "".join(text_destination).strip()
+            if value:
+                self._append_destination("href", value)
         if self._preserve_structure:
             self._append(f"\n[{_local_name(tag)}:end]\n")
         if self._base_stack:
             self._base_stack.pop()
 
     def data(self, data: str) -> None:
-        self._append(data)
+        if (
+            self._text_destination_stack
+            and self._text_destination_stack[-1] is not None
+        ):
+            self._text_destination_stack[-1].append(data)  # type: ignore[union-attr]
+        else:
+            self._append(data)
+
+    def _append_destination(self, name: str, value: str) -> None:
+        base_url = self._base_stack[-1] if self._base_stack else self._base_url
+        destination = urljoin(base_url, value)
+        if _destination_has_credentials(destination):
+            raise MonitorError("feed destination contains credentials")
+        digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
+        self._append(f"[{_local_name('link')}:{name}:sha256:{digest}]\n")
 
     def close(self) -> str:
         return "".join(self._parts)
@@ -1143,6 +1180,43 @@ def _consume_pdf_object(object_count: list[int]) -> None:
         raise MonitorError("PDF object traversal exceeds the size limit")
 
 
+def _preflight_pdf_pages(reader: Any) -> list[int]:
+    """Bound page-tree traversal before pypdf materializes the page list."""
+    object_count = [0]
+    trailer = getattr(reader, "trailer", {})
+    root = _resolve_pdf_object(trailer.get("/Root"))
+    pages_root = _resolve_pdf_object(root.get("/Pages"))
+    declared_count = pages_root.get("/Count")
+    if isinstance(declared_count, int) and declared_count > _DEFAULT_MAX_PDF_PAGES:
+        raise MonitorError("PDF page count exceeds the size limit")
+    seen: set[int] = set()
+    page_count = 0
+
+    def visit(node: Any) -> None:
+        nonlocal page_count
+        resolved = _resolve_pdf_object(node)
+        identity = id(resolved)
+        if identity in seen:
+            return
+        seen.add(identity)
+        _consume_pdf_object(object_count)
+        get_value = getattr(resolved, "get", None)
+        if not callable(get_value):
+            return
+        kids = _resolve_pdf_object(get_value("/Kids"))
+        if isinstance(kids, (list, tuple)):
+            typed_kids = cast("list[Any] | tuple[Any, ...]", kids)
+            for child in typed_kids:
+                visit(child)
+        else:
+            page_count += 1
+            if page_count > _DEFAULT_MAX_PDF_PAGES:
+                raise MonitorError("PDF page count exceeds the size limit")
+
+    visit(pages_root)
+    return object_count
+
+
 def _append_form_xobjects(
     resources: Any,
     streams: list[Any],
@@ -1238,10 +1312,10 @@ def _normalize_pdf_content(
         reader = PdfReader(io.BytesIO(body), strict=True)
         if reader.is_encrypted:
             raise MonitorError("encrypted PDFs are not supported")
+        object_count = _preflight_pdf_pages(reader)
         fragments: list[str] = []
         decompressed = 0
         extracted = 0
-        object_count = [0]
         for page_number, page in enumerate(reader.pages, start=1):
             if page_number > _DEFAULT_MAX_PDF_PAGES:
                 raise MonitorError("PDF page count exceeds the size limit")
@@ -1342,9 +1416,13 @@ def _bounded_diff(
     max_diff_bytes: int,
 ) -> tuple[str, bool]:
     """Render a unified diff under output and pre-computation complexity bounds."""
-    previous_lines = previous.splitlines()
-    current_lines = current.splitlines()
-    if len(previous_lines) * len(current_lines) > _DEFAULT_MAX_DIFF_COMPLEXITY:
+    previous_line_count = previous.count("\n") + bool(
+        previous and not previous.endswith("\n")
+    )
+    current_line_count = current.count("\n") + bool(
+        current and not current.endswith("\n")
+    )
+    if previous_line_count * current_line_count > _DEFAULT_MAX_DIFF_COMPLEXITY:
         marker = "\n".join(
             [
                 "--- previous",
@@ -1353,6 +1431,8 @@ def _bounded_diff(
             ][:max_diff_lines]
         )
         return _utf8_prefix(marker, max_diff_bytes), True
+    previous_lines = previous.splitlines()
+    current_lines = current.splitlines()
 
     parts: list[str] = []
     size = 0
@@ -1484,6 +1564,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             source_url=args.source_url,
             content_type=args.content_type,
             max_bytes=args.max_bytes,
+            deadline=monotonic() + args.timeout,
         )
     )
     current = normalize_document(
@@ -1493,11 +1574,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     if not current:
         raise MonitorError("normalization produced empty content")
+    current_bytes = current.encode("utf-8")
+    if len(current_bytes) > _DEFAULT_MAX_SNAPSHOT_BYTES:
+        raise MonitorError("normalized snapshot exceeds the size limit")
 
     previous = None
     if args.previous:
         previous_body = _read_regular_file_limited(
-            args.previous, args.max_bytes, "--previous"
+            args.previous, _DEFAULT_MAX_SNAPSHOT_BYTES, "--previous"
         )
         try:
             previous = previous_body.decode("utf-8", errors="strict")
@@ -1511,7 +1595,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(current, encoding="utf-8")
+        args.output.write_bytes(current_bytes)
     return {
         "source_url": document.source_url,
         "content_type": document.content_type,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from argparse import Namespace
 from io import BytesIO
 from time import sleep
@@ -104,6 +105,7 @@ def test_private_literal_ip_is_rejected() -> None:
         "http://93.184.216.34/?token=secret",
         "http://93.184.216.34/?api%20key=secret",
         "http://93.184.216.34/?next=https%253A%252F%252Fexample.com%252F%253Ftoken%253Dsecret",
+        "http://93.184.216.34/?next=https%3A%2F%2F%5B%3A%3Abad%5D%2F%3Ftoken%3Dsecret",
         "http://93.184.216.34/#access_token=secret",
         "http://224.0.0.1/",
         "http://[ff02::1]/",
@@ -113,6 +115,7 @@ def test_private_literal_ip_is_rejected() -> None:
         "token-query",
         "encoded-query-name",
         "nested-token-query",
+        "malformed-nested-url",
         "credential-fragment",
         "ipv4-multicast",
         "ipv6-multicast",
@@ -203,6 +206,14 @@ def test_normalize_html_preserves_inline_text_continuity() -> None:
     )
 
     assert marked == plain
+
+
+def test_normalize_html_preserves_line_break_elements() -> None:
+    normalized = normalize_document(
+        Document(b"<p>Hello<br>world</p>", "https://example.com/", "text/html")
+    )
+
+    assert normalized == "Hello\nworld\n"
 
 
 @pytest.mark.parametrize(
@@ -520,6 +531,24 @@ def test_normalize_pdf_bounds_page_traversal(monkeypatch: pytest.MonkeyPatch) ->
         )
 
 
+def test_normalize_pdf_bounds_object_traversal(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("pypdf")
+    from pypdf import PdfWriter  # ruff: ignore[import-outside-top-level]
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=300, height=300)
+    output = BytesIO()
+    writer.write(output)
+    monkeypatch.setattr(monitor, "_DEFAULT_MAX_PDF_OBJECTS", 1)
+
+    with pytest.raises(MonitorError, match="object traversal"):
+        normalize_document(
+            Document(
+                output.getvalue(), "https://example.com/file.pdf", "application/pdf"
+            )
+        )
+
+
 def test_run_local_file_writes_normalized_snapshot(tmp_path: Path) -> None:
     source = tmp_path / "page.html"
     output = tmp_path / "snapshot.txt"
@@ -566,6 +595,39 @@ def test_read_document_rejects_unsafe_source_url(
         )
 
 
+def test_run_applies_timeout_to_input_source_url_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "page.html"
+    source.write_text("<p>hello</p>")
+    deadlines: list[float | None] = []
+
+    def resolve_addresses(
+        _host: str, _port: int, deadline: float | None
+    ) -> tuple[str, ...]:
+        deadlines.append(deadline)
+        message = "DNS resolution exceeded the fetch deadline"
+        raise TimeoutError(message)
+
+    monkeypatch.setattr(monitor, "_resolve_addresses", resolve_addresses)
+    args = Namespace(
+        url=None,
+        input=source,
+        source_url="https://example.com/",
+        content_type="text/html",
+        previous=None,
+        output=None,
+        timeout=0.1,
+        max_bytes=1024,
+        max_diff_lines=20,
+    )
+
+    with pytest.raises(TimeoutError, match="DNS resolution"):
+        run(args)
+    assert deadlines
+    assert deadlines[0] is not None
+
+
 def test_read_document_bounds_input_before_retaining_it(tmp_path: Path) -> None:
     source = tmp_path / "page.html"
     source.write_bytes(b"x" * 1025)
@@ -594,11 +656,25 @@ def test_read_document_rejects_symlink_input(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("option", ["input", "previous"], ids=["input", "previous"])
+def test_read_regular_file_rejects_fifo_without_blocking(
+    tmp_path: Path, option: str
+) -> None:
+    fifo = tmp_path / f"{option}.fifo"
+    os.mkfifo(fifo)
+
+    with pytest.raises(MonitorError, match="regular file"):
+        monitor._read_regular_file_limited(  # pyright: ignore[reportPrivateUsage]
+            fifo, 1024, f"--{option}"
+        )
+
+
 def test_run_bounds_previous_snapshot(tmp_path: Path) -> None:
     source = tmp_path / "page.html"
     source.write_text("<p>hello</p>")
     previous = tmp_path / "previous.txt"
-    previous.write_bytes(b"x" * 1025)
+    snapshot_limit = monitor._DEFAULT_MAX_SNAPSHOT_BYTES  # pyright: ignore[reportPrivateUsage]
+    previous.write_bytes(b"x" * (snapshot_limit + 1))
 
     args = Namespace(
         url=None,
@@ -608,7 +684,7 @@ def test_run_bounds_previous_snapshot(tmp_path: Path) -> None:
         previous=previous,
         output=None,
         timeout=30.0,
-        max_bytes=1024,
+        max_bytes=monitor._DEFAULT_MAX_BYTES,  # pyright: ignore[reportPrivateUsage]
         max_diff_lines=20,
     )
 

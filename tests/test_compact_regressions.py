@@ -91,8 +91,8 @@ def test_feed_destination_identity_tracks_xml_base_without_raw_url() -> None:
         "https://example.com/item?token=secret",
         (
             "https://hooks.slack.com/services/"
-             "T00000000/B00000000/"
-             "XXXXXXXXXXXXXXXXXXXXXXXX"
+            "T00000000/B00000000/"
+            "XXXXXXXXXXXXXXXXXXXXXXXX"
         ),
     ],
     ids=["query-credential", "webhook"],
@@ -104,3 +104,15 @@ def test_feed_rejects_credential_bearing_destinations(destination: str) -> None:
         normalize_document(
             Document(body, "https://example.com/feed.xml", "application/rss+xml")
         )
+
+
+def test_feed_text_link_is_hashed_without_raw_url() -> None:
+    destination = "https://example.com/item"
+    body = f"<rss><channel><link>{destination}</link></channel></rss>".encode()
+
+    normalized = normalize_document(
+        Document(body, "https://example.com/feed.xml", "application/rss+xml")
+    )
+
+    assert destination not in normalized
+    assert monitor.hashlib.sha256(destination.encode()).hexdigest() in normalized

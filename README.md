@@ -40,8 +40,11 @@ uv run python skills/web-update-monitor/scripts/monitor.py \
   --output .runtime/example.next.txt
 ```
 
-For browser-rendered or connector-fetched content, save the document to a temporary
-file and use `--input` instead of `--url`:
+For browser-rendered or connector-fetched content, use browser mode only with a
+tool that enforces public-unicast egress, bounded redirects/subresources, a total
+timeout, and a maximum artifact size. Do not provide cookies or credentials; fail
+closed if those controls are unavailable. Save the document to a temporary file
+and use `--input` instead of `--url`:
 
 ```bash
 uv run python skills/web-update-monitor/scripts/monitor.py \
