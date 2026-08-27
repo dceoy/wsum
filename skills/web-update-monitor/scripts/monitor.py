@@ -1619,6 +1619,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         max_pdf_extracted_chars,
     ):
         raise MonitorError("numeric limits must be positive")
+    if (
+        args.previous is not None
+        and args.output is not None
+        and args.previous.resolve() == args.output.resolve()
+    ):
+        raise MonitorError("--previous and --output must be different files")
 
     document = (
         fetch_document(args.url, timeout=args.timeout, max_bytes=args.max_bytes)

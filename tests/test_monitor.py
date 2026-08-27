@@ -805,6 +805,27 @@ def test_run_output_replaces_fifo_without_blocking(tmp_path: Path) -> None:
     assert output.read_text() == "new\n"
 
 
+def test_run_rejects_same_previous_and_output_path(tmp_path: Path) -> None:
+    source = tmp_path / "page.html"
+    snapshot = tmp_path / "snapshot.txt"
+    source.write_text("<main>new</main>")
+    snapshot.write_text("old\n")
+    args = Namespace(
+        url=None,
+        input=source,
+        source_url="http://93.184.216.34/",
+        content_type="text/html",
+        previous=snapshot,
+        output=snapshot,
+        timeout=30.0,
+        max_bytes=1024,
+        max_diff_lines=20,
+    )
+
+    with pytest.raises(MonitorError, match="different files"):
+        run(args)
+
+
 @pytest.mark.parametrize(
     "source_url",
     [
