@@ -99,6 +99,21 @@ def test_private_literal_ip_is_rejected() -> None:
 
 
 @pytest.mark.parametrize(
+    "url",
+    [
+        "http://93.184.216.34/?token=secret",
+        "http://93.184.216.34/?api%20key=secret",
+        "http://93.184.216.34/#access_token=secret",
+        "http://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
+    ],
+    ids=["token-query", "encoded-query-name", "credential-fragment", "webhook"],
+)
+def test_credential_bearing_public_urls_are_rejected(url: str) -> None:
+    with pytest.raises(MonitorError, match=r"credential|fragment"):
+        validate_public_url(url)
+
+
+@pytest.mark.parametrize(
     ("body", "content_type", "charset", "expected"),
     [
         (b"\xef\xbb\xbfHello", "text/plain", None, "Hello\n"),

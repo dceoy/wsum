@@ -17,8 +17,12 @@ from monitor import Document, compare_text, normalize_document
             b'<form action="/v1"><button>Submit</button></form>',
             b'<form action="/v2"><button>Submit</button></form>',
         ),
+        (
+            b'<base href="/v1/"><a href="download">Download</a>',
+            b'<base href="/v2/"><a href="download">Download</a>',
+        ),
     ],
-    ids=["link", "form"],
+    ids=["link", "form", "base-relative-link"],
 )
 def test_html_destination_only_change_is_detected(
     old_html: bytes, new_html: bytes

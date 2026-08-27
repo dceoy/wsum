@@ -12,7 +12,7 @@ persistence outside Python.
 
 For each target, require:
 
-- `target_id`: stable identifier
+- `target_id`: stable identifier matching `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`
 - `name`: display name
 - `url`: canonical source URL
 - `enabled`: whether to check it
@@ -25,6 +25,10 @@ compact helper. If either field is present and non-empty, fail that target with 
 explicit `selector_migration_required` error; never silently broaden monitoring to
 the whole document. Remove those fields only after confirming that whole-document
 monitoring is acceptable for that target.
+
+Validate `target_id` against the pattern above, and reject the target with
+`invalid_target_id` before using it as a persistence key or in any local path. Keep
+target IDs unique within the selected target set.
 
 Select one persistence mode for the complete run: `local` or `google-drive`. Do not
 mix modes for the same target set.
@@ -105,8 +109,8 @@ successful write/read-back confirmation for every ledger transition.
 
 - Never put credentials, cookies, webhook URLs, or connector tokens in prompts,
   target URLs, files, or repository content.
-- Static fetching accepts only HTTP(S) URLs that resolve to public IP addresses and
-  revalidates redirects.
+- Static fetching accepts only HTTP(S) URLs without fragments or credential-bearing
+  query parameters that resolve to public IP addresses and revalidates redirects.
 - Use browser mode only when explicitly required; never auto-escalate from static
   mode.
 - The helper strictly decodes text, rejects unsafe XML declarations, limits

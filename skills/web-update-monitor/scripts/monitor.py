@@ -30,7 +30,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
@@ -54,6 +54,35 @@ _HTML_DESTINATION_ATTRS = {
     "input": ("formaction",),
 }
 _MAX_HTML_DESTINATIONS = 500
+_SENSITIVE_QUERY_NAMES = frozenset({
+    "access-token",
+    "api-key",
+    "apikey",
+    "auth",
+    "auth-token",
+    "authorization",
+    "awsaccesskeyid",
+    "credential",
+    "id-token",
+    "oauth-token",
+    "password",
+    "refresh-token",
+    "secret",
+    "sig",
+    "signature",
+    "subscription-key",
+    "token",
+    "x-api-key",
+})
+_SENSITIVE_QUERY_SUFFIXES = (
+    "credential",
+    "secret",
+    "signature",
+    "security-token",
+    "session-token",
+)
+_QUERY_SEPARATOR_RE = re.compile(r"[\s._-]+")
+_MAX_NESTED_URL_DEPTH = 5
 _WHITESPACE_RE = re.compile(r"[ \t\f\v]+")
 _FEED_CONTENT_TYPES = {"application/atom+xml", "application/rss+xml"}
 _XML_CONTENT_TYPES = {
@@ -257,8 +286,11 @@ class _DeadlineSSLSocket(_DeadlineTrackingMixin, ssl.SSLSocket):
 
 
 class _TextExtractor(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, source_url: str) -> None:
         super().__init__(convert_charrefs=True)
+        self._document_url = source_url
+        self._base_url = source_url
+        self._base_href_seen = False
         self._skip_depth = 0
         self._destination_count = 0
         self.parts: list[str] = []
@@ -270,10 +302,16 @@ class _TextExtractor(HTMLParser):
             return
         if self._skip_depth:
             return
+        values = {name.lower(): value for name, value in attrs if name and value}
+        if tag == "base":
+            base_href = values.get("href")
+            if base_href and not self._base_href_seen:
+                self._base_url = urljoin(self._document_url, base_href.strip())
+                self._base_href_seen = True
+            return
         destinations = _HTML_DESTINATION_ATTRS.get(tag, ())
         if not destinations:
             return
-        values = {name.lower(): value for name, value in attrs if name and value}
         for name in destinations:
             value = values.get(name)
             if not value:
@@ -281,7 +319,8 @@ class _TextExtractor(HTMLParser):
             self._destination_count += 1
             if self._destination_count > _MAX_HTML_DESTINATIONS:
                 raise MonitorError("HTML has too many monitored destinations")
-            digest = hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
+            destination = urljoin(self._base_url, value.strip())
+            digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
             self.parts.append(f"[{tag}:{name}:sha256:{digest}]")
 
     def handle_endtag(self, tag: str) -> None:
@@ -300,6 +339,59 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
+def _is_sensitive_query_name(name: str) -> bool:
+    normalized = _QUERY_SEPARATOR_RE.sub("-", name.strip().lower())
+    return normalized in _SENSITIVE_QUERY_NAMES or normalized.endswith(
+        _SENSITIVE_QUERY_SUFFIXES
+    )
+
+
+def _is_webhook_credential_path(host: str, path: str) -> bool:
+    normalized_host = host.rstrip(".").lower()
+    return (normalized_host == "hooks.slack.com" and path.startswith("/services/")) or (
+        normalized_host in {"discord.com", "discordapp.com"}
+        and "/api/webhooks/" in path
+    )
+
+
+def _nested_url_has_credentials(value: str, *, depth: int) -> bool:
+    if depth > _MAX_NESTED_URL_DEPTH:
+        return False
+    candidate = value
+    for _ in range(_MAX_NESTED_URL_DEPTH + 1):
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError:
+            return False
+        try:
+            host = parsed.hostname or ""
+        except ValueError:
+            return False
+        has_credentials = (
+            parsed.username is not None
+            or parsed.password is not None
+            or _is_webhook_credential_path(host, unquote(parsed.path))
+            or _query_has_credentials(parsed.query, depth=depth + 1)
+            or _query_has_credentials(parsed.fragment, depth=depth + 1)
+        )
+        if has_credentials:
+            return True
+        decoded = unquote(candidate)
+        if decoded == candidate:
+            return False
+        candidate = decoded
+    return False
+
+
+def _query_has_credentials(query: str, *, depth: int) -> bool:
+    for name, value in parse_qsl(query, keep_blank_values=True):
+        if _is_sensitive_query_name(name):
+            return True
+        if value and _nested_url_has_credentials(value, depth=depth):
+            return True
+    return False
+
+
 def _resolve_public_url(url: str, *, deadline: float | None = None) -> _ResolvedTarget:
     """Validate a URL and return the exact public addresses for one request."""
     try:
@@ -313,8 +405,14 @@ def _resolve_public_url(url: str, *, deadline: float | None = None) -> _Resolved
         raise MonitorError("source must be an HTTP(S) URL")
     if parsed.username is not None or parsed.password is not None:
         raise MonitorError("embedded URL credentials are not allowed")
+    if parsed.fragment:
+        raise MonitorError("URL fragments are not allowed")
+    if _query_has_credentials(parsed.query, depth=0):
+        raise MonitorError("credential-bearing URL query is not allowed")
     if any(character in host for character in "\r\n"):
         raise MonitorError("source host contains control characters")
+    if _is_webhook_credential_path(host, unquote(parsed.path)):
+        raise MonitorError("webhook credential URLs are not allowed")
     port = port or (443 if scheme == "https" else 80)
     addresses = _resolve_addresses(host, port, deadline)
     if deadline is not None:
@@ -1069,7 +1167,7 @@ def normalize_document(
             preserve_structure=content_type in _FEED_CONTENT_TYPES,
         )
     if content_type in _HTML_CONTENT_TYPES:
-        parser = _TextExtractor()
+        parser = _TextExtractor(document.source_url)
         parser.feed(text)
         parser.close()
         text = "\n".join(parser.parts)
