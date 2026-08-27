@@ -13,11 +13,13 @@ import http.client
 import io
 import ipaddress
 import json
+import os
 import queue
 import re
 import select
 import socket
 import ssl
+import stat
 import sys
 import threading
 import xml.etree.ElementTree as ET  # ruff: ignore[suspicious-xml-etree-import]
@@ -43,6 +45,8 @@ _DEFAULT_TIMEOUT = 30.0
 _DEFAULT_MAX_REDIRECTS = 10
 _DEFAULT_MAX_PDF_DECOMPRESSED_BYTES = 20 * 1024 * 1024
 _DEFAULT_MAX_PDF_EXTRACTED_CHARS = 10 * 1024 * 1024
+_DEFAULT_MAX_PDF_PAGES = 1_000
+_DEFAULT_MAX_PDF_OBJECTS = 10_000
 _DEFAULT_MAX_XML_CHARS = 10 * 1024 * 1024
 _RESOLVER_WORKERS = 4
 _SKIP_TAGS = {"script", "style", "noscript", "template"}
@@ -52,6 +56,41 @@ _HTML_DESTINATION_ATTRS = {
     "button": ("formaction",),
     "form": ("action",),
     "input": ("formaction",),
+}
+_HTML_BLOCK_TAGS = {
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "dd",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "table",
+    "td",
+    "th",
+    "tr",
+    "ul",
 }
 _MAX_HTML_DESTINATIONS = 500
 _SENSITIVE_QUERY_NAMES = frozenset({
@@ -302,6 +341,8 @@ class _TextExtractor(HTMLParser):
             return
         if self._skip_depth:
             return
+        if tag in _HTML_BLOCK_TAGS and self.parts and not self.parts[-1].endswith("\n"):
+            self.parts.append("\n")
         values = {name.lower(): value for name, value in attrs if name and value}
         if tag == "base":
             base_href = values.get("href")
@@ -321,11 +362,14 @@ class _TextExtractor(HTMLParser):
                 raise MonitorError("HTML has too many monitored destinations")
             destination = urljoin(self._base_url, value.strip())
             digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
-            self.parts.append(f"[{tag}:{name}:sha256:{digest}]")
+            self.parts.append(f"\n[{tag}:{name}:sha256:{digest}]\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in _SKIP_TAGS and self._skip_depth:
+        tag = tag.lower()
+        if tag in _SKIP_TAGS and self._skip_depth:
             self._skip_depth -= 1
+        elif not self._skip_depth and tag in _HTML_BLOCK_TAGS:
+            self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
         if not self._skip_depth:
@@ -356,7 +400,7 @@ def _is_webhook_credential_path(host: str, path: str) -> bool:
 
 def _nested_url_has_credentials(value: str, *, depth: int) -> bool:
     if depth > _MAX_NESTED_URL_DEPTH:
-        return False
+        return True
     candidate = value
     for _ in range(_MAX_NESTED_URL_DEPTH + 1):
         try:
@@ -380,7 +424,7 @@ def _nested_url_has_credentials(value: str, *, depth: int) -> bool:
         if decoded == candidate:
             return False
         candidate = decoded
-    return False
+    return True
 
 
 def _query_has_credentials(query: str, *, depth: int) -> bool:
@@ -449,7 +493,9 @@ def _resolve_addresses(host: str, port: int, deadline: float | None) -> tuple[st
         parsed_addresses = tuple(ipaddress.ip_address(address) for address in addresses)
     except ValueError as exc:
         raise MonitorError("hostname resolved to an invalid address") from exc
-    if any(not address.is_global for address in parsed_addresses):
+    if any(
+        not address.is_global or address.is_multicast for address in parsed_addresses
+    ):
         raise MonitorError("source must resolve only to public IP addresses")
     return addresses
 
@@ -764,13 +810,35 @@ def read_document(
     path: Path, *, source_url: str, content_type: str, max_bytes: int
 ) -> Document:
     """Read a local document supplied by the caller."""
-    if path.is_symlink() or not path.is_file():
-        raise MonitorError("--input must be a regular file")
-    body = path.read_bytes()
-    if len(body) > max_bytes:
-        raise MonitorError("document exceeds --max-bytes")
+    body = _read_regular_file_limited(path, max_bytes, "--input")
+    if source_url:
+        _validate_public_url(source_url)
     inferred, charset = _parse_content_type(content_type or _guess_content_type(path))
     return Document(body, source_url or path.resolve().as_uri(), inferred, charset)
+
+
+def _read_regular_file_limited(path: Path, max_bytes: int, label: str) -> bytes:
+    """Read a non-symlink regular file without exceeding a byte budget."""
+    if max_bytes <= 0:
+        raise MonitorError("numeric limits must be positive")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        message = f"{label} must be a regular file"
+        raise MonitorError(message) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            message = f"{label} must be a regular file"
+            raise MonitorError(message)
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            body = stream.read(max_bytes + 1)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(body) > max_bytes:
+        raise MonitorError("document exceeds --max-bytes")
+    return body
 
 
 def _guess_content_type(path: Path) -> str:
@@ -808,26 +876,39 @@ def _parse_content_type(value: str) -> tuple[str, str | None]:
     return message.get_content_type().lower(), charset
 
 
-def _sniff_content_type(body: bytes) -> str:
-    """Detect the structural document type from a bounded byte prefix."""
-    if body.startswith(b"%PDF-"):
-        return "application/pdf"
-    sample = body[:8_192].removeprefix(codecs.BOM_UTF8).lstrip().lower()
-    if re.search(rb"<(?:\w+:)?(?:rss|feed|rdf)\b", sample):
+def _sniff_text_content_type(sample: str) -> str:
+    """Detect structured content from a decoded bounded prefix."""
+    if re.search(r"<(?:\w+:)?(?:rss|feed|rdf)\b", sample):
         return "application/rss+xml"
-    xml_declaration = re.match(rb"<\?xml\b[^>]*\?>", sample)
+    xml_declaration = re.match(r"<\?xml\b[^>]*\?>", sample)
     if xml_declaration is not None:
         after_declaration = sample[xml_declaration.end() :].lstrip()
-        if re.match(rb"<(?:!doctype\s+html|(?:\w+:)?html)\b", after_declaration):
+        if re.match(r"<(?:!doctype\s+html|(?:\w+:)?html)\b", after_declaration):
             return "text/html"
         return "application/xml"
     if re.search(
-        rb"<(?:!doctype\s+html|html|head|body|main|article|section|div|"
-        rb"h[1-6]|p|table|script|a|area|form|button|input)\b",
+        r"<(?:!doctype\s+html|html|head|body|main|article|section|div|"
+        r"h[1-6]|p|table|script|a|area|form|button|input)\b",
         sample,
     ):
         return "text/html"
     return "text/plain"
+
+
+def _sniff_content_type(body: bytes) -> str:
+    """Detect the structural document type from a bounded byte prefix."""
+    if body.startswith(b"%PDF-"):
+        return "application/pdf"
+    encoding = _bom_encoding(body)
+    try:
+        sample = (
+            body[:8_192].decode(encoding, errors="strict")
+            if encoding is not None
+            else body[:8_192].decode("latin-1", errors="strict")
+        )
+    except UnicodeDecodeError:
+        return "text/plain"
+    return _sniff_text_content_type(sample.lstrip().lower())
 
 
 def _normalization_content_type(document: Document) -> str:
@@ -910,9 +991,13 @@ def _local_name(tag: str) -> str:
 class _FeedTextTarget:
     """Collect feed structure, text, and link destinations in XML document order."""
 
-    def __init__(self, max_chars: int, *, preserve_structure: bool) -> None:
+    def __init__(
+        self, max_chars: int, *, preserve_structure: bool, base_url: str
+    ) -> None:
         self._max_chars = max_chars
         self._preserve_structure = preserve_structure
+        self._base_url = base_url
+        self._base_stack: list[str] = []
         self._size = 0
         self._parts: list[str] = []
 
@@ -924,9 +1009,19 @@ class _FeedTextTarget:
 
     def start(self, tag: str, attrs: dict[str, str]) -> None:
         local_tag = _local_name(tag)
+        base_url = self._base_stack[-1] if self._base_stack else self._base_url
+        for name, value in attrs.items():
+            if (
+                name == "{http://www.w3.org/XML/1998/namespace}base"
+                or name.lower() == "xml:base"
+            ):
+                if value:
+                    base_url = urljoin(base_url, value.strip())
+                break
+        self._base_stack.append(base_url)
         if self._preserve_structure:
             self._append(f"\n[{local_tag}:start]\n")
-        if local_tag not in {"link", "enclosure"}:
+        if not self._preserve_structure or local_tag not in {"link", "enclosure"}:
             return
         destinations = sorted(
             (
@@ -936,14 +1031,17 @@ class _FeedTextTarget:
             )
         )
         for name, value in destinations:
-            if self._preserve_structure:
-                self._append(f"[{local_tag}:{name}] {value}\n")
-            else:
-                self._append(value)
+            destination = urljoin(base_url, value.strip())
+            if _destination_has_credentials(destination):
+                raise MonitorError("feed destination contains credentials")
+            digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
+            self._append(f"[{local_tag}:{name}:sha256:{digest}]\n")
 
     def end(self, tag: str) -> None:
         if self._preserve_structure:
             self._append(f"\n[{_local_name(tag)}:end]\n")
+        if self._base_stack:
+            self._base_stack.pop()
 
     def data(self, data: str) -> None:
         self._append(data)
@@ -957,10 +1055,29 @@ class _FeedTextTarget:
         raise MonitorError("DOCTYPE declarations are not supported")
 
 
-def _normalize_feed(text: str, *, max_chars: int, preserve_structure: bool) -> str:
+def _destination_has_credentials(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname or ""
+    except ValueError:
+        return True
+    return (
+        parsed.username is not None
+        or parsed.password is not None
+        or bool(parsed.fragment)
+        or _is_webhook_credential_path(host, unquote(parsed.path))
+        or _query_has_credentials(parsed.query, depth=0)
+    )
+
+
+def _normalize_feed(
+    text: str, *, max_chars: int, preserve_structure: bool, base_url: str
+) -> str:
     if re.search(r"<!DOCTYPE|<!ENTITY", text, re.IGNORECASE):
         raise MonitorError("DOCTYPE and entity declarations are not supported")
-    target = _FeedTextTarget(max_chars, preserve_structure=preserve_structure)
+    target = _FeedTextTarget(
+        max_chars, preserve_structure=preserve_structure, base_url=base_url
+    )
     parser = ET.XMLParser(target=target)  # ruff: ignore[suspicious-xml-element-tree-usage]
     try:
         parser.feed(text)
@@ -1020,7 +1137,18 @@ def _pdf_values(value: Any) -> list[Any]:
     return [resolved]
 
 
-def _append_form_xobjects(resources: Any, streams: list[Any], seen: set[int]) -> None:
+def _consume_pdf_object(object_count: list[int]) -> None:
+    object_count[0] += 1
+    if object_count[0] > _DEFAULT_MAX_PDF_OBJECTS:
+        raise MonitorError("PDF object traversal exceeds the size limit")
+
+
+def _append_form_xobjects(
+    resources: Any,
+    streams: list[Any],
+    seen: set[int],
+    object_count: list[int],
+) -> None:
     resources = _resolve_pdf_object(resources)
     get_value = getattr(resources, "get", None)
     if not callable(get_value):
@@ -1030,6 +1158,7 @@ def _append_form_xobjects(resources: Any, streams: list[Any], seen: set[int]) ->
         return
     typed_xobjects = cast("Mapping[object, Any]", xobjects)
     for candidate in typed_xobjects.values():
+        _consume_pdf_object(object_count)
         form = _resolve_pdf_object(candidate)
         form_get = getattr(form, "get", None)
         if not callable(form_get) or form_get("/Subtype") != "/Form":
@@ -1039,26 +1168,32 @@ def _append_form_xobjects(resources: Any, streams: list[Any], seen: set[int]) ->
             continue
         seen.add(identity)
         streams.append(form)
-        _append_form_xobjects(form_get("/Resources"), streams, seen)
+        _append_form_xobjects(form_get("/Resources"), streams, seen, object_count)
 
 
-def _page_content_streams(page: Any) -> list[Any]:
+def _page_content_streams(page: Any, object_count: list[int]) -> list[Any]:
     streams: list[Any] = []
     seen: set[int] = set()
     for value in _pdf_values(page.get("/Contents")):
+        _consume_pdf_object(object_count)
         stream = _resolve_pdf_object(value)
         if id(stream) not in seen:
             seen.add(id(stream))
             streams.append(stream)
-    _append_form_xobjects(page.get("/Resources"), streams, seen)
+    _append_form_xobjects(page.get("/Resources"), streams, seen, object_count)
     return streams
 
 
 def _bound_page_content(
-    page: Any, *, used: int, maximum: int, set_limit: Callable[[int], None]
+    page: Any,
+    *,
+    used: int,
+    maximum: int,
+    set_limit: Callable[[int], None],
+    object_count: list[int],
 ) -> int:
     """Expand each page content stream under a cumulative decompression budget."""
-    for stream in _page_content_streams(page):
+    for stream in _page_content_streams(page, object_count):
         get_data = getattr(stream, "get_data", None)
         if not callable(get_data):
             continue
@@ -1106,12 +1241,16 @@ def _normalize_pdf_content(
         fragments: list[str] = []
         decompressed = 0
         extracted = 0
-        for page in reader.pages:
+        object_count = [0]
+        for page_number, page in enumerate(reader.pages, start=1):
+            if page_number > _DEFAULT_MAX_PDF_PAGES:
+                raise MonitorError("PDF page count exceeds the size limit")
             decompressed = _bound_page_content(
                 page,
                 used=decompressed,
                 maximum=max_decompressed_bytes,
                 set_limit=set_limit,
+                object_count=object_count,
             )
             page_text, page_size = _extract_page_text(
                 page, extracted=extracted, maximum=max_extracted_chars
@@ -1165,12 +1304,13 @@ def normalize_document(
             text,
             max_chars=_DEFAULT_MAX_XML_CHARS,
             preserve_structure=content_type in _FEED_CONTENT_TYPES,
+            base_url=document.source_url,
         )
     if content_type in _HTML_CONTENT_TYPES:
         parser = _TextExtractor(document.source_url)
         parser.feed(text)
         parser.close()
-        text = "\n".join(parser.parts)
+        text = "".join(parser.parts)
     return _normalize_whitespace(text)
 
 
@@ -1354,7 +1494,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if not current:
         raise MonitorError("normalization produced empty content")
 
-    previous = args.previous.read_text(encoding="utf-8") if args.previous else None
+    previous = None
+    if args.previous:
+        previous_body = _read_regular_file_limited(
+            args.previous, args.max_bytes, "--previous"
+        )
+        try:
+            previous = previous_body.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise MonitorError("--previous is not valid UTF-8") from exc
     result = compare_text(
         current,
         previous,

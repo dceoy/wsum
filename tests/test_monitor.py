@@ -103,13 +103,24 @@ def test_private_literal_ip_is_rejected() -> None:
     [
         "http://93.184.216.34/?token=secret",
         "http://93.184.216.34/?api%20key=secret",
+        "http://93.184.216.34/?next=https%253A%252F%252Fexample.com%252F%253Ftoken%253Dsecret",
         "http://93.184.216.34/#access_token=secret",
+        "http://224.0.0.1/",
+        "http://[ff02::1]/",
         "http://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
     ],
-    ids=["token-query", "encoded-query-name", "credential-fragment", "webhook"],
+    ids=[
+        "token-query",
+        "encoded-query-name",
+        "nested-token-query",
+        "credential-fragment",
+        "ipv4-multicast",
+        "ipv6-multicast",
+        "webhook",
+    ],
 )
 def test_credential_bearing_public_urls_are_rejected(url: str) -> None:
-    with pytest.raises(MonitorError, match=r"credential|fragment"):
+    with pytest.raises(MonitorError, match=r"credential|fragment|public"):
         validate_public_url(url)
 
 
@@ -158,6 +169,43 @@ def test_normalize_xml_declaration_detects_encoding() -> None:
 
 
 @pytest.mark.parametrize(
+    ("body", "content_type", "expected"),
+    [
+        ("<html><body>hello</body></html>".encode("utf-16"), "text/html", "hello\n"),
+        (
+            "<rss><channel><title>hello</title></channel></rss>".encode("utf-32"),
+            "application/rss+xml",
+            "hello",
+        ),
+    ],
+    ids=["utf16-html", "utf32-feed"],
+)
+def test_normalize_structured_documents_detects_bom_encoding(
+    body: bytes, content_type: str, expected: str
+) -> None:
+    normalized = normalize_document(
+        Document(body, "https://example.com/", content_type)
+    )
+
+    assert expected in normalized
+
+
+def test_normalize_html_preserves_inline_text_continuity() -> None:
+    plain = normalize_document(
+        Document(b"<p>Hello world</p>", "https://example.com/", "text/html")
+    )
+    marked = normalize_document(
+        Document(
+            b"<p>Hello <strong>world</strong></p>",
+            "https://example.com/",
+            "text/html",
+        )
+    )
+
+    assert marked == plain
+
+
+@pytest.mark.parametrize(
     ("body", "charset"),
     [(b"\xff", None), (b"\xfe", None), (b"hello", "x-unknown")],
     ids=["invalid-utf8-a", "invalid-utf8-b", "unsupported-declaration"],
@@ -189,7 +237,7 @@ def test_normalize_document_rejects_lossy_or_unsupported_encoding(
                 b"<feed><entry><link href='https://example.com/new'/><title>Update"
                 b"</title></entry></feed>"
             ),
-            ("https://example.com/new", "Update"),
+            ("Update", "https://example.com/new"),
         ),
     ],
     ids=["rss-cdata-and-enclosure", "atom-link"],
@@ -201,7 +249,10 @@ def test_normalize_feed_preserves_text_and_link_attributes(
         Document(body, "https://example.com/", content_type)
     )
 
-    assert all(value in normalized for value in expected)
+    text, destination = expected
+    assert text in normalized
+    assert destination not in normalized
+    assert monitor.hashlib.sha256(destination.encode()).hexdigest() in normalized
 
 
 @pytest.mark.parametrize(
@@ -450,6 +501,25 @@ def test_normalize_pdf_bounds_extracted_text() -> None:
         )
 
 
+def test_normalize_pdf_bounds_page_traversal(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("pypdf")
+    from pypdf import PdfWriter  # ruff: ignore[import-outside-top-level]
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=300, height=300)
+    writer.add_blank_page(width=300, height=300)
+    output = BytesIO()
+    writer.write(output)
+    monkeypatch.setattr(monitor, "_DEFAULT_MAX_PDF_PAGES", 1)
+
+    with pytest.raises(MonitorError, match="page count"):
+        normalize_document(
+            Document(
+                output.getvalue(), "https://example.com/file.pdf", "application/pdf"
+            )
+        )
+
+
 def test_run_local_file_writes_normalized_snapshot(tmp_path: Path) -> None:
     source = tmp_path / "page.html"
     output = tmp_path / "snapshot.txt"
@@ -457,7 +527,7 @@ def test_run_local_file_writes_normalized_snapshot(tmp_path: Path) -> None:
     args = Namespace(
         url=None,
         input=source,
-        source_url="https://example.com/",
+        source_url="http://93.184.216.34/",
         content_type="text/html",
         previous=None,
         output=output,
@@ -470,3 +540,77 @@ def test_run_local_file_writes_normalized_snapshot(tmp_path: Path) -> None:
 
     assert result["status"] == "baseline"
     assert output.read_text() == "Alpha Beta\n"
+
+
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        "http://93.184.216.34/?token=secret",
+        "http://93.184.216.34/#token=secret",
+        "http://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
+    ],
+    ids=["query", "fragment", "webhook"],
+)
+def test_read_document_rejects_unsafe_source_url(
+    tmp_path: Path, source_url: str
+) -> None:
+    source = tmp_path / "page.html"
+    source.write_text("<p>hello</p>")
+
+    with pytest.raises(MonitorError, match=r"credential|fragment"):
+        monitor.read_document(
+            source,
+            source_url=source_url,
+            content_type="text/html",
+            max_bytes=1024,
+        )
+
+
+def test_read_document_bounds_input_before_retaining_it(tmp_path: Path) -> None:
+    source = tmp_path / "page.html"
+    source.write_bytes(b"x" * 1025)
+
+    with pytest.raises(MonitorError, match="max-bytes"):
+        monitor.read_document(
+            source,
+            source_url="",
+            content_type="text/plain",
+            max_bytes=1024,
+        )
+
+
+def test_read_document_rejects_symlink_input(tmp_path: Path) -> None:
+    source = tmp_path / "page.html"
+    source.write_text("hello")
+    link = tmp_path / "link.html"
+    link.symlink_to(source)
+
+    with pytest.raises(MonitorError, match="regular file"):
+        monitor.read_document(
+            link,
+            source_url="",
+            content_type="text/plain",
+            max_bytes=1024,
+        )
+
+
+def test_run_bounds_previous_snapshot(tmp_path: Path) -> None:
+    source = tmp_path / "page.html"
+    source.write_text("<p>hello</p>")
+    previous = tmp_path / "previous.txt"
+    previous.write_bytes(b"x" * 1025)
+
+    args = Namespace(
+        url=None,
+        input=source,
+        source_url="http://93.184.216.34/",
+        content_type="text/html",
+        previous=previous,
+        output=None,
+        timeout=30.0,
+        max_bytes=1024,
+        max_diff_lines=20,
+    )
+
+    with pytest.raises(MonitorError, match="max-bytes"):
+        run(args)

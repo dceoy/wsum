@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import monitor
+import pytest
 from monitor import Document, compare_text, normalize_document
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def test_feed_normalization_preserves_field_boundaries() -> None:
@@ -64,3 +60,47 @@ def test_html_served_as_text_plain_still_uses_html_normalization() -> None:
     )
 
     assert normalize_document(document) == "Hello\n"
+
+
+def test_feed_destination_identity_tracks_xml_base_without_raw_url() -> None:
+    previous = normalize_document(
+        Document(
+            b'<rss xml:base="https://a.example/"><channel><link href="item"/>'
+            b"</channel></rss>",
+            "https://example.com/feed.xml",
+            "application/rss+xml",
+        )
+    )
+    current = normalize_document(
+        Document(
+            b'<rss xml:base="https://b.example/"><channel><link href="item"/>'
+            b"</channel></rss>",
+            "https://example.com/feed.xml",
+            "application/rss+xml",
+        )
+    )
+
+    assert previous != current
+    assert "https://a.example/item" not in previous
+    assert "https://b.example/item" not in current
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "https://example.com/item?token=secret",
+        (
+            "https://hooks.slack.com/services/"
+             "T00000000/B00000000/"
+             "XXXXXXXXXXXXXXXXXXXXXXXX"
+        ),
+    ],
+    ids=["query-credential", "webhook"],
+)
+def test_feed_rejects_credential_bearing_destinations(destination: str) -> None:
+    body = f'<rss><channel><link href="{destination}"/></channel></rss>'.encode()
+
+    with pytest.raises(monitor.MonitorError, match="credentials"):
+        normalize_document(
+            Document(body, "https://example.com/feed.xml", "application/rss+xml")
+        )

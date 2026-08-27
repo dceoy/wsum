@@ -85,8 +85,11 @@ successful write/read-back confirmation for every ledger transition.
    Omit `--previous` for the first check.
 
 3. For `browser`, retrieve the rendered page with the available browser/web tool,
-   save it to a temporary file, then run the same helper with `--input` and
-   `--source-url` instead of `--url`.
+   only when that tool can enforce public-unicast egress, bounded redirects and
+   subresources, a total timeout, and a maximum artifact size. Do not provide
+   cookies or credentials. Save the rendered page to a temporary file, then run
+   the same helper with `--input` and `--source-url` instead of `--url`; fail
+   closed when the browser tool cannot enforce these limits.
 4. Read the JSON result:
    - `baseline`: store the new snapshot and do not notify.
    - `unchanged`: discard the temporary output and stop.
@@ -113,6 +116,10 @@ successful write/read-back confirmation for every ledger transition.
   query parameters that resolve to public IP addresses and revalidates redirects.
 - Use browser mode only when explicitly required; never auto-escalate from static
   mode.
+- Browser mode must use a browser tool with explicit public-unicast egress,
+  redirect/subresource, timeout, and artifact-size limits. Treat inability to
+  enforce any of these boundaries as a failed check; never use browser mode as
+  an unrestricted fallback.
 - The helper strictly decodes text, rejects unsafe XML declarations, limits
   fetched bytes, PDF expansion and extracted text, bounds represented HTML
   destinations, and bounds diff bytes and lines. HTML destination identity is
