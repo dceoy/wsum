@@ -21,10 +21,11 @@ import socket
 import ssl
 import stat
 import sys
+import tempfile
 import threading
 import xml.etree.ElementTree as ET  # ruff: ignore[suspicious-xml-etree-import]
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from difflib import unified_diff
 from email.message import Message
@@ -105,6 +106,7 @@ _SENSITIVE_QUERY_NAMES = frozenset({
     "awsaccesskeyid",
     "credential",
     "id-token",
+    "key",
     "oauth-token",
     "password",
     "refresh-token",
@@ -124,6 +126,7 @@ _SENSITIVE_QUERY_SUFFIXES = (
 )
 _QUERY_SEPARATOR_RE = re.compile(r"[\s._-]+")
 _MAX_NESTED_URL_DEPTH = 5
+_LINE_BREAK_RE = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 _WHITESPACE_RE = re.compile(r"[ \t\f\v]+")
 _FEED_CONTENT_TYPES = {"application/atom+xml", "application/rss+xml"}
 _XML_CONTENT_TYPES = {
@@ -183,6 +186,12 @@ _PYPDF_LIMIT_NAMES = (
     "RUN_LENGTH_MAX_OUTPUT_LENGTH",
     "ZLIB_MAX_OUTPUT_LENGTH",
     "FLATE_MAX_BUFFER_SIZE",
+    "ZLIB_MAX_RECOVERY_INPUT_LENGTH",
+)
+_NON_PUBLIC_IPV6_NETWORKS = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+    ipaddress.ip_network("2002::/16"),
 )
 _PDF_LIMIT_LOCK = threading.Lock()
 
@@ -434,7 +443,8 @@ def _nested_url_has_credentials(value: str, *, depth: int) -> bool:
 
 
 def _query_has_credentials(query: str, *, depth: int) -> bool:
-    for name, value in parse_qsl(query, keep_blank_values=True):
+    # Treat the legacy semicolon separator as equivalent to '&'.
+    for name, value in parse_qsl(query.replace(";", "&"), keep_blank_values=True):
         if _is_sensitive_query_name(name):
             return True
         if value and _nested_url_has_credentials(value, depth=depth):
@@ -500,7 +510,13 @@ def _resolve_addresses(host: str, port: int, deadline: float | None) -> tuple[st
     except ValueError as exc:
         raise MonitorError("hostname resolved to an invalid address") from exc
     if any(
-        not address.is_global or address.is_multicast for address in parsed_addresses
+        not address.is_global
+        or address.is_multicast
+        or any(
+            address.version == 6 and address in network
+            for network in _NON_PUBLIC_IPV6_NETWORKS
+        )
+        for address in parsed_addresses
     ):
         raise MonitorError("source must resolve only to public IP addresses")
     return addresses
@@ -1416,12 +1432,8 @@ def _bounded_diff(
     max_diff_bytes: int,
 ) -> tuple[str, bool]:
     """Render a unified diff under output and pre-computation complexity bounds."""
-    previous_line_count = previous.count("\n") + bool(
-        previous and not previous.endswith("\n")
-    )
-    current_line_count = current.count("\n") + bool(
-        current and not current.endswith("\n")
-    )
+    previous_line_count = _line_count(previous)
+    current_line_count = _line_count(current)
     if previous_line_count * current_line_count > _DEFAULT_MAX_DIFF_COMPLEXITY:
         marker = "\n".join(
             [
@@ -1456,6 +1468,18 @@ def _bounded_diff(
         parts.append(candidate)
         size += candidate_size
     return "".join(parts), False
+
+
+def _line_count(value: str) -> int:
+    """Count lines using the same boundary characters as ``str.splitlines``."""
+    count = 0
+    last_end = 0
+    for match in _LINE_BREAK_RE.finditer(value):
+        count += 1
+        last_end = match.end()
+    if value and last_end != len(value):
+        count += 1
+    return count
 
 
 def compare_text(
@@ -1501,6 +1525,26 @@ def compare_text(
         "diff": bounded,
         "diff_truncated": truncated,
     }
+
+
+def _write_snapshot_atomic(path: Path, body: bytes) -> None:
+    """Replace a snapshot without following an existing unsafe destination."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: str | None = None
+    try:
+        temporary_fd, temporary_path = tempfile.mkstemp(
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+        )
+        with os.fdopen(temporary_fd, "wb") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        Path(temporary_path).replace(path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            with suppress(FileNotFoundError):
+                Path(temporary_path).unlink()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1594,8 +1638,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         max_diff_bytes=max_diff_bytes,
     )
     if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_bytes(current_bytes)
+        _write_snapshot_atomic(args.output, current_bytes)
     return {
         "source_url": document.source_url,
         "content_type": document.content_type,

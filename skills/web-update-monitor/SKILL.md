@@ -121,12 +121,13 @@ successful write/read-back confirmation for every ledger transition.
   enforce any of these boundaries as a failed check; never use browser mode as
   an unrestricted fallback.
 - The helper strictly decodes text, rejects unsafe XML declarations, limits
-  fetched bytes, PDF expansion, page/object traversal (at most 1,000 pages and
-  10,000 traversed objects), and extracted text, bounds
+  fetched bytes, PDF expansion and recovery input, page/object traversal (at most
+  1,000 pages and 10,000 traversed objects), and extracted text, bounds
   represented HTML/feed destinations, and bounds diff bytes and lines. HTML and
   feed destination identity is represented only by SHA-256 so destination values
-  are not persisted in snapshots. Normalized snapshots are bounded separately
-  from fetched documents so they can be safely reread.
+  are not persisted in snapshots. Output snapshots use same-directory temporary
+  files and atomic replacement. Normalized snapshots are bounded separately from
+  fetched documents so they can be safely reread.
   If `diff_truncated` is true, do not conclude that the change is non-material from
   incomplete evidence; inspect more of the source or request manual review.
 - Do not commit runtime targets or snapshots.

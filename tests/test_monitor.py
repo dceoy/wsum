@@ -94,6 +94,116 @@ def test_compare_text_exact_byte_bound_is_not_truncated() -> None:
     assert exact["diff_truncated"] is False
 
 
+@pytest.mark.parametrize(
+    ("suffix", "expected"),
+    [
+        (".pdf", "application/pdf"),
+        (".html", "text/html"),
+        (".htm", "text/html"),
+        (".rss", "application/rss+xml"),
+        (".atom", "application/atom+xml"),
+        (".xml", "application/xml"),
+        (".txt", "text/plain"),
+    ],
+)
+def test_guess_content_type_by_suffix(
+    tmp_path: Path, suffix: str, expected: str
+) -> None:
+    assert (
+        monitor._guess_content_type(  # pyright: ignore[reportPrivateUsage]
+            tmp_path / f"document{suffix}"
+        )
+        == expected
+    )
+
+
+def test_request_target_and_host_header_formatting() -> None:
+    target = monitor._ResolvedTarget(  # pyright: ignore[reportPrivateUsage]
+        "https://[2001:db8::1]:8443/path?x=1", "https", "2001:db8::1", 8443, ()
+    )
+
+    assert monitor._request_target(target.url) == "/path?x=1"  # pyright: ignore[reportPrivateUsage]
+    assert monitor._host_header(target) == "[2001:db8::1]:8443"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_read_response_rejects_invalid_readers_and_chunks() -> None:
+    class NoReader:
+        pass
+
+    class TextReader:
+        @staticmethod
+        def read(_size: int) -> str:
+            return "not bytes"
+
+    with pytest.raises(MonitorError, match="not readable"):
+        monitor._read_response_limited(NoReader(), 10)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(MonitorError, match="did not return bytes"):
+        monitor._read_response_limited(TextReader(), 10)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(MonitorError, match="max-bytes"):
+        monitor._read_response_limited(_FakeResponse(200, b"012345"), 3)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_parse_content_type_extracts_charset() -> None:
+    assert monitor._parse_content_type(  # pyright: ignore[reportPrivateUsage]
+        "text/html; charset=utf-8"
+    ) == ("text/html", "utf-8")
+
+
+def test_resolver_pool_propagates_errors_and_deadlines() -> None:
+    pool = monitor._ResolverPool(1)  # pyright: ignore[reportPrivateUsage]
+    assert pool.resolve(lambda: 42, (), {}, 1.0) == 42
+
+    def fail() -> None:
+        message = "resolver failed"
+        raise ValueError(message)
+
+    with pytest.raises(ValueError, match="resolver failed"):
+        pool.resolve(fail, (), {}, 1.0)
+    with pytest.raises(TimeoutError, match="deadline"):
+        pool.resolve(lambda: 42, (), {}, 0)
+
+
+@pytest.mark.parametrize("value", ["x" * 65, "not-a-real-encoding"])
+def test_encoding_name_rejects_unsupported_values(value: str) -> None:
+    with pytest.raises(MonitorError, match="unsupported"):
+        monitor._encoding_name(value)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_normalization_rejects_unsupported_and_mismatched_types() -> None:
+    with pytest.raises(MonitorError, match="unsupported"):
+        normalize_document(Document(b"hello", "https://example.com/", "image/png"))
+    with pytest.raises(MonitorError, match="does not match"):
+        normalize_document(
+            Document(
+                b"<html><body>hello</body></html>",
+                "https://example.com/",
+                "application/xml",
+            )
+        )
+
+
+def test_destination_validation_fails_closed_for_malformed_url() -> None:
+    assert monitor._destination_has_credentials(  # pyright: ignore[reportPrivateUsage]
+        "https://[::1"
+    )
+
+
+@pytest.mark.parametrize("result", [[], "gaierror"], ids=["empty", "lookup-error"])
+def test_address_resolution_rejects_empty_or_failed_lookup(
+    monkeypatch: pytest.MonkeyPatch, result: list[tuple[object, ...]] | str
+) -> None:
+    def getaddrinfo(_host: str, _port: int) -> list[tuple[object, ...]]:
+        if result == "gaierror":
+            message = "lookup failed"
+            raise monitor.socket.gaierror(message)
+        assert isinstance(result, list)
+        return result
+
+    monkeypatch.setattr(monitor.socket, "getaddrinfo", getaddrinfo)
+    with pytest.raises(MonitorError, match=r"hostname resolution failed|no addresses"):
+        monitor._resolve_addresses("example.com", 80, None)  # pyright: ignore[reportPrivateUsage]
+
+
 def test_private_literal_ip_is_rejected() -> None:
     with pytest.raises(MonitorError, match="public IP"):
         validate_public_url("http://127.0.0.1/")
@@ -104,21 +214,29 @@ def test_private_literal_ip_is_rejected() -> None:
     [
         "http://93.184.216.34/?token=secret",
         "http://93.184.216.34/?api%20key=secret",
+        "http://93.184.216.34/?key=secret",
+        "http://93.184.216.34/?safe=1;token=secret",
         "http://93.184.216.34/?next=https%253A%252F%252Fexample.com%252F%253Ftoken%253Dsecret",
         "http://93.184.216.34/?next=https%3A%2F%2F%5B%3A%3Abad%5D%2F%3Ftoken%3Dsecret",
         "http://93.184.216.34/#access_token=secret",
         "http://224.0.0.1/",
         "http://[ff02::1]/",
+        "http://[64:ff9b::1]/",
+        "http://[2002::1]/",
         "http://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
     ],
     ids=[
         "token-query",
         "encoded-query-name",
+        "generic-key-query",
+        "semicolon-query",
         "nested-token-query",
         "malformed-nested-url",
         "credential-fragment",
         "ipv4-multicast",
         "ipv6-multicast",
+        "nat64-transition",
+        "6to4-transition",
         "webhook",
     ],
 )
@@ -434,6 +552,44 @@ def test_fetch_revalidates_each_redirect_without_re_resolving_a_target(
     assert connected == [("93.184.216.34", 80), ("93.184.216.35", 80)]
 
 
+@pytest.mark.parametrize("redirect", [False, True], ids=["initial", "redirect"])
+def test_fetch_rejects_mixed_public_private_dns_answers(
+    monkeypatch: pytest.MonkeyPatch, redirect: bool
+) -> None:
+    connected: list[tuple[str, int]] = []
+
+    def resolver(host: str, port: int) -> list[tuple[Any, ...]]:
+        if redirect and host == "example.com":
+            addresses = ["93.184.216.34"]
+        else:
+            addresses = ["93.184.216.34", "10.0.0.1"]
+        return [
+            (
+                monitor.socket.AF_INET,
+                monitor.socket.SOCK_STREAM,
+                6,
+                "",
+                (address, port),
+            )
+            for address in addresses
+        ]
+
+    responses = (
+        [
+            _FakeResponse(302, headers={"Location": "http://other.example/new"}),
+            _FakeResponse(200),
+        ]
+        if redirect
+        else [_FakeResponse(200)]
+    )
+    _install_fake_http(monkeypatch, resolver, responses, connected)
+
+    with pytest.raises(MonitorError, match="public IP"):
+        fetch_document("http://example.com/old", timeout=5.0, max_bytes=1024)
+
+    assert connected == ([("93.184.216.34", 80)] if redirect else [])
+
+
 def test_fetch_deadline_covers_trickled_body(monkeypatch: pytest.MonkeyPatch) -> None:
     connected: list[tuple[str, int]] = []
 
@@ -488,6 +644,7 @@ def test_normalize_pdf_bounds_expansion_and_restores_pypdf_limits() -> None:
     from pypdf import filters  # ruff: ignore[import-outside-top-level]
 
     original = filters.ZLIB_MAX_OUTPUT_LENGTH
+    recovery_original = filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH
     pdf = _make_pdf(b"q\n" * 2_000, compressed=True)
 
     with pytest.raises(MonitorError, match="PDF"):
@@ -498,6 +655,33 @@ def test_normalize_pdf_bounds_expansion_and_restores_pypdf_limits() -> None:
         )
 
     assert original == filters.ZLIB_MAX_OUTPUT_LENGTH
+    assert recovery_original == filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH
+
+
+def test_normalize_valid_pdf_extracts_text() -> None:
+    pytest.importorskip("pypdf")
+    pdf = _make_pdf(b"BT /F1 12 Tf 72 200 Td (hello) Tj ET", compressed=True)
+
+    normalized = normalize_document(
+        Document(pdf, "https://example.com/file.pdf", "application/pdf"),
+        max_pdf_decompressed_bytes=4_096,
+        max_pdf_extracted_chars=1_000,
+    )
+
+    assert "hello" in normalized
+
+
+def test_pypdf_recovery_input_limit_is_applied_and_restored() -> None:
+    pytest.importorskip("pypdf")
+    from pypdf import filters  # ruff: ignore[import-outside-top-level]
+    from pypdf.errors import LimitReachedError  # ruff: ignore[import-outside-top-level]
+
+    original = filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH
+    with monitor._pypdf_output_limits(2):  # pyright: ignore[reportPrivateUsage]
+        assert filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH == 2
+        with pytest.raises(LimitReachedError, match="Recovery limit"):
+            filters.decompress(b"\x00" * 10)
+    assert original == filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH
 
 
 def test_normalize_pdf_bounds_extracted_text() -> None:
@@ -569,6 +753,49 @@ def test_run_local_file_writes_normalized_snapshot(tmp_path: Path) -> None:
 
     assert result["status"] == "baseline"
     assert output.read_text() == "Alpha Beta\n"
+
+
+def _run_local_with_output(source: Path, output: Path) -> dict[str, object]:
+    return run(
+        Namespace(
+            url=None,
+            input=source,
+            source_url="http://93.184.216.34/",
+            content_type="text/html",
+            previous=None,
+            output=output,
+            timeout=30.0,
+            max_bytes=1024,
+            max_diff_lines=20,
+        )
+    )
+
+
+def test_run_output_replaces_symlink_without_following_target(tmp_path: Path) -> None:
+    source = tmp_path / "page.html"
+    target = tmp_path / "target.txt"
+    output = tmp_path / "snapshot.txt"
+    source.write_text("<main>new</main>")
+    target.write_text("keep")
+    output.symlink_to(target)
+
+    _run_local_with_output(source, output)
+
+    assert target.read_text() == "keep"
+    assert not output.is_symlink()
+    assert output.read_text() == "new\n"
+
+
+def test_run_output_replaces_fifo_without_blocking(tmp_path: Path) -> None:
+    source = tmp_path / "page.html"
+    output = tmp_path / "snapshot.fifo"
+    source.write_text("<main>new</main>")
+    os.mkfifo(output)
+
+    _run_local_with_output(source, output)
+
+    assert output.is_file()
+    assert output.read_text() == "new\n"
 
 
 @pytest.mark.parametrize(

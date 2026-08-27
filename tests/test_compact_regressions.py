@@ -52,6 +52,16 @@ def test_diff_complexity_short_circuits_before_unified_diff(
     assert "complexity limit exceeded" in str(result["diff"])
 
 
+def test_diff_complexity_counts_non_lf_line_boundaries() -> None:
+    previous = "old\r" * 2_100
+    current = "new\r" * 2_100
+
+    result = compare_text(current, previous, max_diff_lines=20)
+
+    assert result["diff_truncated"] is True
+    assert "complexity limit exceeded" in str(result["diff"])
+
+
 def test_html_served_as_text_plain_still_uses_html_normalization() -> None:
     document = Document(
         b"<html><body><main>Hello</main><script>ignore()</script></body></html>",
@@ -89,13 +99,15 @@ def test_feed_destination_identity_tracks_xml_base_without_raw_url() -> None:
     "destination",
     [
         "https://example.com/item?token=secret",
+        "https://example.com/item?key=secret",
+        "https://example.com/item?safe=1;token=secret",
         (
             "https://hooks.slack.com/services/"
             "T00000000/B00000000/"
             "XXXXXXXXXXXXXXXXXXXXXXXX"
         ),
     ],
-    ids=["query-credential", "webhook"],
+    ids=["query-credential", "key-credential", "semicolon-credential", "webhook"],
 )
 def test_feed_rejects_credential_bearing_destinations(destination: str) -> None:
     body = f'<rss><channel><link href="{destination}"/></channel></rss>'.encode()

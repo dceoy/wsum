@@ -147,4 +147,5 @@ omit = ["tests/**"]
 
 [tool.coverage.report]
 show_missing = true
+fail_under = 79
 exclude_lines = ["if TYPE_CHECKING:"]
