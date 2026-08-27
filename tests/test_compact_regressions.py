@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 import monitor
-import pytest
 from monitor import Document, compare_text, normalize_document
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def test_feed_normalization_preserves_field_boundaries() -> None:
@@ -31,9 +33,17 @@ def test_feed_normalization_preserves_field_boundaries() -> None:
 def test_diff_complexity_short_circuits_before_unified_diff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fail_unified_diff(*args: Any, **kwargs: Any) -> None:
-        del args, kwargs
-        raise AssertionError("unified_diff must not run past the complexity budget")
+    def fail_unified_diff(
+        before: list[str],
+        after: list[str],
+        *,
+        fromfile: str,
+        tofile: str,
+        lineterm: str,
+    ) -> None:
+        del before, after, fromfile, tofile, lineterm
+        message = "unified_diff must not run past the complexity budget"
+        raise AssertionError(message)
 
     monkeypatch.setattr(monitor, "unified_diff", fail_unified_diff)
     previous = "\n".join(f"old-{index}" for index in range(2_100))
