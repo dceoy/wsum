@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import monitor
+import pytest
 from monitor import Document, compare_text, normalize_document
 
 
@@ -25,8 +28,10 @@ def test_feed_normalization_preserves_field_boundaries() -> None:
     assert left != right
 
 
-def test_diff_complexity_short_circuits_before_unified_diff(monkeypatch) -> None:
-    def fail_unified_diff(*args, **kwargs):
+def test_diff_complexity_short_circuits_before_unified_diff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_unified_diff(*args: Any, **kwargs: Any) -> None:
         del args, kwargs
         raise AssertionError("unified_diff must not run past the complexity budget")
 
