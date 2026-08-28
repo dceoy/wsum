@@ -98,6 +98,8 @@ following fields are the minimum interoperable contract:
     "event_id": "<target-and-sha256-id>",
     "target_id": "example",
     "sha256": "<normalized-sha256>",
+    "destination": "<notification destination>",
+    "message": "<notification message>",
     "status": "pending",
     "attempt": 0,
     "last_error": "",

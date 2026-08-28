@@ -529,7 +529,9 @@ def _resolve_public_url(url: str, *, deadline: float | None = None) -> _Resolved
         raise MonitorError("source host contains control characters")
     if _is_webhook_credential_path(host, unquote(parsed.path)):
         raise MonitorError("webhook credential URLs are not allowed")
-    port = port or (443 if scheme == "https" else 80)
+    if port == 0:
+        raise MonitorError("source port must not be zero")
+    port = port if port is not None else (443 if scheme == "https" else 80)
     addresses = _resolve_addresses(host, port, deadline)
     if deadline is not None:
         _remaining(deadline)
@@ -1218,6 +1220,14 @@ class _FeedTextTarget:
             self._identity_frames.append((local_tag, [], identity_value))
         self._append_start(local_tag, attrs)
 
+    def _finish_identity(self, field: str, value: str) -> None:
+        if not value:
+            return
+        if field not in self._entry_identity:
+            self._entry_identity[field] = value
+        if field in {"guid", "id"}:
+            self._append(_feed_identity_token(field, value, self._base_url))
+
     def end(self, tag: str) -> None:
         local_tag = _local_name(tag)
         text_destination = (
@@ -1231,8 +1241,7 @@ class _FeedTextTarget:
         if self._identity_frames and self._identity_frames[-1][0] == local_tag:
             field, values, attribute_value = self._identity_frames.pop()
             value = attribute_value or "".join(values).strip()
-            if value and field not in self._entry_identity:
-                self._entry_identity[field] = value
+            self._finish_identity(field, value)
         if self._preserve_structure:
             self._append(f"\n[{local_tag}:end]\n")
 
@@ -1263,6 +1272,8 @@ class _FeedTextTarget:
         if self._identity_frames:
             for _, values, _ in self._identity_frames:
                 values.append(data)
+            if self._identity_frames[-1][0] in {"guid", "id"}:
+                return
         if (
             self._text_destination_stack
             and self._text_destination_stack[-1] is not None
@@ -1305,10 +1316,27 @@ def _destination_has_credentials(value: str) -> bool:
     return (
         parsed.username is not None
         or parsed.password is not None
-        or bool(parsed.fragment)
+        or _query_has_credentials(parsed.fragment, depth=0)
         or _is_webhook_credential_path(host, unquote(parsed.path))
         or _query_has_credentials(parsed.query, depth=0)
     )
+
+
+def _feed_identity_token(field: str, value: str, base_url: str) -> str:
+    """Return bounded feed identity text without exposing URI-shaped values."""
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise MonitorError("feed identity is invalid") from exc
+    if not parsed.scheme and not parsed.netloc:
+        return value
+    identity = value
+    if parsed.scheme.lower() in {"http", "https"} or parsed.netloc:
+        identity = urljoin(base_url, value)
+        if _destination_has_credentials(identity):
+            raise MonitorError("feed identity contains credentials")
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"[{field}:sha256:{digest}]"
 
 
 def _normalize_feed(

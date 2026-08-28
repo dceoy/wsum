@@ -254,6 +254,11 @@ def test_credential_bearing_public_urls_are_rejected(url: str) -> None:
         validate_public_url(url)
 
 
+def test_public_url_rejects_explicit_zero_port() -> None:
+    with pytest.raises(MonitorError, match="port must not be zero"):
+        validate_public_url("http://93.184.216.34:0/")
+
+
 @pytest.mark.parametrize(
     ("body", "content_type", "charset", "expected"),
     [
@@ -371,6 +376,22 @@ def test_normalize_html_preserves_line_break_elements() -> None:
     assert normalized == "Hello\nworld\n"
 
 
+def test_normalize_html_preserves_safe_fragment_destinations() -> None:
+    normalized = normalize_document(
+        Document(
+            b'<a href="#install">Install</a>',
+            "https://example.com/",
+            "text/html",
+        )
+    )
+
+    assert "Install" in normalized
+    assert (
+        monitor.hashlib.sha256(b"https://example.com/#install").hexdigest()
+        in normalized
+    )
+
+
 @pytest.mark.parametrize(
     ("body", "charset"),
     [(b"\xff", None), (b"\xfe", None), (b"hello", "x-unknown")],
@@ -419,6 +440,52 @@ def test_normalize_feed_preserves_text_and_link_attributes(
     assert text in normalized
     assert destination not in normalized
     assert monitor.hashlib.sha256(destination.encode()).hexdigest() in normalized
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body", "identity"),
+    [
+        (
+            "application/rss+xml",
+            (
+                b"<rss><channel><item><guid>https://example.com/item</guid>"
+                b"<title>Update</title></item></channel></rss>"
+            ),
+            "https://example.com/item",
+        ),
+        (
+            "application/atom+xml",
+            (
+                b"<feed><entry><id>https://example.com/item</id>"
+                b"<title>Update</title></entry></feed>"
+            ),
+            "https://example.com/item",
+        ),
+    ],
+    ids=["rss-uri-guid", "atom-uri-id"],
+)
+def test_normalize_feed_redacts_safe_uri_identity_values(
+    content_type: str, body: bytes, identity: str
+) -> None:
+
+    normalized = normalize_document(
+        Document(body, "https://example.com/", content_type)
+    )
+
+    assert identity not in normalized
+    assert monitor.hashlib.sha256(identity.encode()).hexdigest() in normalized
+
+
+def test_normalize_feed_rejects_credential_bearing_uri_identity() -> None:
+    body = (
+        b"<rss><channel><item><guid>https://example.com/item?token=secret"
+        b"</guid><title>Update</title></item></channel></rss>"
+    )
+
+    with pytest.raises(MonitorError, match="feed identity contains credentials"):
+        normalize_document(
+            Document(body, "https://example.com/", "application/rss+xml")
+        )
 
 
 @pytest.mark.parametrize(
