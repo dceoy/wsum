@@ -499,13 +499,26 @@ def _nested_url_has_credentials(value: str, *, depth: int) -> bool:
 
 
 def _query_has_credentials(query: str, *, depth: int) -> bool:
+    if depth > _MAX_NESTED_URL_DEPTH:
+        return True
     # Treat the legacy semicolon separator as equivalent to '&'.
-    for name, value in parse_qsl(query.replace(";", "&"), keep_blank_values=True):
-        if _is_sensitive_query_name(name):
-            return True
-        if value and _nested_url_has_credentials(value, depth=depth):
-            return True
-    return False
+    candidate = query
+    for _ in range(_MAX_NESTED_URL_DEPTH - depth + 1):
+        for name, value in parse_qsl(
+            candidate.lstrip("?").replace(";", "&"), keep_blank_values=True
+        ):
+            if _is_sensitive_query_name(name):
+                return True
+            if value and (
+                _nested_url_has_credentials(value, depth=depth)
+                or _query_has_credentials(unquote(value), depth=depth + 1)
+            ):
+                return True
+        decoded = unquote(candidate)
+        if decoded == candidate:
+            return False
+        candidate = decoded
+    return True
 
 
 def _resolve_public_url(url: str, *, deadline: float | None = None) -> _ResolvedTarget:
