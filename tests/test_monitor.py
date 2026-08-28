@@ -204,9 +204,10 @@ def test_address_resolution_rejects_empty_or_failed_lookup(
         monitor._resolve_addresses("example.com", 80, None)  # pyright: ignore[reportPrivateUsage]
 
 
-def test_private_literal_ip_is_rejected() -> None:
+@pytest.mark.parametrize("host", ["127.0.0.1", "192.0.0.8"])
+def test_non_public_literal_ip_is_rejected(host: str) -> None:
     with pytest.raises(MonitorError, match="public IP"):
-        validate_public_url("http://127.0.0.1/")
+        validate_public_url(f"http://{host}/")
 
 
 @pytest.mark.parametrize(
@@ -270,8 +271,36 @@ def test_credential_bearing_public_urls_are_rejected(url: str) -> None:
             "utf-16-le",
             "Hello\n",
         ),
+        (
+            "<html><body>Hello</body></html>".encode("utf-16-le"),
+            "text/html",
+            "utf-16-le",
+            "Hello\n",
+        ),
+        (
+            '<?xml version="1.0"?><root><value>Hello</value></root>'.encode(
+                "utf-32-le"
+            ),
+            "application/xml",
+            "utf-32-le",
+            "Hello\n",
+        ),
+        (
+            "<html><body>価格</body></html>".encode("cp932"),
+            "text/html",
+            "cp932",
+            "価格\n",
+        ),
     ],
-    ids=["utf8-bom", "utf16-bom", "html-meta", "http-charset"],
+    ids=[
+        "utf8-bom",
+        "utf16-bom",
+        "html-meta",
+        "http-charset",
+        "utf16-html-no-bom",
+        "utf32-xml-no-bom",
+        "cp932",
+    ],
 )
 def test_normalize_document_detects_supported_encodings(
     body: bytes,
@@ -560,6 +589,57 @@ def test_fetch_revalidates_each_redirect_without_re_resolving_a_target(
     assert connected == [("93.184.216.34", 80), ("93.184.216.35", 80)]
 
 
+@pytest.mark.parametrize(
+    ("body", "declared_length"),
+    [(b"short", "6"), (b"hello", "-1")],
+    ids=["truncated-body", "negative-length"],
+)
+def test_fetch_rejects_invalid_response_body_length(
+    monkeypatch: pytest.MonkeyPatch, body: bytes, declared_length: str
+) -> None:
+    connected: list[tuple[str, int]] = []
+    _install_fake_http(
+        monkeypatch,
+        lambda _host, _port: [],
+        [
+            _FakeResponse(
+                200,
+                body=body,
+                headers={
+                    "Content-Type": "text/plain",
+                    "Content-Length": declared_length,
+                },
+            )
+        ],
+        connected,
+    )
+
+    with pytest.raises(MonitorError, match=r"Content-Length"):
+        fetch_document("http://93.184.216.34/", timeout=5.0, max_bytes=1024)
+
+
+def test_fetch_accepts_exact_response_body_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connected: list[tuple[str, int]] = []
+    _install_fake_http(
+        monkeypatch,
+        lambda _host, _port: [],
+        [
+            _FakeResponse(
+                200,
+                body=b"hello",
+                headers={"Content-Type": "text/plain", "Content-Length": "5"},
+            )
+        ],
+        connected,
+    )
+
+    document = fetch_document("http://93.184.216.34/", timeout=5.0, max_bytes=1024)
+
+    assert document.body == b"hello"
+
+
 @pytest.mark.parametrize("redirect", [False, True], ids=["initial", "redirect"])
 def test_fetch_rejects_mixed_public_private_dns_answers(
     monkeypatch: pytest.MonkeyPatch, redirect: bool
@@ -647,6 +727,40 @@ def _make_pdf(content: bytes, *, compressed: bool) -> bytes:
     return output.getvalue()
 
 
+def _make_pdf_with_link(content: bytes, *, uri: str) -> bytes:
+    pypdf = pytest.importorskip("pypdf")
+    from pypdf.annotations import Link  # ruff: ignore[import-outside-top-level]
+    from pypdf.generic import (  # ruff: ignore[import-outside-top-level]
+        DecodedStreamObject,
+        DictionaryObject,
+        NameObject,
+        RectangleObject,
+    )
+
+    writer = pypdf.PdfWriter()
+    page = writer.add_blank_page(width=300, height=300)
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({
+            NameObject("/F1"): writer._add_object(font)
+        })
+    })
+    stream = DecodedStreamObject()
+    stream.set_data(content)
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    writer.add_annotation(
+        page_number=0,
+        annotation=Link(rect=RectangleObject((0, 0, 50, 50)), url=uri),
+    )
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
 def test_normalize_pdf_bounds_expansion_and_restores_pypdf_limits() -> None:
     pytest.importorskip("pypdf")
     from pypdf import filters  # ruff: ignore[import-outside-top-level]
@@ -677,6 +791,84 @@ def test_normalize_valid_pdf_extracts_text() -> None:
     )
 
     assert "hello" in normalized
+
+
+@pytest.mark.parametrize(
+    ("before_uri", "after_uri"),
+    [
+        ("https://example.com/v1", "https://example.com/v2"),
+        ("https://example.com/v1?page=1", "https://example.com/v1?page=2"),
+    ],
+    ids=["path", "query"],
+)
+def test_normalize_pdf_detects_link_destination_changes(
+    before_uri: str, after_uri: str
+) -> None:
+    content = b"BT /F1 12 Tf 72 200 Td (hello) Tj ET"
+    before = normalize_document(
+        Document(
+            _make_pdf_with_link(content, uri=before_uri),
+            "https://example.com/file.pdf",
+            "application/pdf",
+        ),
+        max_pdf_decompressed_bytes=4_096,
+        max_pdf_extracted_chars=1_000,
+    )
+    after = normalize_document(
+        Document(
+            _make_pdf_with_link(content, uri=after_uri),
+            "https://example.com/file.pdf",
+            "application/pdf",
+        ),
+        max_pdf_decompressed_bytes=4_096,
+        max_pdf_extracted_chars=1_000,
+    )
+
+    assert before != after
+    assert before_uri not in before
+    assert after_uri not in after
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://user:pass@example.com/item",
+        "https://example.com/item?token=secret",
+        "https://hooks.slack.com/services/T00000000/B00000000/" + "X" * 24,
+    ],
+    ids=["userinfo", "query-credential", "webhook"],
+)
+def test_normalize_pdf_rejects_credential_bearing_links(uri: str) -> None:
+    pdf = _make_pdf_with_link(b"BT /F1 12 Tf (hello) Tj ET", uri=uri)
+
+    with pytest.raises(MonitorError, match="credentials"):
+        normalize_document(
+            Document(pdf, "https://example.com/file.pdf", "application/pdf")
+        )
+
+
+def test_normalize_pdf_bounds_font_resources(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("pypdf")
+    pdf = _make_pdf(b"BT /F1 12 Tf (hello) Tj ET", compressed=False)
+    monkeypatch.setattr(monitor, "_DEFAULT_MAX_PDF_FONTS", 0)
+
+    with pytest.raises(MonitorError, match="font resources"):
+        normalize_document(
+            Document(pdf, "https://example.com/file.pdf", "application/pdf")
+        )
+
+
+def test_normalize_pdf_bounds_annotations(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("pypdf")
+    pdf = _make_pdf_with_link(
+        b"BT /F1 12 Tf (hello) Tj ET", uri="https://example.com/item"
+    )
+    monkeypatch.setattr(monitor, "_DEFAULT_MAX_PDF_ANNOTATIONS", 0)
+
+    with pytest.raises(MonitorError, match="annotations"):
+        normalize_document(
+            Document(pdf, "https://example.com/file.pdf", "application/pdf")
+        )
 
 
 def test_pypdf_recovery_input_limit_is_applied_and_restored() -> None:

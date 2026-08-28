@@ -137,3 +137,143 @@ def test_feed_text_link_is_hashed_without_raw_url() -> None:
 
     assert destination not in normalized
     assert monitor.hashlib.sha256(destination.encode()).hexdigest() in normalized
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "https://user:pass@example.com/item",
+        "https://example.com/item?token=secret",
+        "https://hooks.slack.com/services/T00000000/B00000000/" + "X" * 24,
+    ],
+    ids=["userinfo", "query-credential", "webhook"],
+)
+def test_html_rejects_credential_bearing_destinations(destination: str) -> None:
+    document = Document(
+        f'<main><a href="{destination}">Link</a></main>'.encode(),
+        "https://example.com/",
+        "text/html",
+    )
+
+    with pytest.raises(monitor.MonitorError, match="credentials"):
+        normalize_document(document)
+
+
+@pytest.mark.parametrize(
+    ("before_href", "after_href"),
+    [("/v1", "/v2"), ("https://example.com/v1", "https://example.com/v2")],
+    ids=["relative", "absolute"],
+)
+def test_feed_embedded_html_destination_change_is_detected(
+    before_href: str, after_href: str
+) -> None:
+    def make_document(href: str) -> Document:
+        body = (
+            "<rss><channel><item><description><![CDATA["
+            f'<a href="{href}">Apply</a>'
+            "]]></description></item></channel></rss>"
+        ).encode()
+        return Document(body, "https://example.com/feed", "application/rss+xml")
+
+    previous = normalize_document(make_document(before_href))
+    current = normalize_document(make_document(after_href))
+
+    assert previous != current
+    assert before_href not in previous
+    assert after_href not in current
+
+
+def test_feed_embedded_html_rejects_credential_bearing_destination() -> None:
+    document = Document(
+        b"<rss><channel><item><description><![CDATA["
+        b'<a href="https://example.com/?token=secret">Apply</a>'
+        b"]]></description></item></channel></rss>",
+        "https://example.com/feed",
+        "application/rss+xml",
+    )
+
+    with pytest.raises(monitor.MonitorError, match="credentials"):
+        normalize_document(document)
+
+
+@pytest.mark.parametrize(
+    ("before_href", "after_href"),
+    [("/v1", "/v2"), ("https://example.com/v1", "https://example.com/v2")],
+    ids=["relative", "absolute"],
+)
+def test_atom_inline_xhtml_destination_change_is_detected(
+    before_href: str, after_href: str
+) -> None:
+    def make_document(href: str) -> Document:
+        body = (
+            '<feed><entry><id>entry-1</id><content type="xhtml">'
+            '<div xmlns="http://www.w3.org/1999/xhtml">'
+            f'<a href="{href}">Apply</a>'
+            "</div></content></entry></feed>"
+        ).encode()
+        return Document(body, "https://example.com/feed", "application/atom+xml")
+
+    previous = normalize_document(make_document(before_href))
+    current = normalize_document(make_document(after_href))
+
+    assert previous != current
+    assert before_href not in previous
+    assert after_href not in current
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            (
+                b"<rss><channel><item><guid>2</guid><title>B</title></item>"
+                b"<item><guid>1</guid><title>A</title></item></channel></rss>"
+            ),
+            (
+                b"<rss><channel><item><guid>1</guid><title>A</title></item>"
+                b"<item><guid>2</guid><title>B</title></item></channel></rss>"
+            ),
+        ),
+        (
+            (
+                b"<feed><entry><id>2</id><title>B</title></entry>"
+                b"<entry><id>1</id><title>A</title></entry></feed>"
+            ),
+            (
+                b"<feed><entry><id>1</id><title>A</title></entry>"
+                b"<entry><id>2</id><title>B</title></entry></feed>"
+            ),
+        ),
+    ],
+    ids=["rss", "atom"],
+)
+def test_feed_entry_reordering_is_ignored(before: bytes, after: bytes) -> None:
+    previous = normalize_document(
+        Document(before, "https://example.com/feed", "application/rss+xml")
+    )
+    current = normalize_document(
+        Document(after, "https://example.com/feed", "application/rss+xml")
+    )
+
+    assert current == previous
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'<?xml version="1.0"?><root xml:base="' + b"a" * 4_097 + b'"/>',
+        (
+            b'<?xml version="1.0"?><root>'
+            + b'<node xml:base="x">' * 201
+            + b"text"
+            + b"</node>" * 201
+            + b"</root>"
+        ),
+    ],
+    ids=["base-url-length", "nesting-depth"],
+)
+def test_xml_base_processing_is_bounded(body: bytes) -> None:
+    with pytest.raises(monitor.MonitorError, match=r"base URL|nesting"):
+        normalize_document(
+            Document(body, "https://example.com/feed", "application/xml")
+        )

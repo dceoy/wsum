@@ -68,6 +68,51 @@ file, flush and `fsync` it, atomically replace the entry, and `fsync` the
 directory. For Google Drive, serialize execution per target and require a
 successful write/read-back confirmation for every ledger transition.
 
+### Connector record contract
+
+The external workflow owns these records; the Python helper reads only the input
+document and previous normalized snapshot. Each record uses `version: 1` and the
+following fields are the minimum interoperable contract:
+
+```json
+{
+  "target": {
+    "version": 1,
+    "target_id": "example",
+    "name": "Example",
+    "url": "https://example.com/",
+    "enabled": true,
+    "watch_focus": "",
+    "notification_group": "",
+    "fetch_mode": "static"
+  },
+  "snapshot": {
+    "version": 1,
+    "target_id": "example",
+    "sha256": "<normalized-sha256>",
+    "text_ref": "snapshots/example.txt",
+    "updated_at": "<timestamp>"
+  },
+  "notification": {
+    "version": 1,
+    "event_id": "<target-and-sha256-id>",
+    "target_id": "example",
+    "sha256": "<normalized-sha256>",
+    "status": "pending",
+    "attempt": 0,
+    "last_error": "",
+    "updated_at": "<timestamp>"
+  }
+}
+```
+
+For local mode, map `text_ref` and the notification record to the paths above;
+for Google Drive, map them to equivalent connector-owned rows or files. A
+per-target claim must protect the `pending` to `sending` transition through
+Slack delivery, so overlapping runs cannot send the same event twice. If the
+outcome of a `sending` event is unknown, leave it for explicit reconciliation;
+only a confirmed `delivered` record may permit snapshot promotion.
+
 ## Check one target
 
 1. Load the target and previous normalized snapshot from the selected backend. If
@@ -123,9 +168,9 @@ successful write/read-back confirmation for every ledger transition.
 - The helper strictly decodes text, rejects unsafe XML declarations, limits
   fetched bytes, PDF expansion and recovery input, page/object traversal (at most
   1,000 pages and 10,000 traversed objects), and extracted text, bounds
-  represented HTML/feed destinations, and bounds diff bytes and lines. HTML and
-  feed destination identity is represented only by SHA-256 so destination values
-  are not persisted in snapshots. Output snapshots use same-directory temporary
+  represented HTML/feed/PDF destinations, and bounds diff bytes and lines. HTML,
+  feed, and PDF destination identity is represented only by SHA-256 so destination
+  values are not persisted in snapshots. Output snapshots use same-directory temporary
   files and atomic replacement. Normalized snapshots are bounded separately from
   fetched documents so they can be safely reread.
   If `diff_truncated` is true, do not conclude that the change is non-material from

@@ -48,8 +48,13 @@ _DEFAULT_MAX_PDF_DECOMPRESSED_BYTES = 20 * 1024 * 1024
 _DEFAULT_MAX_PDF_EXTRACTED_CHARS = 10 * 1024 * 1024
 _DEFAULT_MAX_PDF_PAGES = 1_000
 _DEFAULT_MAX_PDF_OBJECTS = 10_000
+_DEFAULT_MAX_PDF_ANNOTATIONS = 500
+_DEFAULT_MAX_PDF_FONTS = 500
 _DEFAULT_MAX_SNAPSHOT_BYTES = 40 * 1024 * 1024
 _DEFAULT_MAX_XML_CHARS = 10 * 1024 * 1024
+_DEFAULT_MAX_XML_DEPTH = 200
+_DEFAULT_MAX_XML_BASE_URL_CHARS = 4_096
+_DEFAULT_MAX_XML_BASE_STACK_BYTES = 1_000_000
 _RESOLVER_WORKERS = 4
 _SKIP_TAGS = {"script", "style", "noscript", "template"}
 _HTML_DESTINATION_ATTRS = {
@@ -140,6 +145,7 @@ _HTML_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
 _SUPPORTED_TEXT_ENCODINGS = {
     "ascii",
     "big5",
+    "cp932",
     "cp1252",
     "euc_jp",
     "euc_kr",
@@ -190,11 +196,42 @@ _PYPDF_LIMIT_NAMES = (
     "ZLIB_MAX_RECOVERY_INPUT_LENGTH",
 )
 _NON_PUBLIC_IPV6_NETWORKS = (
+    ipaddress.ip_network("::/128"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("::ffff:0:0/96"),
     ipaddress.ip_network("64:ff9b::/96"),
     ipaddress.ip_network("64:ff9b:1::/48"),
+    ipaddress.ip_network("100::/64"),
+    ipaddress.ip_network("2001:2::/48"),
+    ipaddress.ip_network("2001:10::/28"),
+    ipaddress.ip_network("2001:db8::/32"),
     ipaddress.ip_network("2002::/16"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
     ipaddress.ip_network("fec0::/10"),
+    ipaddress.ip_network("ff00::/8"),
 )
+_NON_PUBLIC_IPV4_NETWORKS = (
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.0.0.0/24"),
+    ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("192.88.99.0/24"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("198.51.100.0/24"),
+    ipaddress.ip_network("203.0.113.0/24"),
+    ipaddress.ip_network("224.0.0.0/4"),
+    ipaddress.ip_network("240.0.0.0/4"),
+)
+_PUBLIC_SPECIAL_IPV4_ADDRESSES = frozenset({
+    ipaddress.ip_address("192.0.0.9"),
+    ipaddress.ip_address("192.0.0.10"),
+})
 _PDF_LIMIT_LOCK = threading.Lock()
 
 
@@ -380,6 +417,8 @@ class _TextExtractor(HTMLParser):
             if self._destination_count > _MAX_HTML_DESTINATIONS:
                 raise MonitorError("HTML has too many monitored destinations")
             destination = urljoin(self._base_url, value.strip())
+            if _destination_has_credentials(destination):
+                raise MonitorError("HTML destination contains credentials")
             digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
             self.parts.append(f"\n[{tag}:{name}:sha256:{digest}]\n")
 
@@ -393,6 +432,19 @@ class _TextExtractor(HTMLParser):
     def handle_data(self, data: str) -> None:
         if not self._skip_depth:
             self.parts.append(data)
+
+
+_EMBEDDED_HTML_RE = re.compile(r"</?[A-Za-z][^>]*>")
+
+
+def _normalize_html_fragment(value: str, base_url: str) -> str:
+    """Normalize HTML embedded in an XML text field."""
+    if not _EMBEDDED_HTML_RE.search(value):
+        return value
+    parser = _TextExtractor(base_url)
+    parser.feed(value)
+    parser.close()
+    return "".join(parser.parts)
 
 
 def _remaining(deadline: float) -> float:
@@ -484,6 +536,17 @@ def _resolve_public_url(url: str, *, deadline: float | None = None) -> _Resolved
     return _ResolvedTarget(url, scheme, host, port, addresses)
 
 
+def _is_public_unicast(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Apply a stable public-unicast policy across supported Python versions."""
+    if not address.is_global or address.is_multicast or address.is_reserved:
+        return False
+    if address.version == 4:
+        if any(address in network for network in _NON_PUBLIC_IPV4_NETWORKS):
+            return address in _PUBLIC_SPECIAL_IPV4_ADDRESSES
+        return True
+    return not any(address in network for network in _NON_PUBLIC_IPV6_NETWORKS)
+
+
 def _resolve_addresses(host: str, port: int, deadline: float | None) -> tuple[str, ...]:
     """Resolve one host and reject every non-public result."""
     try:
@@ -513,16 +576,7 @@ def _resolve_addresses(host: str, port: int, deadline: float | None) -> tuple[st
         parsed_addresses = tuple(ipaddress.ip_address(address) for address in addresses)
     except ValueError as exc:
         raise MonitorError("hostname resolved to an invalid address") from exc
-    if any(
-        not address.is_global
-        or address.is_multicast
-        or address.is_reserved
-        or any(
-            address.version == 6 and address in network
-            for network in _NON_PUBLIC_IPV6_NETWORKS
-        )
-        for address in parsed_addresses
-    ):
+    if any(not _is_public_unicast(address) for address in parsed_addresses):
         raise MonitorError("source must resolve only to public IP addresses")
     return addresses
 
@@ -766,7 +820,9 @@ def _redirect_target(
     return _resolve_public_url(urljoin(target.url, location), deadline=deadline)
 
 
-def _validate_response(response: http.client.HTTPResponse, max_bytes: int) -> None:
+def _validate_response(
+    response: http.client.HTTPResponse, max_bytes: int
+) -> int | None:
     if not 200 <= response.status < 300:
         message = f"fetch failed: HTTP {response.status}"
         raise MonitorError(message)
@@ -775,13 +831,16 @@ def _validate_response(response: http.client.HTTPResponse, max_bytes: int) -> No
         raise MonitorError("compressed HTTP content encoding is not supported")
     declared_length = response.getheader("Content-Length")
     if declared_length is None:
-        return
+        return None
     try:
         length = int(declared_length)
     except ValueError as exc:
         raise MonitorError("HTTP Content-Length is invalid") from exc
+    if length < 0:
+        raise MonitorError("HTTP Content-Length is invalid")
     if length > max_bytes:
         raise MonitorError("document exceeds --max-bytes")
+    return length
 
 
 def _fetch_once(
@@ -796,13 +855,15 @@ def _fetch_once(
         redirected = _redirect_target(response, target, redirect_count, deadline)
         if redirected is not None:
             return redirected
-        _validate_response(response, max_bytes)
+        declared_length = _validate_response(response, max_bytes)
         body = _read_response_limited(
             response,
             max_bytes,
             deadline=deadline,
             sock=transport_socket,
         )
+        if declared_length is not None and len(body) != declared_length:
+            raise MonitorError("HTTP response body does not match Content-Length")
         content_type, charset = _response_content_type(response)
         return Document(body, target.url, content_type, charset)
 
@@ -927,16 +988,26 @@ def _sniff_text_content_type(sample: str) -> str:
     return "text/plain"
 
 
-def _sniff_content_type(body: bytes) -> str:
+def _sniff_content_type(body: bytes, *, charset: str | None = None) -> str:
     """Detect the structural document type from a bounded byte prefix."""
     if body.startswith(b"%PDF-"):
         return "application/pdf"
     encoding = _bom_encoding(body)
+    if encoding is None and charset:
+        try:
+            encoding = _encoding_name(charset)
+        except MonitorError:
+            encoding = None
+    sample_bytes = body[:8_192]
+    if encoding in {"utf-16-le", "utf-16-be"}:
+        sample_bytes = sample_bytes[: len(sample_bytes) - len(sample_bytes) % 2]
+    elif encoding in {"utf-32-le", "utf-32-be"}:
+        sample_bytes = sample_bytes[: len(sample_bytes) - len(sample_bytes) % 4]
     try:
         sample = (
-            body[:8_192].decode(encoding, errors="strict")
+            sample_bytes.decode(encoding, errors="strict")
             if encoding is not None
-            else body[:8_192].decode("latin-1", errors="strict")
+            else sample_bytes.decode("latin-1", errors="strict")
         )
     except UnicodeDecodeError:
         return "text/plain"
@@ -946,7 +1017,7 @@ def _sniff_content_type(body: bytes) -> str:
 def _normalization_content_type(document: Document) -> str:
     """Cross-check declared MIME type with bytes and select the parser type."""
     declared = document.content_type
-    sniffed = _sniff_content_type(document.body)
+    sniffed = _sniff_content_type(document.body, charset=document.charset)
     supported = {
         "application/pdf",
         "text/plain",
@@ -1021,16 +1092,31 @@ def _local_name(tag: str) -> str:
 
 
 class _FeedTextTarget:
-    """Collect feed structure, text, and link destinations in XML document order."""
+    """Collect bounded feed text, identities, and link destinations."""
+
+    _ENTRY_TAGS = frozenset({"entry", "item"})
+    _IDENTITY_TAGS = frozenset({"guid", "id", "link"})
+    _EMBEDDED_TEXT_TAGS = frozenset({"content", "description", "encoded", "summary"})
+    _ENTRY_MARKER = "\x00wsum-entry-placeholder\x00"
 
     def __init__(
         self, max_chars: int, *, preserve_structure: bool, base_url: str
     ) -> None:
+        if len(base_url.encode("utf-8")) > _DEFAULT_MAX_XML_BASE_URL_CHARS:
+            raise MonitorError("XML base URL exceeds the size limit")
         self._max_chars = max_chars
         self._preserve_structure = preserve_structure
         self._base_url = base_url
         self._base_stack: list[str] = []
+        self._base_stack_bytes = 0
+        self._tag_stack: list[str] = []
         self._text_destination_stack: list[list[str] | None] = []
+        self._identity_frames: list[tuple[str, list[str], str | None]] = []
+        self._entry_parts: list[str] | None = None
+        self._entry_level = 0
+        self._entry_identity: dict[str, str] = {}
+        self._entries: list[tuple[str, str]] = []
+        self._entry_marker_added = False
         self._size = 0
         self._parts: list[str] = []
 
@@ -1038,10 +1124,47 @@ class _FeedTextTarget:
         self._size += len(value)
         if self._size > self._max_chars:
             raise MonitorError("XML extracted text exceeds the size limit")
-        self._parts.append(value)
+        if self._entry_parts is not None:
+            self._entry_parts.append(value)
+        else:
+            self._parts.append(value)
 
-    def start(self, tag: str, attrs: dict[str, str]) -> None:
-        local_tag = _local_name(tag)
+    def _start_entry(self) -> None:
+        if self._entry_parts is not None:
+            return
+        self._entry_parts = []
+        self._entry_level = 0
+        self._entry_identity = {}
+        if not self._entry_marker_added:
+            self._parts.append(self._ENTRY_MARKER)
+            self._entry_marker_added = True
+
+    @staticmethod
+    def _identity_value(local_tag: str, attrs: dict[str, str]) -> str | None:
+        if local_tag == "link":
+            relation = next(
+                (
+                    value.strip().lower()
+                    for name, value in attrs.items()
+                    if _local_name(name) == "rel" and value
+                ),
+                "alternate",
+            )
+            if relation != "alternate":
+                return None
+            return next(
+                (
+                    value.strip()
+                    for name, value in attrs.items()
+                    if _local_name(name) == "href" and value
+                ),
+                None,
+            )
+        return None
+
+    def _push_base(self, local_tag: str, attrs: dict[str, str]) -> None:
+        if len(self._base_stack) >= _DEFAULT_MAX_XML_DEPTH:
+            raise MonitorError("XML nesting exceeds the size limit")
         base_url = self._base_stack[-1] if self._base_stack else self._base_url
         for name, value in attrs.items():
             if (
@@ -1049,9 +1172,21 @@ class _FeedTextTarget:
                 or name.lower() == "xml:base"
             ):
                 if value:
-                    base_url = urljoin(base_url, value.strip())
+                    base_value = value.strip()
+                    if len(base_value) > _DEFAULT_MAX_XML_BASE_URL_CHARS:
+                        raise MonitorError("XML base URL exceeds the size limit")
+                    base_url = urljoin(base_url, base_value)
                 break
+        base_size = len(base_url.encode("utf-8"))
+        if base_size > _DEFAULT_MAX_XML_BASE_URL_CHARS:
+            raise MonitorError("XML base URL exceeds the size limit")
+        if self._base_stack_bytes + base_size > _DEFAULT_MAX_XML_BASE_STACK_BYTES:
+            raise MonitorError("XML base stack exceeds the size limit")
         self._base_stack.append(base_url)
+        self._base_stack_bytes += base_size
+        self._tag_stack.append(local_tag)
+
+    def _append_start(self, local_tag: str, attrs: dict[str, str]) -> None:
         destinations = sorted(
             (
                 (_local_name(name), value)
@@ -1063,49 +1198,97 @@ class _FeedTextTarget:
             self._preserve_structure and local_tag == "link" and not destinations
         )
         self._text_destination_stack.append([] if is_text_destination else None)
-        if self._preserve_structure:
-            self._append(f"\n[{local_tag}:start]\n")
-        if not self._preserve_structure or local_tag not in {"link", "enclosure"}:
+        if not self._preserve_structure:
+            return
+        self._append(f"\n[{local_tag}:start]\n")
+        if local_tag not in {"a", "enclosure", "link"}:
             return
         for name, value in destinations:
-            destination = urljoin(base_url, value.strip())
-            if _destination_has_credentials(destination):
-                raise MonitorError("feed destination contains credentials")
-            digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
-            self._append(f"[{local_tag}:{name}:sha256:{digest}]\n")
+            self._append_destination(local_tag, name, value)
+
+    def start(self, tag: str, attrs: dict[str, str]) -> None:
+        local_tag = _local_name(tag)
+        if self._preserve_structure and local_tag in self._ENTRY_TAGS:
+            self._start_entry()
+        if self._entry_parts is not None:
+            self._entry_level += 1
+        self._push_base(local_tag, attrs)
+        identity_value = self._identity_value(local_tag, attrs)
+        if self._entry_parts is not None and local_tag in self._IDENTITY_TAGS:
+            self._identity_frames.append((local_tag, [], identity_value))
+        self._append_start(local_tag, attrs)
 
     def end(self, tag: str) -> None:
+        local_tag = _local_name(tag)
         text_destination = (
             self._text_destination_stack.pop() if self._text_destination_stack else None
         )
         if text_destination is not None:
             value = "".join(text_destination).strip()
             if value:
-                self._append_destination("href", value)
+                self._append_destination("link", "href", value)
+
+        if self._identity_frames and self._identity_frames[-1][0] == local_tag:
+            field, values, attribute_value = self._identity_frames.pop()
+            value = attribute_value or "".join(values).strip()
+            if value and field not in self._entry_identity:
+                self._entry_identity[field] = value
         if self._preserve_structure:
-            self._append(f"\n[{_local_name(tag)}:end]\n")
+            self._append(f"\n[{local_tag}:end]\n")
+
+        if self._entry_parts is not None:
+            self._entry_level -= 1
+            if self._entry_level == 0:
+                entry_text = "".join(self._entry_parts)
+                identity = next(
+                    (
+                        self._entry_identity[field]
+                        for field in ("guid", "id", "link")
+                        if self._entry_identity.get(field)
+                    ),
+                    entry_text,
+                )
+                key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+                self._entries.append((key, entry_text))
+                self._entry_parts = None
+                self._entry_identity = {}
+                self._identity_frames.clear()
+
+        if self._tag_stack:
+            self._tag_stack.pop()
         if self._base_stack:
-            self._base_stack.pop()
+            self._base_stack_bytes -= len(self._base_stack.pop().encode("utf-8"))
 
     def data(self, data: str) -> None:
+        if self._identity_frames:
+            for _, values, _ in self._identity_frames:
+                values.append(data)
         if (
             self._text_destination_stack
             and self._text_destination_stack[-1] is not None
         ):
             self._text_destination_stack[-1].append(data)  # type: ignore[union-attr]
-        else:
-            self._append(data)
+            return
+        if (
+            self._preserve_structure
+            and self._tag_stack
+            and self._tag_stack[-1] in self._EMBEDDED_TEXT_TAGS
+        ):
+            base_url = self._base_stack[-1] if self._base_stack else self._base_url
+            data = _normalize_html_fragment(data, base_url)
+        self._append(data)
 
-    def _append_destination(self, name: str, value: str) -> None:
+    def _append_destination(self, tag: str, name: str, value: str) -> None:
         base_url = self._base_stack[-1] if self._base_stack else self._base_url
-        destination = urljoin(base_url, value)
+        destination = urljoin(base_url, value.strip())
         if _destination_has_credentials(destination):
             raise MonitorError("feed destination contains credentials")
         digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
-        self._append(f"[{_local_name('link')}:{name}:sha256:{digest}]\n")
+        self._append(f"[{tag}:{name}:sha256:{digest}]\n")
 
     def close(self) -> str:
-        return "".join(self._parts)
+        entries = "\n".join(entry_text for _, entry_text in sorted(self._entries))
+        return "".join(self._parts).replace(self._ENTRY_MARKER, entries)
 
     @staticmethod
     def doctype(name: str, public_id: str, system_id: str) -> None:
@@ -1288,6 +1471,51 @@ def _page_content_streams(page: Any, object_count: list[int]) -> list[Any]:
     return streams
 
 
+def _bound_page_fonts(
+    page: Any,
+    *,
+    used: int,
+    maximum: int,
+    set_limit: Callable[[int], None],
+    object_count: list[int],
+    font_count: list[int],
+    seen_cmaps: set[int],
+) -> int:
+    """Charge page fonts and their ToUnicode streams to the PDF budget."""
+    resources = _resolve_pdf_object(page.get("/Resources"))
+    get_value = getattr(resources, "get", None)
+    if not callable(get_value):
+        return used
+    fonts = _resolve_pdf_object(get_value("/Font"))
+    if not isinstance(fonts, Mapping):
+        return used
+    typed_fonts = cast("Mapping[object, Any]", fonts)
+    for candidate in typed_fonts.values():
+        font_count[0] += 1
+        if font_count[0] > _DEFAULT_MAX_PDF_FONTS:
+            raise MonitorError("PDF font resources exceed the size limit")
+        _consume_pdf_object(object_count)
+        font = _resolve_pdf_object(candidate)
+        font_get = getattr(font, "get", None)
+        if not callable(font_get):
+            continue
+        cmap = _resolve_pdf_object(font_get("/ToUnicode"))
+        if cmap is None or id(cmap) in seen_cmaps:
+            continue
+        seen_cmaps.add(id(cmap))
+        _consume_pdf_object(object_count)
+        get_data = getattr(cmap, "get_data", None)
+        if not callable(get_data):
+            continue
+        remaining = maximum - used
+        set_limit(max(1, remaining))
+        data = get_data()
+        if not isinstance(data, bytes) or len(data) > remaining:
+            raise MonitorError("PDF font mappings exceed the size limit")
+        used += len(data)
+    return used
+
+
 def _bound_page_content(
     page: Any,
     *,
@@ -1311,6 +1539,60 @@ def _bound_page_content(
             raise MonitorError("PDF decompressed streams exceed the size limit")
         used += len(data)
     return used
+
+
+def _pdf_link_destination(uri: str) -> str:
+    """Return an opaque identity for one absolute HTTP(S) PDF link."""
+    try:
+        parsed = urlsplit(uri.strip())
+    except ValueError as exc:
+        raise MonitorError("PDF link destination is invalid") from exc
+    if parsed.scheme.lower() not in {"http", "https"}:
+        if parsed.scheme:
+            return ""
+        raise MonitorError("PDF relative link destinations are unsupported")
+    if _destination_has_credentials(uri):
+        raise MonitorError("PDF link destination contains credentials")
+    return hashlib.sha256(uri.strip().encode("utf-8")).hexdigest()
+
+
+def _pdf_annotation_link(annotation: Any, object_count: list[int]) -> str:
+    _consume_pdf_object(object_count)
+    obj = _resolve_pdf_object(annotation)
+    if not isinstance(obj, Mapping):
+        return ""
+    typed_obj = cast("Mapping[object, Any]", obj)
+    if typed_obj.get("/Subtype") != "/Link":
+        return ""
+    action = _resolve_pdf_object(typed_obj.get("/A"))
+    if not isinstance(action, Mapping):
+        return ""
+    typed_action = cast("Mapping[object, Any]", action)
+    if typed_action.get("/S") != "/URI":
+        return ""
+    uri = _resolve_pdf_object(typed_action.get("/URI"))
+    return _pdf_link_destination(uri) if isinstance(uri, str) else ""
+
+
+def _page_link_destinations(
+    page: Any, object_count: list[int], annotation_count: list[int]
+) -> list[str]:
+    """Extract bounded opaque identities from page URI annotations."""
+    annotations = _resolve_pdf_object(page.get("/Annots"))
+    if annotations is None:
+        return []
+    if not isinstance(annotations, (list, tuple)):
+        raise MonitorError("PDF annotations have an invalid structure")
+    typed_annotations = cast("list[Any] | tuple[Any, ...]", annotations)
+    if len(typed_annotations) > _DEFAULT_MAX_PDF_ANNOTATIONS - annotation_count[0]:
+        raise MonitorError("PDF annotations exceed the size limit")
+    lines: list[str] = []
+    for annotation in typed_annotations:
+        annotation_count[0] += 1
+        digest = _pdf_annotation_link(annotation, object_count)
+        if digest:
+            lines.append(f"[link:sha256:{digest}]")
+    return lines
 
 
 def _extract_page_text(page: Any, *, extracted: int, maximum: int) -> tuple[str, int]:
@@ -1346,6 +1628,9 @@ def _normalize_pdf_content(
         fragments: list[str] = []
         decompressed = 0
         extracted = 0
+        font_count = [0]
+        seen_cmaps: set[int] = set()
+        annotation_count = [0]
         for page_number, page in enumerate(reader.pages, start=1):
             if page_number > _DEFAULT_MAX_PDF_PAGES:
                 raise MonitorError("PDF page count exceeds the size limit")
@@ -1356,11 +1641,24 @@ def _normalize_pdf_content(
                 set_limit=set_limit,
                 object_count=object_count,
             )
+            decompressed = _bound_page_fonts(
+                page,
+                used=decompressed,
+                maximum=max_decompressed_bytes,
+                set_limit=set_limit,
+                object_count=object_count,
+                font_count=font_count,
+                seen_cmaps=seen_cmaps,
+            )
+            link_destinations = _page_link_destinations(
+                page, object_count, annotation_count
+            )
             page_text, page_size = _extract_page_text(
                 page, extracted=extracted, maximum=max_extracted_chars
             )
             extracted += page_size
             fragments.append(page_text)
+            fragments.extend(link_destinations)
         return _normalize_whitespace("\n".join(fragments))
 
 
