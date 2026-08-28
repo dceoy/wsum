@@ -1,51 +1,77 @@
 # Web Update Monitor
 
-A deterministic toolkit and Agent Skill for website update monitoring. The monitor
-uses the same SSRF-safe fetch, normalization, diff, summary-validation, retry,
-replay, and notification pipeline with one of two persistence modes selected at
-runtime:
+A small Agent Skill for detecting meaningful updates on websites and documents.
+Python is limited to deterministic fetch/read, normalization, hashing, and bounded
+diff generation. The agent handles persistence, summarization, and notification.
+The helper strictly decodes text and bounds HTTP, PDF, XML, and diff resources.
 
-- `google-drive`: read targets and operational records through Google Sheets and
-  store normalized snapshots in Google Drive.
-- `local`: read targets from `targets.json`, store operational state and history in
-  SQLite, and store content-addressed snapshots in a caller-selected local runtime
-  directory.
+The skill supports two persistence modes selected per run:
 
-The registered skill is `web-update-monitor` and lives in
-`.claude/skills/web-update-monitor/`. Start with its `SKILL.md` and references.
+- `local`: keep target configuration and normalized snapshots in a caller-selected
+  local directory.
+- `google-drive`: keep the same target configuration and snapshots in Google
+  Sheets/Drive through the connected app.
 
-HTML, plain-text, and feed monitoring use only the standard library. PDF
-normalization requires [`pypdf`](https://pypi.org/project/pypdf/); when running
-from a source checkout, install it before monitoring PDFs or running the complete
-test suite:
+## Setup
+
+Use [uv](https://docs.astral.sh/uv/) for all Python dependency and command
+execution:
 
 ```bash
-python3 -m pip install 'pypdf>=6,<7'
+uv sync
 ```
 
-Run the local test suite with the repository's uv environment:
+## Usage
+
+Create a baseline from a public URL:
+
+```bash
+uv run python skills/web-update-monitor/scripts/monitor.py \
+  --url https://example.com/ \
+  --output .runtime/example.txt
+```
+
+Compare a later fetch with the baseline:
+
+```bash
+uv run python skills/web-update-monitor/scripts/monitor.py \
+  --url https://example.com/ \
+  --previous .runtime/example.txt \
+  --output .runtime/example.next.txt
+```
+
+For browser-rendered or connector-fetched content, use browser mode only with a
+tool that enforces public-unicast egress, bounded redirects/subresources, a total
+timeout, and a maximum artifact size. Do not provide cookies or credentials; fail
+closed if those controls are unavailable. Save the document to a temporary file
+and use `--input` instead of `--url`:
+
+```bash
+uv run python skills/web-update-monitor/scripts/monitor.py \
+  --input /tmp/rendered.html \
+  --source-url https://example.com/app \
+  --previous .runtime/example.txt \
+  --output .runtime/example.next.txt
+```
+
+The command prints one JSON object with `baseline`, `unchanged`, or `changed`
+status and a bounded unified diff. Promote the new snapshot only after the whole
+monitoring workflow succeeds.
+
+The external workflow keeps a durable notification ledger keyed by target and
+normalized hash. It records `pending`, `sending`, and `delivered` transitions
+before promoting a replacement snapshot; an indeterminate `sending` event is
+left for manual reconciliation rather than retried automatically.
+
+Run tests with:
 
 ```bash
 uv run pytest
 ```
 
-Run the end-to-end connector-free fixture:
-
-```bash
-python3 .claude/skills/web-update-monitor/scripts/dry_run.py \
-  tests/fixtures/dry-run.json
-```
+See `skills/web-update-monitor/SKILL.md` for the agent workflow.
 
 ## Repository boundary
 
-GitHub stores code, schemas, documentation, and synthetic fixtures only. Never
-commit fetched or rendered pages, PDFs/feeds from monitored sites, normalized
-production snapshots, production diffs, logs, Sheets/Drive exports, SQLite
-databases, credentials, cookies, browser profiles, webhook URLs, connector
-configuration, signed URLs, spreadsheet/Drive identifiers, or local runtime/replay
-artifacts.
-
-Execution cadence is configured outside this repository. The skill may be invoked
-ad hoc or by any non-overlapping external schedule appropriate to the monitored
-targets; connector identifiers, destination mappings, credentials, and production
-local runtime roots also remain deployment configuration.
+Do not commit fetched production content, snapshots, runtime state, credentials,
+webhook URLs, connector identifiers, browser profiles, or other deployment data.
