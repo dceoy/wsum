@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
+from typing import cast
 
 import pytest
 import workflow
@@ -31,6 +33,12 @@ def _event_payload(**overrides: object) -> dict[str, object]:
     }
     payload.update(overrides)
     return payload
+
+
+def _record(result: Mapping[str, object]) -> dict[str, object]:
+    value = result.get("notification")
+    assert isinstance(value, dict)
+    return cast("dict[str, object]", value)
 
 
 def test_validate_targets_normalizes_defaults() -> None:
@@ -114,8 +122,7 @@ def test_change_action(payload: dict[str, object], action: str) -> None:
 def test_notification_protocol_success_path() -> None:
     first = notification_step(_event_payload())
     assert first["action"] == "persist"
-    pending = first["notification"]
-    assert isinstance(pending, dict)
+    pending = _record(first)
     assert pending["status"] == "pending"
     assert pending["attempt"] == 0
     assert re.fullmatch(r"[0-9a-f]{64}", str(pending["event_id"]))
@@ -123,9 +130,8 @@ def test_notification_protocol_success_path() -> None:
     sending_step = notification_step(
         _event_payload(notification=pending, signal="pending_persisted")
     )
-    sending = sending_step["notification"]
+    sending = _record(sending_step)
     assert sending_step["next_signal"] == "sending_persisted"
-    assert isinstance(sending, dict)
     assert sending["status"] == "sending"
     assert sending["attempt"] == 1
 
@@ -137,8 +143,7 @@ def test_notification_protocol_success_path() -> None:
     delivered_step = notification_step(
         _event_payload(notification=sending, signal="slack_delivered")
     )
-    delivered = delivered_step["notification"]
-    assert isinstance(delivered, dict)
+    delivered = _record(delivered_step)
     assert delivered["status"] == "delivered"
 
     done = notification_step(
@@ -148,11 +153,9 @@ def test_notification_protocol_success_path() -> None:
 
 
 def test_notification_protocol_restart_and_failure_paths() -> None:
-    pending = notification_step(_event_payload())["notification"]
-    assert isinstance(pending, dict)
+    pending = _record(notification_step(_event_payload()))
     resumed = notification_step(_event_payload(notification=pending))
-    sending = resumed["notification"]
-    assert isinstance(sending, dict)
+    sending = _record(resumed)
     assert sending["status"] == "sending"
 
     ambiguous = notification_step(_event_payload(notification=sending))
@@ -165,9 +168,8 @@ def test_notification_protocol_restart_and_failure_paths() -> None:
             error="timeout",
         )
     )
-    retry = failed["notification"]
+    retry = _record(failed)
     assert failed["action"] == "persist_and_stop"
-    assert isinstance(retry, dict)
     assert retry["status"] == "pending"
     assert retry["attempt"] == 1
     assert retry["last_error"] == "timeout"
@@ -180,8 +182,7 @@ def test_notification_protocol_restart_and_failure_paths() -> None:
 
 
 def test_notification_protocol_rejects_wrong_state_or_event() -> None:
-    pending = notification_step(_event_payload())["notification"]
-    assert isinstance(pending, dict)
+    pending = _record(notification_step(_event_payload()))
     with pytest.raises(WorkflowError, match="sending notification"):
         notification_step(
             _event_payload(notification=pending, signal="slack_delivered")
