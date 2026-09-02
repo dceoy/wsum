@@ -9,6 +9,7 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from typing import TypedDict, cast
 from urllib.parse import urlsplit
 
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -22,11 +23,38 @@ class WorkflowError(RuntimeError):
     """Expected workflow input or state-transition failure."""
 
 
+class NotificationRecord(TypedDict):
+    """Validated durable notification record."""
+
+    version: int
+    event_id: str
+    target_id: str
+    sha256: str
+    destination: str
+    message: str
+    status: str
+    attempt: int
+    last_error: str
+    updated_at: str
+
+
 def _require_string(value: object, field: str, *, allow_empty: bool = False) -> str:
     if not isinstance(value, str) or (not allow_empty and not value):
         kind = "string" if allow_empty else "non-empty string"
         raise WorkflowError(f"{field} must be a {kind}")
     return value
+
+
+def _require_mapping(value: object, field: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise WorkflowError(f"{field} must be an object")
+    return cast("Mapping[str, object]", value)
+
+
+def _require_list(value: object, field: str) -> list[object]:
+    if not isinstance(value, list):
+        raise WorkflowError(f"{field} must be an array")
+    return cast("list[object]", value)
 
 
 def _validate_url(value: object) -> str:
@@ -46,9 +74,7 @@ def _validate_url(value: object) -> str:
 
 def validate_target(value: object) -> dict[str, object]:
     """Validate and normalize one monitoring target."""
-    if not isinstance(value, Mapping):
-        raise WorkflowError("target must be an object")
-    target = dict(value)
+    target = _require_mapping(value, "target")
     if target.get("include_selector") or target.get("exclude_selectors"):
         raise WorkflowError("selector_migration_required")
 
@@ -91,9 +117,7 @@ def validate_targets(payload: Mapping[str, object]) -> dict[str, object]:
     )
     if persistence_mode not in _PERSISTENCE_MODES:
         raise WorkflowError("persistence_mode must be local or google-drive")
-    raw_targets = payload.get("targets")
-    if not isinstance(raw_targets, list):
-        raise WorkflowError("targets must be an array")
+    raw_targets = _require_list(payload.get("targets"), "targets")
     targets = [validate_target(target) for target in raw_targets]
     ids = [str(target["target_id"]) for target in targets]
     if len(ids) != len(set(ids)):
@@ -101,7 +125,7 @@ def validate_targets(payload: Mapping[str, object]) -> dict[str, object]:
     return {"persistence_mode": persistence_mode, "targets": targets}
 
 
-def change_action(payload: Mapping[str, object]) -> dict[str, str]:
+def change_action(payload: Mapping[str, object]) -> dict[str, object]:
     """Choose the next workflow action from a monitor result and LLM judgment."""
     status = _require_string(payload.get("status"), "status")
     if status == "baseline":
@@ -157,10 +181,8 @@ def _validate_notification(
     sha256: str,
     event_id: str,
     destination: str,
-) -> dict[str, object]:
-    if not isinstance(value, Mapping):
-        raise WorkflowError("notification must be an object")
-    record = dict(value)
+) -> NotificationRecord:
+    record = _require_mapping(value, "notification")
     if record.get("version") != 1:
         raise WorkflowError("notification version must be 1")
     expected = {
@@ -199,7 +221,7 @@ def _validate_notification(
 
 def _new_notification(
     *, target_id: str, sha256: str, event_id: str, destination: str, message: str
-) -> dict[str, object]:
+) -> NotificationRecord:
     return {
         "version": 1,
         "event_id": event_id,
@@ -215,13 +237,13 @@ def _new_notification(
 
 
 def _replace_status(
-    record: Mapping[str, object],
+    record: NotificationRecord,
     status: str,
     *,
     attempt: int | None = None,
     last_error: str | None = None,
-) -> dict[str, object]:
-    updated = dict(record)
+) -> NotificationRecord:
+    updated = record.copy()
     updated["status"] = status
     if attempt is not None:
         updated["attempt"] = attempt
@@ -261,14 +283,14 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
                 ),
                 "next_signal": "pending_persisted",
             }
-        status = str(record["status"])
+        status = record["status"]
         if status == "pending":
             return {
                 "action": "persist",
                 "notification": _replace_status(
                     record,
                     "sending",
-                    attempt=int(record["attempt"]) + 1,
+                    attempt=record["attempt"] + 1,
                     last_error="",
                 ),
                 "next_signal": "sending_persisted",
@@ -279,7 +301,7 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
 
     if record is None:
         raise WorkflowError("notification is required after start")
-    status = str(record["status"])
+    status = record["status"]
     if signal == "pending_persisted":
         if status != "pending":
             raise WorkflowError("pending_persisted requires a pending notification")
@@ -288,7 +310,7 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
             "notification": _replace_status(
                 record,
                 "sending",
-                attempt=int(record["attempt"]) + 1,
+                attempt=record["attempt"] + 1,
                 last_error="",
             ),
             "next_signal": "sending_persisted",
@@ -322,12 +344,12 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
 
 def _read_payload() -> dict[str, object]:
     try:
-        payload = json.load(sys.stdin)
+        payload: object = json.load(sys.stdin)
     except json.JSONDecodeError as exc:
         raise WorkflowError("stdin must contain one JSON object") from exc
     if not isinstance(payload, dict):
         raise WorkflowError("stdin must contain one JSON object")
-    return payload
+    return cast("dict[str, object]", payload)
 
 
 def _parser() -> argparse.ArgumentParser:
