@@ -68,16 +68,18 @@ def test_validate_targets_rejects_invalid_target(
     override: dict[str, object], message: str
 ) -> None:
     with pytest.raises(WorkflowError, match=message):
-        validate_targets(
-            {"persistence_mode": "google-drive", "targets": [_target(**override)]}
-        )
+        validate_targets({
+            "persistence_mode": "google-drive",
+            "targets": [_target(**override)],
+        })
 
 
 def test_validate_targets_rejects_duplicates_and_mode() -> None:
     with pytest.raises(WorkflowError, match="duplicate_target_id"):
-        validate_targets(
-            {"persistence_mode": "local", "targets": [_target(), _target()]}
-        )
+        validate_targets({
+            "persistence_mode": "local",
+            "targets": [_target(), _target()],
+        })
     with pytest.raises(WorkflowError, match="persistence_mode"):
         validate_targets({"persistence_mode": "mixed", "targets": []})
 
