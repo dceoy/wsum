@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 import workflow
 from workflow import WorkflowError, change_action, notification_step, validate_targets
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def _target(**overrides: object) -> dict[str, object]:
