@@ -1,21 +1,27 @@
 # Web Update Monitor
 
 A small Agent Skill for detecting meaningful updates on websites and documents.
-Python is limited to deterministic fetch/read, normalization, hashing, and bounded
-diff generation. The agent handles persistence, summarization, and notification.
-The helper strictly decodes text and bounds HTTP, PDF, XML, and diff resources.
+
+The implementation separates deterministic mechanics from model judgment:
+
+- `monitor.py` performs bounded fetch/read, normalization, hashing, diff generation,
+  and atomic candidate-snapshot writes.
+- `workflow.py` validates targets and owns deterministic workflow decisions,
+  notification state transitions, idempotency keys, and snapshot-promotion rules.
+- the agent performs connector/browser I/O, judges whether a bounded diff is
+  material to `watch_focus`, writes the summary, and sends Slack notifications only
+  when directed by the workflow helper.
 
 The skill supports two persistence modes selected per run:
 
-- `local`: keep target configuration and normalized snapshots in a caller-selected
-  local directory.
-- `google-drive`: keep the same target configuration and snapshots in Google
-  Sheets/Drive through the connected app.
+- `local`: keep target configuration, normalized snapshots, and notification state
+  in a caller-selected local runtime directory.
+- `google-drive`: keep the equivalent records in Google Sheets/Drive through the
+  connected app.
 
 ## Setup
 
-Use [uv](https://docs.astral.sh/uv/) for all Python dependency and command
-execution:
+Use [uv](https://docs.astral.sh/uv/) for Python dependency and command execution:
 
 ```bash
 uv sync
@@ -40,28 +46,24 @@ uv run python skills/web-update-monitor/scripts/monitor.py \
   --output .runtime/example.next.txt
 ```
 
-For browser-rendered or connector-fetched content, use browser mode only with a
-tool that enforces public-unicast egress, bounded redirects/subresources, a total
-timeout, and a maximum artifact size. Do not provide cookies or credentials; fail
-closed if those controls are unavailable. Save the document to a temporary file
-and use `--input` instead of `--url`:
+Validate one run's target set before monitoring:
 
 ```bash
-uv run python skills/web-update-monitor/scripts/monitor.py \
-  --input /tmp/rendered.html \
-  --source-url https://example.com/app \
-  --previous .runtime/example.txt \
-  --output .runtime/example.next.txt
+cat targets-request.json | \
+  uv run python skills/web-update-monitor/scripts/workflow.py validate-targets
 ```
 
-The command prints one JSON object with `baseline`, `unchanged`, or `changed`
-status and a bounded unified diff. Promote the new snapshot only after the whole
-monitoring workflow succeeds.
+The workflow helper also exposes `change-action` and `notification-step`. These
+commands keep baseline promotion and the durable `pending` → `sending` →
+`delivered` notification protocol out of model instructions. The agent persists
+records returned by the helper and reports only confirmed connector outcomes back
+to it.
 
-The external workflow keeps a durable notification ledger keyed by target and
-normalized hash. It records `pending`, `sending`, and `delivered` transitions
-before promoting a replacement snapshot; an indeterminate `sending` event is
-left for manual reconciliation rather than retried automatically.
+For browser-rendered content, use browser mode only with a tool that enforces
+public-unicast egress, bounded redirects/subresources, a total timeout, and a
+maximum artifact size. Do not provide cookies or credentials; fail closed if those
+controls are unavailable. Save the rendered document to a temporary file and pass
+it to `monitor.py` with `--input` and `--source-url`.
 
 Run tests with:
 
