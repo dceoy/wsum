@@ -23,7 +23,7 @@ from workflow import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
 
 def _target(**overrides: object) -> dict[str, object]:
@@ -78,6 +78,19 @@ def _run_local_cas(
         _local_cas_payload(directive),
         runtime_dir=runtime_dir,
     )
+
+
+def _run_local_release(
+    record: Mapping[str, object], expected_status: str, runtime_dir: Path
+) -> dict[str, object]:
+    payload = {
+        "protocol_version": 2,
+        "action": "release_target_claim",
+        "target_id": record["target_id"],
+        "event_id": record["event_id"],
+        "expected_status": expected_status,
+    }
+    return workflow.run("local-notification-release", payload, runtime_dir=runtime_dir)
 
 
 def test_validate_targets_normalizes_defaults() -> None:
@@ -497,7 +510,7 @@ def test_local_notification_cas_fsyncs_file_and_directory(
 
     monkeypatch.setattr(workflow.os, "fsync", tracking_fsync)
     assert _run_local_cas(claim, tmp_path)["action"] == "compare_and_swap_applied"
-    assert len(synced) == 2
+    assert len(synced) == 4
 
 
 def test_local_notification_cas_preserves_old_record_on_fsync_failure(
@@ -533,13 +546,23 @@ def test_local_notification_cas_reports_directory_fsync_failure_after_replace(
         _event_payload(notification=pending, signal="pending_persisted")
     )
 
-    def fail_directory_fsync(_: Path) -> None:
-        raise OSError
+    original_fsync_directory = cast(
+        "Callable[[Path], None]",
+        LocalNotificationStore._fsync_directory,  # pyright: ignore[reportPrivateUsage]
+    )
+    calls = 0
+
+    def fail_second_directory_fsync(path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError
+        original_fsync_directory(path)
 
     monkeypatch.setattr(
         LocalNotificationStore,
         "_fsync_directory",
-        staticmethod(fail_directory_fsync),
+        staticmethod(fail_second_directory_fsync),
     )
     with pytest.raises(LocalStoreError, match="durably write"):
         _run_local_cas(claim, tmp_path)
@@ -553,6 +576,113 @@ def test_local_notification_cas_reports_directory_fsync_failure_after_replace(
         "protocol_version": 2,
         "action": "manual_reconciliation",
     }
+
+
+def test_local_notification_cas_serializes_different_events_until_promotion(
+    tmp_path: Path,
+) -> None:
+    first = notification_step(_event_payload())
+    _run_local_cas(first, tmp_path)
+    pending = _record(first)
+    claim = notification_step(
+        _event_payload(notification=pending, signal="pending_persisted")
+    )
+    claimed = _run_local_cas(claim, tmp_path)
+    sending = _record(claimed)
+    claim_path = tmp_path / "notifications" / ".example.claim.json"
+    assert json.loads(claim_path.read_text()) == {
+        "version": 1,
+        "target_id": "example",
+        "event_id": sending["event_id"],
+        "sha256": "a" * 64,
+    }
+
+    second = notification_step(_event_payload(sha256="b" * 64))
+    assert _run_local_cas(second, tmp_path) == {
+        "protocol_version": 2,
+        "action": "target_claim_conflict",
+        "target_claim": {
+            "version": 1,
+            "target_id": "example",
+            "event_id": sending["event_id"],
+            "sha256": "a" * 64,
+        },
+        "notification": None,
+    }
+
+    delivered = notification_step(
+        _event_payload(notification=sending, signal="slack_delivered")
+    )
+    delivered_result = _run_local_cas(delivered, tmp_path)
+    delivered_record = _record(delivered_result)
+    assert claim_path.exists()
+    assert _run_local_cas(second, tmp_path)["action"] == "target_claim_conflict"
+
+    assert _run_local_release(delivered_record, "delivered", tmp_path) == {
+        "protocol_version": 2,
+        "action": "target_claim_released",
+        "target_id": "example",
+        "event_id": delivered_record["event_id"],
+    }
+    assert not claim_path.exists()
+    pending_result = _run_local_cas(second, tmp_path)
+    assert pending_result["action"] == "compare_and_swap_applied"
+    second_claim = notification_step(
+        _event_payload(
+            sha256="b" * 64,
+            notification=_record(pending_result),
+            signal="pending_persisted",
+        )
+    )
+    assert _run_local_cas(second_claim, tmp_path)["action"] == (
+        "compare_and_swap_applied"
+    )
+
+
+def test_local_notification_cas_backfills_legacy_sending_claim(
+    tmp_path: Path,
+) -> None:
+    first = notification_step(_event_payload())
+    _run_local_cas(first, tmp_path)
+    pending = _record(first)
+    sending = _record(
+        notification_step(
+            _event_payload(notification=pending, signal="pending_persisted")
+        )
+    )
+    event_id = str(sending["event_id"])
+    record_path = tmp_path / "notifications" / f"{event_id}.json"
+    record_path.write_text(json.dumps(sending))
+
+    second = notification_step(_event_payload(sha256="b" * 64))
+    blocked = _run_local_cas(second, tmp_path)
+    assert blocked["action"] == "target_claim_conflict"
+    assert blocked["target_claim"] == {
+        "version": 1,
+        "target_id": "example",
+        "event_id": event_id,
+        "sha256": "a" * 64,
+    }
+    assert (
+        json.loads((tmp_path / "notifications" / ".example.claim.json").read_text())
+        == blocked["target_claim"]
+    )
+
+
+def test_local_notification_release_rejects_in_flight_claim(
+    tmp_path: Path,
+) -> None:
+    first = notification_step(_event_payload())
+    _run_local_cas(first, tmp_path)
+    pending = _record(first)
+    claim = notification_step(
+        _event_payload(notification=pending, signal="pending_persisted")
+    )
+    _run_local_cas(claim, tmp_path)
+    sending = _record(claim)
+
+    with pytest.raises(LocalStoreError, match="not ready to release"):
+        _run_local_release(sending, "delivered", tmp_path)
 
 
 def test_local_notification_cas_serializes_separate_processes(tmp_path: Path) -> None:

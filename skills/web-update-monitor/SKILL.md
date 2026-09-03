@@ -61,15 +61,45 @@ existing caller-controlled directory; do not pass a ledger or lock path in the
 request. Invalid, malformed, oversized, non-regular, or symlinked local state is
 an error, not an absent record.
 
+When a replacement claims `sending`, the backend also creates a durable,
+target-scoped claim at `notifications/.<target_id>.claim.json`. While that claim
+exists, a CAS for a different event (including a different snapshot SHA) returns
+`action: "target_claim_conflict"` without changing the other event's record; stop
+that target and retry it only after the current owner releases its claim. The
+claim remains through the external Slack call, terminal notification persistence,
+and snapshot promotion, so separate CAS calls cannot interleave two target
+notification windows. The per-target `flock` protects each individual operation;
+the durable claim preserves the ownership between operations.
+
+For existing local state created before target claims were added, the backend
+detects and durably backfills a claim for a single `sending` record. Multiple
+legacy `sending` records for one target are an error requiring manual
+reconciliation; do not send or promote that target automatically.
+
 An applied response includes the durable notification and the unchanged
-`next_signal`; only then continue the protocol. A conflict response includes the
-current durable record and omits the stale signal. Restart `notification-step`
-with `signal: "start"` and that record; never submit the stale signal or call
-Slack. The lock protects each complete local persistence operation. A durable
-`sending` record is the non-expiring delivery claim across the external Slack
-call, so recovery must use `manual_reconciliation` and never take over or resend
-it automatically. If a process crashes after Slack may have accepted a message,
-leave the durable record as `sending`.
+`next_signal`; only then continue the protocol. A normal CAS conflict includes
+the current durable record and omits the stale signal. Restart
+`notification-step` with `signal: "start"` and that record; never submit the
+stale signal or call Slack. A durable `sending` record and its target claim are
+non-expiring delivery claims across the external Slack call, so recovery must
+use `manual_reconciliation` and never take over or resend them automatically. If
+a process crashes after Slack may have accepted a message, leave both durable
+records in place.
+
+After a confirmed failure has been persisted and the helper returns `stop`, or
+after a confirmed delivery has been persisted and the candidate snapshot has
+been promoted, release the target claim with the local backend:
+
+```bash
+uv run python skills/web-update-monitor/scripts/workflow.py \
+  local-notification-release --runtime-dir "$RUNTIME_DIR" < request.json
+```
+
+Use `action: "release_target_claim"`, the target and event IDs, and
+`expected_status: "pending"` for the failure path or `"delivered"` for the
+promotion path. Never release a claim while its notification is `sending`.
+If release fails, leave the claim in place and fail closed; a later recovery can
+retry the release after confirming the terminal state and snapshot outcome.
 
 For Google Drive mode, serialize each target from the state comparison through
 Slack outcome persistence/read-back, or use an equivalent atomic compare-and-swap
@@ -89,13 +119,19 @@ The protocol transitions are:
 - `slack_delivered`: compare-and-swap `sending` → `delivered`, then use
   `delivered_persisted` after exact read-back before promoting the snapshot.
 - `slack_failed`: compare-and-swap `sending` → `pending` with `last_error`,
-  then use `failure_persisted` after exact read-back and stop.
+  then use `failure_persisted` after exact read-back, stop, and release the local
+  target claim.
 - `start` with `sending`: use `manual_reconciliation`; never resend
   automatically. `start` with `delivered` can promote the snapshot.
 
+For local mode, release the target claim only after the `promote_snapshot` or
+`stop` action has completed. For Google Drive mode, keep the connector's
+per-target serialization through state comparison, Slack outcome persistence,
+and snapshot promotion, then release it at the same terminal points.
+
 The old `sending_persisted` signal is invalid. A `sending` record is the
-delivery claim, and its owner must keep the lock/serialization through the
-Slack outcome.
+delivery claim, and its owner must keep the target claim/serialization through
+the Slack outcome and snapshot promotion.
 
 ## Monitor content
 

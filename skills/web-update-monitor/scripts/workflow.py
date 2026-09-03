@@ -55,6 +55,20 @@ _LOCAL_CAS_SIGNALS = frozenset({
     "delivered_persisted",
     "failure_persisted",
 })
+_LOCAL_RELEASE_FIELDS = frozenset({
+    "protocol_version",
+    "action",
+    "target_id",
+    "event_id",
+    "expected_status",
+})
+_TARGET_CLAIM_FIELDS = frozenset({
+    "version",
+    "target_id",
+    "event_id",
+    "sha256",
+})
+_RELEASEABLE_NOTIFICATION_STATUSES = {"pending", "delivered"}
 _MAX_LOCAL_RECORD_BYTES = 1024 * 1024
 
 
@@ -79,6 +93,15 @@ class NotificationRecord(TypedDict):
     attempt: int
     last_error: str
     updated_at: str
+
+
+class TargetClaim(TypedDict):
+    """Validated durable claim for one target's notification window."""
+
+    version: int
+    target_id: str
+    event_id: str
+    sha256: str
 
 
 def _require_string(value: object, field: str, *, allow_empty: bool = False) -> str:
@@ -221,6 +244,7 @@ class LocalNotificationStore:
         self._runtime_dir = self._require_directory(Path(runtime_dir), "runtime_dir")
         self._notifications_dir = self._runtime_dir / "notifications"
         self._lock_path = self._notifications_dir / f".{target_id}.lock"
+        self._claim_path = self._notifications_dir / f".{target_id}.claim.json"
 
     def compare_and_swap(
         self,
@@ -240,8 +264,20 @@ class LocalNotificationStore:
             current = self._read_record(path)
             if current is not None:
                 self._validate_record(current, event_id)
+            target_claim = self._load_target_claim()
+            if target_claim is not None and target_claim["event_id"] != event_id:
+                return {
+                    "applied": False,
+                    "notification": current,
+                    "target_claim": target_claim,
+                }
             if current != expected_record:
                 return {"applied": False, "notification": current}
+            if replacement_record["status"] == "sending" and target_claim is None:
+                self._write_record(
+                    self._claim_path,
+                    self._new_claim(event_id, replacement_record["sha256"]),
+                )
             self._write_record(path, replacement_record)
             durable = self._read_record(path)
             if durable != replacement_record:
@@ -258,6 +294,103 @@ class LocalNotificationStore:
                 self._validate_record(record, event_id)
             return record
 
+    def _load_target_claim(self) -> TargetClaim | None:
+        target_claim_record = self._read_claim(self._claim_path)
+        target_claim = None
+        if target_claim_record is not None:
+            target_claim = self._validate_claim(target_claim_record)
+
+        sending_records = self._find_sending_records()
+        if len(sending_records) > 1:
+            raise LocalStoreError(
+                "multiple sending records require manual reconciliation"
+            )
+        if sending_records:
+            sending_record = sending_records[0]
+            if target_claim is None:
+                target_claim = self._new_claim(
+                    _require_string(sending_record["event_id"], "event_id"),
+                    sending_record["sha256"],
+                )
+                self._write_record(self._claim_path, target_claim)
+            elif target_claim["event_id"] != sending_record["event_id"]:
+                raise LocalStoreError(
+                    "multiple target claims require manual reconciliation"
+                )
+        return target_claim
+
+    def _find_sending_records(self) -> list[dict[str, object]]:
+        try:
+            candidates = self._notifications_dir.iterdir()
+        except OSError as exc:
+            raise LocalStoreError("cannot scan local notification records") from exc
+
+        sending_records: list[dict[str, object]] = []
+        for candidate in candidates:
+            if candidate in {self._claim_path, self._lock_path}:
+                continue
+            if not candidate.name.endswith(".json"):
+                continue
+            event_id = candidate.name[:-5]
+            if not _SHA256_RE.fullmatch(event_id):
+                continue
+            record = self._read_record(candidate)
+            if record is None:
+                continue
+            try:
+                record_target_id = _require_string(
+                    record.get("target_id"), "notification target_id"
+                )
+                _validate_local_record(
+                    record,
+                    target_id=record_target_id,
+                    event_id=event_id,
+                )
+            except WorkflowError as exc:
+                raise LocalStoreError("notification record schema is invalid") from exc
+            if record_target_id == self._target_id and record["status"] == "sending":
+                sending_records.append(record)
+        return sending_records
+
+    def release_target_claim(
+        self, event_id: str, expected_status: str
+    ) -> dict[str, object]:
+        """Release a target claim after its notification window is complete."""
+        if expected_status not in _RELEASEABLE_NOTIFICATION_STATUSES:
+            raise LocalStoreError("target claim release status is invalid")
+        path = self._record_path(event_id)
+        self._ensure_notifications_directory()
+        with self._locked():
+            record = self._read_record(path)
+            if record is not None:
+                self._validate_record(record, event_id)
+            target_claim = self._read_claim(self._claim_path)
+            if target_claim is None:
+                if record is None:
+                    raise LocalStoreError("target claim is missing")
+                if record["status"] == "sending":
+                    raise LocalStoreError("target claim is missing")
+                if record["status"] != expected_status:
+                    raise LocalStoreError("notification is not ready to release")
+                return {"released": False, "notification": record}
+            self._validate_claim(target_claim)
+            if target_claim["event_id"] != event_id:
+                return {
+                    "released": False,
+                    "notification": record,
+                    "target_claim": target_claim,
+                }
+            if record is None or record["status"] != expected_status:
+                raise LocalStoreError("notification is not ready to release")
+            try:
+                self._claim_path.unlink()
+            except OSError as exc:
+                raise LocalStoreError("cannot remove local target claim") from exc
+            self._fsync_directory(self._notifications_dir)
+            if self._read_claim(self._claim_path) is not None:
+                raise LocalStoreError("target claim read-back mismatch")
+            return {"released": True, "target_claim": target_claim}
+
     def _validate_record(self, record: Mapping[str, object], event_id: str) -> None:
         try:
             _validate_local_record(
@@ -267,6 +400,23 @@ class LocalNotificationStore:
             )
         except WorkflowError as exc:
             raise LocalStoreError("notification record schema is invalid") from exc
+
+    def _validate_claim(self, value: object) -> TargetClaim:
+        try:
+            claim = _validate_target_claim(value)
+        except WorkflowError as exc:
+            raise LocalStoreError("target claim schema is invalid") from exc
+        if claim["target_id"] != self._target_id:
+            raise LocalStoreError("target claim target_id does not match")
+        return claim
+
+    def _new_claim(self, event_id: str, sha256: object) -> TargetClaim:
+        return {
+            "version": 1,
+            "target_id": self._target_id,
+            "event_id": event_id,
+            "sha256": _require_string(sha256, "target claim sha256"),
+        }
 
     def _record_path(self, event_id: str) -> Path:
         if not _SHA256_RE.fullmatch(event_id):
@@ -365,6 +515,16 @@ class LocalNotificationStore:
 
     @classmethod
     def _read_record(cls, path: Path) -> dict[str, object] | None:
+        return cls._read_json_object(path, "notification record")
+
+    @classmethod
+    def _read_claim(cls, path: Path) -> dict[str, object] | None:
+        return cls._read_json_object(path, "target claim")
+
+    @classmethod
+    def _read_json_object(
+        cls, path: Path, description: str
+    ) -> dict[str, object] | None:
         try:
             file_descriptor = cls._open_regular(path, os.O_RDONLY)
         except FileNotFoundError:
@@ -372,24 +532,24 @@ class LocalNotificationStore:
         except LocalStoreError:
             raise
         except OSError as exc:
-            raise LocalStoreError(f"cannot read notification record: {exc}") from exc
+            raise LocalStoreError(f"cannot read {description}: {exc}") from exc
         try:
             with os.fdopen(file_descriptor, "rb") as record_file:
                 file_descriptor = -1
                 data = record_file.read(_MAX_LOCAL_RECORD_BYTES + 1)
         except OSError as exc:
-            raise LocalStoreError(f"cannot read notification record: {exc}") from exc
+            raise LocalStoreError(f"cannot read {description}: {exc}") from exc
         finally:
             if file_descriptor != -1:
                 os.close(file_descriptor)
         if len(data) > _MAX_LOCAL_RECORD_BYTES:
-            raise LocalStoreError("notification record is too large")
+            raise LocalStoreError(f"{description} is too large")
         try:
             value: object = json.loads(data)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise LocalStoreError("notification record is not valid JSON") from exc
+            raise LocalStoreError(f"{description} is not valid JSON") from exc
         if not isinstance(value, dict):
-            raise LocalStoreError("notification record must be an object")
+            raise LocalStoreError(f"{description} must be an object")
         return cast("dict[str, object]", value)
 
     @staticmethod
@@ -537,6 +697,28 @@ def _validate_notification(
         "attempt": attempt,
         "last_error": last_error,
         "updated_at": updated_at,
+    }
+
+
+def _validate_target_claim(value: object) -> TargetClaim:
+    """Validate the exact schema stored by the local target-claim backend."""
+    claim = _require_mapping(value, "target claim")
+    if frozenset(claim) != _TARGET_CLAIM_FIELDS:
+        raise WorkflowError("target claim fields are invalid")
+    if type(claim.get("version")) is not int or claim.get("version") != 1:
+        raise WorkflowError("target claim version is invalid")
+    target_id = _require_string(claim.get("target_id"), "target claim target_id")
+    if not _TARGET_ID_RE.fullmatch(target_id):
+        raise WorkflowError("target claim target_id is invalid")
+    event_id = _require_string(claim.get("event_id"), "target claim event_id")
+    sha256 = _require_string(claim.get("sha256"), "target claim sha256")
+    if notification_event_id(target_id, sha256) != event_id:
+        raise WorkflowError("target claim event_id does not match")
+    return {
+        "version": 1,
+        "target_id": target_id,
+        "event_id": event_id,
+        "sha256": sha256,
     }
 
 
@@ -698,6 +880,14 @@ def local_notification_cas(
         event_id, expected, replacement
     )
     if not result["applied"]:
+        target_claim = result.get("target_claim")
+        if target_claim is not None:
+            return {
+                "protocol_version": _NOTIFICATION_PROTOCOL_VERSION,
+                "action": "target_claim_conflict",
+                "target_claim": target_claim,
+                "notification": result["notification"],
+            }
         return {
             "protocol_version": _NOTIFICATION_PROTOCOL_VERSION,
             "action": "compare_and_swap_conflict",
@@ -708,6 +898,49 @@ def local_notification_cas(
         "action": "compare_and_swap_applied",
         "notification": result["notification"],
         "next_signal": next_signal,
+    }
+
+
+def local_notification_release(
+    payload: Mapping[str, object], runtime_dir: str | Path
+) -> dict[str, object]:
+    """Release a local target claim after terminal notification handling."""
+    if frozenset(payload) != _LOCAL_RELEASE_FIELDS:
+        raise WorkflowError("local claim release request fields are invalid")
+    if (
+        type(payload.get("protocol_version")) is not int
+        or payload.get("protocol_version") != _NOTIFICATION_PROTOCOL_VERSION
+    ):
+        raise WorkflowError("protocol_version must be 2")
+    if payload.get("action") != "release_target_claim":
+        raise WorkflowError("action must be release_target_claim")
+    target_id = _require_string(payload.get("target_id"), "target_id")
+    if not _TARGET_ID_RE.fullmatch(target_id):
+        raise WorkflowError("invalid_target_id")
+    event_id = _require_string(payload.get("event_id"), "event_id")
+    expected_status = _require_string(payload.get("expected_status"), "expected_status")
+    if expected_status not in _RELEASEABLE_NOTIFICATION_STATUSES:
+        raise WorkflowError("expected_status must be pending or delivered")
+
+    result = LocalNotificationStore(runtime_dir, target_id).release_target_claim(
+        event_id, expected_status
+    )
+    target_claim = result.get("target_claim")
+    if not result["released"] and target_claim is not None:
+        return {
+            "protocol_version": _NOTIFICATION_PROTOCOL_VERSION,
+            "action": "target_claim_conflict",
+            "target_claim": target_claim,
+        }
+    return {
+        "protocol_version": _NOTIFICATION_PROTOCOL_VERSION,
+        "action": (
+            "target_claim_released"
+            if result["released"]
+            else "target_claim_already_released"
+        ),
+        "target_id": target_id,
+        "event_id": event_id,
     }
 
 
@@ -826,6 +1059,7 @@ def _parser() -> argparse.ArgumentParser:
             "change-action",
             "notification-step",
             "local-notification-cas",
+            "local-notification-release",
         ),
     )
     parser.add_argument("--runtime-dir", type=Path)
@@ -849,6 +1083,10 @@ def run(
         if runtime_dir is None:
             raise WorkflowError("--runtime-dir is required for local persistence")
         return local_notification_cas(payload, runtime_dir)
+    if operation == "local-notification-release":
+        if runtime_dir is None:
+            raise WorkflowError("--runtime-dir is required for local persistence")
+        return local_notification_release(payload, runtime_dir)
     raise WorkflowError("operation is invalid")
 
 

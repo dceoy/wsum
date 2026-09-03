@@ -54,13 +54,15 @@ cat targets-request.json | \
   uv run python skills/web-update-monitor/scripts/workflow.py validate-targets
 ```
 
-The workflow helper also exposes `change-action`, `notification-step`, and
-`local-notification-cas`. These commands keep baseline promotion, local
-crash-safe persistence, and the durable `pending` → `sending` → `delivered`
-notification protocol out of model instructions. For local mode, pass each
+The workflow helper also exposes `change-action`, `notification-step`,
+`local-notification-cas`, and `local-notification-release`. These commands keep
+baseline promotion, local crash-safe persistence, target-scoped notification
+claims, and the durable `pending` → `sending` → `delivered` notification
+protocol out of model instructions. For local mode, pass each
 `compare_and_swap` response to `local-notification-cas --runtime-dir
-<runtime-dir>`; the agent reports only confirmed connector outcomes back to the
-helper.
+<runtime-dir>` and release the target claim only after the notification's
+terminal action and snapshot promotion; the agent reports only confirmed
+connector outcomes back to the helper.
 
 For browser-rendered content, use browser mode only with a tool that enforces
 public-unicast egress, bounded redirects/subresources, a total timeout, and a
