@@ -105,6 +105,18 @@ ignore = [
   "magic-value-comparison", # protocol constants such as HTTP ports are self-explanatory
   "print",    # CLI writes its JSON result to stdout/stderr
 ]
+"skills/web-update-monitor/scripts/workflow.py" = [
+  "complex-structure",  # the explicit FSM is clearer than fragmented transition helpers
+  "docstring-missing-returns",  # concise helper docstrings are sufficient here
+  "docstring-missing-exception",  # errors are represented by WorkflowError messages
+  "f-string-in-exception",  # CLI errors are intentionally direct and contextual
+  "implicit-namespace-package",  # skill scripts are executable helpers, not a Python package
+  "print",  # CLI writes its JSON result to stdout/stderr
+  "raise-vanilla-args",  # WorkflowError messages are defined at the decision site
+  "raw-string-in-exception",  # CLI errors are intentionally direct literal messages
+  "too-many-branches",  # the explicit FSM keeps transition order visible
+  "too-many-return-statements",  # each FSM transition returns one directive
+]
 "tests/**/*.py" = [
   "undocumented-public-function",    # test names describe their behavior
   "implicit-namespace-package",  # tests do not need to be a Python package
