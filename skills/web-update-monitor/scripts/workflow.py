@@ -5,12 +5,22 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
-from collections.abc import Mapping, Sequence
+import tempfile
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TypedDict, cast
 from urllib.parse import urlsplit
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - platform-specific
+    fcntl = None  # type: ignore[assignment]
 
 import monitor
 
@@ -20,10 +30,40 @@ _PERSISTENCE_MODES = {"local", "google-drive"}
 _FETCH_MODES = {"static", "browser"}
 _NOTIFICATION_STATUSES = {"pending", "sending", "delivered"}
 _NOTIFICATION_PROTOCOL_VERSION = 2
+_NOTIFICATION_FIELDS = frozenset({
+    "version",
+    "event_id",
+    "target_id",
+    "sha256",
+    "destination",
+    "message",
+    "status",
+    "attempt",
+    "last_error",
+    "updated_at",
+})
+_LOCAL_CAS_FIELDS = frozenset({
+    "protocol_version",
+    "action",
+    "expected_notification",
+    "notification",
+    "next_signal",
+})
+_LOCAL_CAS_SIGNALS = frozenset({
+    "pending_persisted",
+    "sending_claimed",
+    "delivered_persisted",
+    "failure_persisted",
+})
+_MAX_LOCAL_RECORD_BYTES = 1024 * 1024
 
 
 class WorkflowError(RuntimeError):
     """Expected workflow input or state-transition failure."""
+
+
+class LocalStoreError(WorkflowError):
+    """Expected local persistence failure."""
 
 
 class NotificationRecord(TypedDict):
@@ -170,6 +210,280 @@ def _timestamp() -> str:
     return datetime.now(UTC).isoformat()
 
 
+class LocalNotificationStore:
+    """Persist notification records with an exact, durable local CAS."""
+
+    def __init__(self, runtime_dir: str | Path, target_id: str) -> None:
+        """Initialize a store rooted at an existing runtime directory."""
+        if not _TARGET_ID_RE.fullmatch(target_id):
+            raise LocalStoreError("invalid_target_id")
+        self._target_id = target_id
+        self._runtime_dir = self._require_directory(Path(runtime_dir), "runtime_dir")
+        self._notifications_dir = self._runtime_dir / "notifications"
+        self._lock_path = self._notifications_dir / f".{target_id}.lock"
+
+    def compare_and_swap(
+        self,
+        event_id: str,
+        expected: Mapping[str, object] | None,
+        replacement: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Apply an exact replacement and return the durable read-back."""
+        path = self._record_path(event_id)
+        self._ensure_notifications_directory()
+        expected_record = None if expected is None else dict(expected)
+        replacement_record = dict(replacement)
+        if expected_record is not None:
+            self._validate_record(expected_record, event_id)
+        self._validate_record(replacement_record, event_id)
+        with self._locked():
+            current = self._read_record(path)
+            if current is not None:
+                self._validate_record(current, event_id)
+            if current != expected_record:
+                return {"applied": False, "notification": current}
+            self._write_record(path, replacement_record)
+            durable = self._read_record(path)
+            if durable != replacement_record:
+                raise LocalStoreError("notification read-back mismatch")
+            return {"applied": True, "notification": durable}
+
+    def read(self, event_id: str) -> dict[str, object] | None:
+        """Read one notification record under the per-target lock."""
+        path = self._record_path(event_id)
+        self._ensure_notifications_directory()
+        with self._locked():
+            record = self._read_record(path)
+            if record is not None:
+                self._validate_record(record, event_id)
+            return record
+
+    def _validate_record(self, record: Mapping[str, object], event_id: str) -> None:
+        try:
+            _validate_local_record(
+                record,
+                target_id=self._target_id,
+                event_id=event_id,
+            )
+        except WorkflowError as exc:
+            raise LocalStoreError("notification record schema is invalid") from exc
+
+    def _record_path(self, event_id: str) -> Path:
+        if not _SHA256_RE.fullmatch(event_id):
+            raise LocalStoreError("invalid_event_id")
+        return self._notifications_dir / f"{event_id}.json"
+
+    @staticmethod
+    def _require_directory(path: Path, field: str) -> Path:
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise LocalStoreError(f"{field} must be an existing directory") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise LocalStoreError(f"{field} must be an existing directory")
+        return path
+
+    def _ensure_notifications_directory(self) -> None:
+        created = False
+        try:
+            info = self._notifications_dir.lstat()
+        except FileNotFoundError:
+            try:
+                self._notifications_dir.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            else:
+                created = True
+            try:
+                info = self._notifications_dir.lstat()
+            except OSError as exc:
+                raise LocalStoreError(
+                    "local notifications directory is unavailable"
+                ) from exc
+        except OSError as exc:
+            raise LocalStoreError(
+                "local notifications directory is unavailable"
+            ) from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise LocalStoreError("local notifications path must be a directory")
+        if created:
+            self._fsync_directory(self._runtime_dir)
+
+    @staticmethod
+    def _open_regular(path: Path, flags: int, mode: int = 0o600) -> int:
+        safe_flags = flags
+        safe_flags |= int(getattr(os, "O_CLOEXEC", 0))
+        safe_flags |= int(getattr(os, "O_NOFOLLOW", 0))
+        safe_flags |= int(getattr(os, "O_NONBLOCK", 0))
+        file_descriptor = os.open(path, safe_flags, mode)
+        try:
+            file_mode = os.fstat(file_descriptor).st_mode
+        except OSError:
+            os.close(file_descriptor)
+            raise
+        if not stat.S_ISREG(file_mode):
+            os.close(file_descriptor)
+            raise LocalStoreError("local persistence path must be a regular file")
+        return file_descriptor
+
+    @contextmanager
+    def _locked(self) -> Generator[None, None, None]:
+        if fcntl is None:
+            raise LocalStoreError("local persistence requires POSIX advisory locks")
+
+        file_descriptor: int | None = None
+        lock_acquired = False
+        try:
+            try:
+                file_descriptor = self._open_regular(
+                    self._lock_path, os.O_RDWR | os.O_CREAT
+                )
+            except LocalStoreError:
+                raise
+            except OSError as exc:
+                raise LocalStoreError("cannot open local notification lock") from exc
+            try:
+                os.fchmod(file_descriptor, 0o600)
+            except OSError as exc:
+                raise LocalStoreError("cannot secure local notification lock") from exc
+            try:
+                fcntl.flock(file_descriptor, fcntl.LOCK_EX)
+                lock_acquired = True
+            except OSError as exc:
+                raise LocalStoreError("cannot acquire local notification lock") from exc
+            yield
+        finally:
+            if lock_acquired and file_descriptor is not None:
+                try:
+                    fcntl.flock(file_descriptor, fcntl.LOCK_UN)
+                except OSError as exc:
+                    raise LocalStoreError(
+                        "cannot release local notification lock"
+                    ) from exc
+            if file_descriptor is not None:
+                os.close(file_descriptor)
+
+    @classmethod
+    def _read_record(cls, path: Path) -> dict[str, object] | None:
+        try:
+            file_descriptor = cls._open_regular(path, os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        except LocalStoreError:
+            raise
+        except OSError as exc:
+            raise LocalStoreError(f"cannot read notification record: {exc}") from exc
+        try:
+            with os.fdopen(file_descriptor, "rb") as record_file:
+                file_descriptor = -1
+                data = record_file.read(_MAX_LOCAL_RECORD_BYTES + 1)
+        except OSError as exc:
+            raise LocalStoreError(f"cannot read notification record: {exc}") from exc
+        finally:
+            if file_descriptor != -1:
+                os.close(file_descriptor)
+        if len(data) > _MAX_LOCAL_RECORD_BYTES:
+            raise LocalStoreError("notification record is too large")
+        try:
+            value: object = json.loads(data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LocalStoreError("notification record is not valid JSON") from exc
+        if not isinstance(value, dict):
+            raise LocalStoreError("notification record must be an object")
+        return cast("dict[str, object]", value)
+
+    @staticmethod
+    def _write_record(path: Path, record: Mapping[str, object]) -> None:
+        data = LocalNotificationStore._serialize_record(record)
+        temporary_path = LocalNotificationStore._write_temporary_record(path, data)
+        try:
+            temporary_path.replace(path)
+            LocalNotificationStore._fsync_directory(path.parent)
+        except LocalStoreError:
+            raise
+        except OSError as exc:
+            raise LocalStoreError(
+                f"cannot durably write notification record: {exc}"
+            ) from exc
+        finally:
+            with suppress(OSError):
+                temporary_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _write_temporary_record(path: Path, data: bytes) -> Path:
+        try:
+            file_descriptor, temporary_name = tempfile.mkstemp(
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+            )
+        except OSError as exc:
+            raise LocalStoreError(
+                "cannot create temporary notification record"
+            ) from exc
+        temporary_path = Path(temporary_name)
+        completed = False
+        try:
+            os.fchmod(file_descriptor, 0o600)
+            LocalNotificationStore._write_and_sync(file_descriptor, data)
+            completed = True
+        except OSError as exc:
+            raise LocalStoreError(
+                f"cannot write temporary notification record: {exc}"
+            ) from exc
+        finally:
+            os.close(file_descriptor)
+            if not completed:
+                with suppress(OSError):
+                    temporary_path.unlink(missing_ok=True)
+        return temporary_path
+
+    @staticmethod
+    def _write_and_sync(file_descriptor: int, data: bytes) -> None:
+        with os.fdopen(file_descriptor, "wb", closefd=False) as temporary_file:
+            temporary_file.write(data)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+    @staticmethod
+    def _serialize_record(record: Mapping[str, object]) -> bytes:
+        try:
+            data = (
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n"
+            )
+        except (TypeError, ValueError) as exc:
+            raise LocalStoreError(
+                f"cannot serialize notification record: {exc}"
+            ) from exc
+        if len(data) > _MAX_LOCAL_RECORD_BYTES:
+            raise LocalStoreError("notification record is too large")
+        return data
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        flags = os.O_RDONLY
+        flags |= int(getattr(os, "O_CLOEXEC", 0))
+        flags |= int(getattr(os, "O_DIRECTORY", 0))
+        flags |= int(getattr(os, "O_NOFOLLOW", 0))
+        flags |= int(getattr(os, "O_NONBLOCK", 0))
+        try:
+            file_descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise LocalStoreError("cannot open local persistence directory") from exc
+        try:
+            os.fsync(file_descriptor)
+        except OSError as exc:
+            raise LocalStoreError("cannot fsync local persistence directory") from exc
+        finally:
+            os.close(file_descriptor)
+
+
 def _notification_context(
     payload: Mapping[str, object],
 ) -> tuple[str, str, str, str, str]:
@@ -190,7 +504,7 @@ def _validate_notification(
     destination: str,
 ) -> NotificationRecord:
     record = _require_mapping(value, "notification")
-    if record.get("version") != 1:
+    if type(record.get("version")) is not int or record.get("version") != 1:
         raise WorkflowError("notification version must be 1")
     expected = {
         "event_id": event_id,
@@ -224,6 +538,30 @@ def _validate_notification(
         "last_error": last_error,
         "updated_at": updated_at,
     }
+
+
+def _validate_local_record(
+    value: Mapping[str, object], *, target_id: str, event_id: str
+) -> dict[str, object]:
+    """Validate the exact schema stored by the local notification backend."""
+    if frozenset(value) != _NOTIFICATION_FIELDS:
+        raise WorkflowError("notification record fields are invalid")
+    record_target_id = _require_string(value.get("target_id"), "target_id")
+    record_sha256 = _require_string(value.get("sha256"), "sha256")
+    if record_target_id != target_id:
+        raise WorkflowError("notification target_id does not match the event")
+    if not _SHA256_RE.fullmatch(record_sha256):
+        raise WorkflowError("notification sha256 is invalid")
+    if notification_event_id(target_id, record_sha256) != event_id:
+        raise WorkflowError("notification event_id does not match the event")
+    _validate_notification(
+        value,
+        target_id=target_id,
+        sha256=record_sha256,
+        event_id=event_id,
+        destination=_require_string(value.get("destination"), "destination"),
+    )
+    return dict(value)
 
 
 def _new_notification(
@@ -282,6 +620,95 @@ def _compare_and_swap_response(
         notification=replacement,
         next_signal=next_signal,
     )
+
+
+def _strict_notification(
+    value: object,
+    *,
+    field: str,
+    target_id: str,
+    sha256: str,
+    event_id: str,
+    destination: str | None = None,
+) -> dict[str, object]:
+    record = _require_mapping(value, field)
+    if frozenset(record) != _NOTIFICATION_FIELDS:
+        raise WorkflowError(f"{field} must contain exactly the notification fields")
+    record_destination = _require_string(
+        record.get("destination"), f"{field} destination"
+    )
+    if destination is not None and record_destination != destination:
+        raise WorkflowError(f"{field} destination does not match the event")
+    _validate_notification(
+        record,
+        target_id=target_id,
+        sha256=sha256,
+        event_id=event_id,
+        destination=record_destination,
+    )
+    return dict(record)
+
+
+def local_notification_cas(
+    payload: Mapping[str, object], runtime_dir: str | Path
+) -> dict[str, object]:
+    """Apply one protocol CAS in the local durable notification store."""
+    if frozenset(payload) != _LOCAL_CAS_FIELDS:
+        raise WorkflowError("local CAS request fields are invalid")
+    if (
+        type(payload.get("protocol_version")) is not int
+        or payload.get("protocol_version") != _NOTIFICATION_PROTOCOL_VERSION
+    ):
+        raise WorkflowError("protocol_version must be 2")
+    if payload.get("action") != "compare_and_swap":
+        raise WorkflowError("action must be compare_and_swap")
+    next_signal = _require_string(payload.get("next_signal"), "next_signal")
+    if next_signal not in _LOCAL_CAS_SIGNALS:
+        raise WorkflowError("next_signal is invalid")
+
+    raw_replacement = _require_mapping(payload.get("notification"), "notification")
+    target_id = _require_string(raw_replacement.get("target_id"), "target_id")
+    sha256 = _require_string(raw_replacement.get("sha256"), "sha256")
+    event_id = notification_event_id(target_id, sha256)
+    replacement = _strict_notification(
+        raw_replacement,
+        field="notification",
+        target_id=target_id,
+        sha256=sha256,
+        event_id=event_id,
+    )
+    replacement_destination = _require_string(
+        replacement.get("destination"), "notification destination"
+    )
+
+    raw_expected = payload.get("expected_notification")
+    if raw_expected is None:
+        expected = None
+    else:
+        expected = _strict_notification(
+            raw_expected,
+            field="expected_notification",
+            target_id=target_id,
+            sha256=sha256,
+            event_id=event_id,
+            destination=replacement_destination,
+        )
+
+    result = LocalNotificationStore(runtime_dir, target_id).compare_and_swap(
+        event_id, expected, replacement
+    )
+    if not result["applied"]:
+        return {
+            "protocol_version": _NOTIFICATION_PROTOCOL_VERSION,
+            "action": "compare_and_swap_conflict",
+            "notification": result["notification"],
+        }
+    return {
+        "protocol_version": _NOTIFICATION_PROTOCOL_VERSION,
+        "action": "compare_and_swap_applied",
+        "notification": result["notification"],
+        "next_signal": next_signal,
+    }
 
 
 def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
@@ -394,12 +821,23 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "operation",
-        choices=("validate-targets", "change-action", "notification-step"),
+        choices=(
+            "validate-targets",
+            "change-action",
+            "notification-step",
+            "local-notification-cas",
+        ),
     )
+    parser.add_argument("--runtime-dir", type=Path)
     return parser
 
 
-def run(operation: str, payload: Mapping[str, object]) -> dict[str, object]:
+def run(
+    operation: str,
+    payload: Mapping[str, object],
+    *,
+    runtime_dir: str | Path | None = None,
+) -> dict[str, object]:
     """Execute one workflow operation."""
     if operation == "validate-targets":
         return validate_targets(payload)
@@ -407,6 +845,10 @@ def run(operation: str, payload: Mapping[str, object]) -> dict[str, object]:
         return change_action(payload)
     if operation == "notification-step":
         return notification_step(payload)
+    if operation == "local-notification-cas":
+        if runtime_dir is None:
+            raise WorkflowError("--runtime-dir is required for local persistence")
+        return local_notification_cas(payload, runtime_dir)
     raise WorkflowError("operation is invalid")
 
 
@@ -414,8 +856,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point."""
     try:
         args = _parser().parse_args(argv)
-        result = run(args.operation, _read_payload())
-    except (WorkflowError, OSError) as exc:
+        result = run(args.operation, _read_payload(), runtime_dir=args.runtime_dir)
+    except (LocalStoreError, WorkflowError, OSError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 1
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))

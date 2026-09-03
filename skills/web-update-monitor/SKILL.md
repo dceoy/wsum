@@ -43,20 +43,33 @@ exactly as returned by `workflow.py` and read them back before continuing a
 protocol transition. Every state-changing response has
 `action: "compare_and_swap"`, an `expected_notification` record (or `null` for
 create-if-absent), the exact replacement `notification`, and a `next_signal`.
-The connector must atomically apply the replacement only when the stored record
-exactly matches the expected record, then read back the exact replacement. On a
-compare-and-swap conflict, re-read the durable record and restart the protocol;
-never submit the stale `next_signal` or call Slack.
 
-For local mode, store the ledger at `notifications/<event_id>.json`. Perform
-each compare-and-swap and read under a process-shared per-target lock. Write
-every replacement through a temporary file in the same directory, flush and
-`fsync` the file, atomically replace the ledger entry, and `fsync` the parent
-directory before reading it back. Hold the lock from a successful
-`pending`-to-`sending` claim through the Slack call and the confirmed outcome
-write/read-back; a plain overwrite is not a claim. If a process crashes after
-Slack may have accepted a message, leave the durable record as `sending` for
-manual reconciliation.
+For local mode, pass that complete response to the deterministic local backend:
+
+```bash
+uv run python skills/web-update-monitor/scripts/workflow.py \
+  local-notification-cas --runtime-dir "$RUNTIME_DIR" < request.json
+```
+
+The backend derives `notifications/<event_id>.json` and the per-target lock
+`notifications/.<target_id>.lock` from validated record fields. Under that
+process-shared lock it compares the stored JSON object exactly, writes the
+replacement through a same-directory temporary file, flushes and `fsync`s the
+file, atomically replaces the ledger entry, `fsync`s the directory, and reads
+back the durable replacement before returning. The runtime directory must be an
+existing caller-controlled directory; do not pass a ledger or lock path in the
+request. Invalid, malformed, oversized, non-regular, or symlinked local state is
+an error, not an absent record.
+
+An applied response includes the durable notification and the unchanged
+`next_signal`; only then continue the protocol. A conflict response includes the
+current durable record and omits the stale signal. Restart `notification-step`
+with `signal: "start"` and that record; never submit the stale signal or call
+Slack. The lock protects each complete local persistence operation. A durable
+`sending` record is the non-expiring delivery claim across the external Slack
+call, so recovery must use `manual_reconciliation` and never take over or resend
+it automatically. If a process crashes after Slack may have accepted a message,
+leave the durable record as `sending`.
 
 For Google Drive mode, serialize each target from the state comparison through
 Slack outcome persistence/read-back, or use an equivalent atomic compare-and-swap
@@ -129,11 +142,13 @@ uv run python skills/web-update-monitor/scripts/workflow.py notification-step < 
 ```
 
 Start every new run or recovery with `signal: "start"`. Execute only the returned
-action. For `compare_and_swap`, apply the exact conditional replacement under the
-connector's required lock/serialization, read it back, and invoke the helper with
-the returned `next_signal` only after the replacement is confirmed. For
-`send_slack`, call Slack once and report only a confirmed `slack_delivered` or
-`slack_failed` outcome.
+action. For local `compare_and_swap`, pass the complete response to
+`local-notification-cas` and use its durable read-back; for Google Drive, apply
+the exact conditional replacement under the connector's required
+lock/serialization and read it back. Invoke the helper with the returned
+`next_signal` only after the replacement is confirmed. For `send_slack`, call
+Slack once and report only a confirmed `slack_delivered` or `slack_failed`
+outcome.
 
 `stop`, `manual_reconciliation`, and `promote_snapshot` are terminal instructions
 for that run. Never invent or skip a notification transition.

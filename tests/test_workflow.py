@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import stat
+import subprocess  # ruff: ignore[suspicious-subprocess-import] - trusted CLI
+import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
 import workflow
-from workflow import WorkflowError, change_action, notification_step, validate_targets
+from workflow import (
+    LocalNotificationStore,
+    LocalStoreError,
+    WorkflowError,
+    change_action,
+    notification_step,
+    validate_targets,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -47,21 +60,24 @@ def _record(result: Mapping[str, object]) -> dict[str, object]:
     return _dict_field(result, "notification")
 
 
-class _AtomicNotificationStore:
-    """Minimal exact compare-and-swap store for protocol tests."""
+def _local_cas_payload(result: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "protocol_version": result["protocol_version"],
+        "action": result["action"],
+        "expected_notification": result["expected_notification"],
+        "notification": result["notification"],
+        "next_signal": result["next_signal"],
+    }
 
-    def __init__(self, record: dict[str, object]) -> None:
-        self.record = record
 
-    def compare_and_swap(
-        self,
-        expected: Mapping[str, object],
-        replacement: Mapping[str, object],
-    ) -> bool:
-        if self.record != dict(expected):
-            return False
-        self.record = dict(replacement)
-        return True
+def _run_local_cas(
+    directive: Mapping[str, object], runtime_dir: Path
+) -> dict[str, object]:
+    return workflow.run(
+        "local-notification-cas",
+        _local_cas_payload(directive),
+        runtime_dir=runtime_dir,
+    )
 
 
 def test_validate_targets_normalizes_defaults() -> None:
@@ -276,27 +292,321 @@ def test_notification_protocol_restart_and_failure_paths() -> None:
     }
 
 
-def test_notification_claims_are_exact_compare_and_swap() -> None:
-    pending = _record(notification_step(_event_payload()))
+def test_local_notification_cas_persists_and_reads_back(tmp_path: Path) -> None:
+    first = notification_step(_event_payload())
+    applied = _run_local_cas(first, tmp_path)
+
+    assert applied["protocol_version"] == 2
+    assert applied["action"] == "compare_and_swap_applied"
+    assert applied["next_signal"] == first["next_signal"]
+    pending = _record(applied)
+    event_id = str(pending["event_id"])
+    notifications_dir = tmp_path / "notifications"
+    record_path = notifications_dir / f"{event_id}.json"
+
+    assert json.loads(record_path.read_text()) == pending
+    assert stat.S_IMODE(record_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(notifications_dir.stat().st_mode) & 0o077 == 0
+    assert LocalNotificationStore(tmp_path, "example").read(event_id) == pending
+
+    claim = notification_step(
+        _event_payload(notification=pending, signal="pending_persisted")
+    )
+    claimed = _run_local_cas(claim, tmp_path)
+    assert claimed["action"] == "compare_and_swap_applied"
+    assert _record(claimed)["status"] == "sending"
+    assert json.loads(record_path.read_text()) == _record(claimed)
+
+
+def test_local_notification_cas_conflict_returns_current_record(
+    tmp_path: Path,
+) -> None:
+    first = notification_step(_event_payload())
+    _run_local_cas(first, tmp_path)
+    pending = _record(first)
     first_claim = notification_step(
         _event_payload(notification=pending, signal="pending_persisted")
     )
     second_claim = notification_step(
         _event_payload(notification=pending, signal="pending_persisted")
     )
-    store = _AtomicNotificationStore(pending)
-
-    first_expected = _dict_field(first_claim, "expected_notification")
-    first_replacement = _record(first_claim)
-    second_expected = _dict_field(second_claim, "expected_notification")
     second_replacement = _record(second_claim)
-    assert store.compare_and_swap(first_expected, first_replacement)
-    assert not store.compare_and_swap(second_expected, second_replacement)
+    second_replacement["updated_at"] = "2000-01-01T00:00:00+00:00"
+    second_claim["notification"] = second_replacement
 
-    winner = notification_step(
-        _event_payload(notification=store.record, signal="sending_claimed")
+    first_result = _run_local_cas(first_claim, tmp_path)
+    assert first_result["action"] == "compare_and_swap_applied"
+    winner = _record(first_result)
+
+    conflict = _run_local_cas(second_claim, tmp_path)
+    assert conflict == {
+        "protocol_version": 2,
+        "action": "compare_and_swap_conflict",
+        "notification": winner,
+    }
+    event_id = str(winner["event_id"])
+    assert (
+        json.loads((tmp_path / "notifications" / f"{event_id}.json").read_text())
+        == winner
     )
-    assert winner["action"] == "send_slack"
+
+
+def test_local_notification_cas_rejects_present_record_for_absent_expected(
+    tmp_path: Path,
+) -> None:
+    first = notification_step(_event_payload())
+    _run_local_cas(first, tmp_path)
+    pending = _record(first)
+    claim = notification_step(
+        _event_payload(notification=pending, signal="pending_persisted")
+    )
+    claim["expected_notification"] = None
+
+    assert _run_local_cas(claim, tmp_path) == {
+        "protocol_version": 2,
+        "action": "compare_and_swap_conflict",
+        "notification": pending,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("protocol_version", 1, "protocol_version"),
+        ("action", "overwrite", "action"),
+        ("next_signal", "sending_persisted", "next_signal"),
+    ],
+    ids=["wrong-version", "wrong-action", "wrong-signal"],
+)
+def test_local_notification_cas_rejects_invalid_directive(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    directive = notification_step(_event_payload())
+    directive[field] = value
+
+    with pytest.raises(WorkflowError, match=message):
+        _run_local_cas(directive, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("version", True, "version"),
+        ("attempt", False, "attempt"),
+        ("extra", "value", "exactly"),
+    ],
+    ids=["boolean-version", "boolean-attempt", "extra-field"],
+)
+def test_local_notification_cas_rejects_invalid_record(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    directive = notification_step(_event_payload())
+    replacement = _record(directive)
+    replacement[field] = value
+    directive["notification"] = replacement
+
+    with pytest.raises(WorkflowError, match=message):
+        _run_local_cas(directive, tmp_path)
+
+
+def test_local_notification_cas_rejects_unsafe_local_state(tmp_path: Path) -> None:
+    directive = notification_step(_event_payload())
+    notifications_dir = tmp_path / "notifications"
+    notifications_dir.mkdir()
+    event_id = str(_record(directive)["event_id"])
+    (notifications_dir / f"{event_id}.json").symlink_to(tmp_path / "outside.json")
+
+    with pytest.raises(LocalStoreError):
+        _run_local_cas(directive, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        (b"{", "valid JSON"),
+        (b"x" * (1024 * 1024 + 1), "too large"),
+    ],
+    ids=["malformed-json", "oversized-record"],
+)
+def test_local_notification_cas_rejects_malformed_or_oversized_state(
+    tmp_path: Path, content: bytes, message: str
+) -> None:
+    directive = notification_step(_event_payload())
+    notifications_dir = tmp_path / "notifications"
+    notifications_dir.mkdir()
+    event_id = str(_record(directive)["event_id"])
+    (notifications_dir / f"{event_id}.json").write_bytes(content)
+
+    with pytest.raises(LocalStoreError, match=message):
+        _run_local_cas(directive, tmp_path)
+
+
+def test_local_notification_cas_rejects_invalid_existing_schema(
+    tmp_path: Path,
+) -> None:
+    directive = notification_step(_event_payload())
+    record = dict(_record(directive))
+    record["target_id"] = "different-target"
+    notifications_dir = tmp_path / "notifications"
+    notifications_dir.mkdir()
+    event_id = str(_record(directive)["event_id"])
+    (notifications_dir / f"{event_id}.json").write_text(json.dumps(record))
+
+    with pytest.raises(LocalStoreError, match="schema"):
+        _run_local_cas(directive, tmp_path)
+
+
+def test_local_notification_cas_rejects_lock_symlink(tmp_path: Path) -> None:
+    directive = notification_step(_event_payload())
+    notifications_dir = tmp_path / "notifications"
+    notifications_dir.mkdir()
+    lock_target = tmp_path / "lock-target"
+    lock_target.write_text("not a lock")
+    (notifications_dir / ".example.lock").symlink_to(lock_target)
+
+    with pytest.raises(LocalStoreError):
+        _run_local_cas(directive, tmp_path)
+
+
+def test_local_notification_cas_rejects_nonregular_record(tmp_path: Path) -> None:
+    directive = notification_step(_event_payload())
+    notifications_dir = tmp_path / "notifications"
+    notifications_dir.mkdir()
+    event_id = str(_record(directive)["event_id"])
+    (notifications_dir / f"{event_id}.json").mkdir()
+
+    with pytest.raises(LocalStoreError):
+        _run_local_cas(directive, tmp_path)
+
+
+def test_local_notification_cas_fsyncs_file_and_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = notification_step(_event_payload())
+    _run_local_cas(first, tmp_path)
+    pending = _record(first)
+    claim = notification_step(
+        _event_payload(notification=pending, signal="pending_persisted")
+    )
+    original_fsync = os.fsync
+    synced: list[int] = []
+
+    def tracking_fsync(file_descriptor: int) -> None:
+        synced.append(file_descriptor)
+        original_fsync(file_descriptor)
+
+    monkeypatch.setattr(workflow.os, "fsync", tracking_fsync)
+    assert _run_local_cas(claim, tmp_path)["action"] == "compare_and_swap_applied"
+    assert len(synced) == 2
+
+
+def test_local_notification_cas_preserves_old_record_on_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = notification_step(_event_payload())
+    _run_local_cas(first, tmp_path)
+    pending = _record(first)
+    claim = notification_step(
+        _event_payload(notification=pending, signal="pending_persisted")
+    )
+
+    def fail_fsync(_: int) -> None:
+        raise OSError
+
+    monkeypatch.setattr(workflow.os, "fsync", fail_fsync)
+    with pytest.raises(LocalStoreError, match="temporary notification"):
+        _run_local_cas(claim, tmp_path)
+
+    event_id = str(pending["event_id"])
+    record_path = tmp_path / "notifications" / f"{event_id}.json"
+    assert json.loads(record_path.read_text()) == pending
+    assert list(record_path.parent.glob(".*.tmp")) == []
+
+
+def test_local_notification_cas_reports_directory_fsync_failure_after_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = notification_step(_event_payload())
+    _run_local_cas(first, tmp_path)
+    pending = _record(first)
+    claim = notification_step(
+        _event_payload(notification=pending, signal="pending_persisted")
+    )
+
+    def fail_directory_fsync(_: Path) -> None:
+        raise OSError
+
+    monkeypatch.setattr(
+        LocalNotificationStore,
+        "_fsync_directory",
+        staticmethod(fail_directory_fsync),
+    )
+    with pytest.raises(LocalStoreError, match="durably write"):
+        _run_local_cas(claim, tmp_path)
+
+    sending = _record(claim)
+    event_id = str(pending["event_id"])
+    record_path = tmp_path / "notifications" / f"{event_id}.json"
+    assert json.loads(record_path.read_text()) == sending
+    assert list(record_path.parent.glob(".*.tmp")) == []
+    assert notification_step(_event_payload(notification=sending)) == {
+        "protocol_version": 2,
+        "action": "manual_reconciliation",
+    }
+
+
+def test_local_notification_cas_serializes_separate_processes(tmp_path: Path) -> None:
+    first = notification_step(_event_payload())
+    _run_local_cas(first, tmp_path)
+    pending = _record(first)
+    first_claim = notification_step(
+        _event_payload(notification=pending, signal="pending_persisted")
+    )
+    second_claim = notification_step(
+        _event_payload(notification=pending, signal="pending_persisted")
+    )
+    second_replacement = _record(second_claim)
+    second_replacement["updated_at"] = "2000-01-01T00:00:00+00:00"
+    second_claim["notification"] = second_replacement
+
+    command = [
+        sys.executable,
+        str(Path(workflow.__file__).resolve()),
+        "local-notification-cas",
+        "--runtime-dir",
+        str(tmp_path),
+    ]
+    processes = [
+        subprocess.Popen(  # ruff: ignore[subprocess-without-shell-equals-true]
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    outputs = [
+        process.communicate(json.dumps(_local_cas_payload(directive)), timeout=10)
+        for process, directive in zip(
+            processes, (first_claim, second_claim), strict=True
+        )
+    ]
+    assert [process.returncode for process in processes] == [0, 0]
+    results = [json.loads(stdout) for stdout, _ in outputs]
+    assert {result["action"] for result in results} == {
+        "compare_and_swap_applied",
+        "compare_and_swap_conflict",
+    }
+    winner = next(
+        result for result in results if result["action"] == "compare_and_swap_applied"
+    )
+    event_id = str(pending["event_id"])
+    assert (
+        json.loads((tmp_path / "notifications" / f"{event_id}.json").read_text())
+        == winner["notification"]
+    )
 
 
 def test_notification_protocol_rejects_wrong_state_or_event() -> None:

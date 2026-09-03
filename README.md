@@ -7,7 +7,8 @@ The implementation separates deterministic mechanics from model judgment:
 - `monitor.py` performs bounded fetch/read, normalization, hashing, diff generation,
   and atomic candidate-snapshot writes.
 - `workflow.py` validates targets and owns deterministic workflow decisions,
-  notification state transitions, idempotency keys, and snapshot-promotion rules.
+  notification state transitions, idempotency keys, snapshot-promotion rules,
+  and crash-safe local notification CAS operations.
 - the agent performs connector/browser I/O, judges whether a bounded diff is
   material to `watch_focus`, writes the summary, and sends Slack notifications only
   when directed by the workflow helper.
@@ -53,11 +54,13 @@ cat targets-request.json | \
   uv run python skills/web-update-monitor/scripts/workflow.py validate-targets
 ```
 
-The workflow helper also exposes `change-action` and `notification-step`. These
-commands keep baseline promotion and the durable `pending` → `sending` →
-`delivered` notification protocol out of model instructions. The agent persists
-records returned by the helper and reports only confirmed connector outcomes back
-to it.
+The workflow helper also exposes `change-action`, `notification-step`, and
+`local-notification-cas`. These commands keep baseline promotion, local
+crash-safe persistence, and the durable `pending` → `sending` → `delivered`
+notification protocol out of model instructions. For local mode, pass each
+`compare_and_swap` response to `local-notification-cas --runtime-dir
+<runtime-dir>`; the agent reports only confirmed connector outcomes back to the
+helper.
 
 For browser-rendered content, use browser mode only with a tool that enforces
 public-unicast egress, bounded redirects/subresources, a total timeout, and a
