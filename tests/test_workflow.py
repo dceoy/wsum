@@ -122,10 +122,6 @@ def _remove_recovery_candidate(candidate: Path) -> None:
     candidate.unlink()
 
 
-def _duplicate_recovery_candidate(candidate: Path) -> None:
-    candidate.with_name("duplicate.txt").write_bytes(candidate.read_bytes())
-
-
 def _symlink_recovery_candidate(candidate: Path) -> None:
     candidate.with_name("link.txt").symlink_to(candidate.name)
 
@@ -1245,6 +1241,44 @@ def test_local_notification_state_requests_unpromoted_delivery(
     assert _run_local_state(tmp_path)["recovery_action"] == ("release_target_claim")
 
 
+def test_local_notification_state_recovers_with_duplicate_candidates(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "before\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    delivered, candidate, expected_sha256, candidate_sha256 = (
+        _deliver_local_notification(tmp_path, baseline, "after\n", "after.txt")
+    )
+    duplicate = candidate.with_name("aaa-duplicate.txt")
+    duplicate.write_bytes(candidate.read_bytes())
+
+    state = _run_local_state(tmp_path)
+    assert state["recovery_action"] == "promote_snapshot"
+    candidate_path = state["candidate_path"]
+    assert candidate_path == "candidates/aaa-duplicate.txt"
+    assert isinstance(candidate_path, str)
+
+    event_id = str(delivered["event_id"])
+    promotion = _run_local_snapshot_promote(
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=expected_sha256,
+            candidate_sha256=candidate_sha256,
+            claim_event_id=event_id,
+        ),
+        tmp_path / candidate_path,
+        tmp_path,
+    )
+    assert promotion["action"] == "snapshot_promoted"
+    assert (snapshots_dir / "example.txt").read_text() == "after\n"
+    assert _run_local_release(delivered, "delivered", tmp_path)["action"] == (
+        "target_claim_released"
+    )
+    assert _run_local_state(tmp_path)["action"] == "notification_state_read"
+
+
 @pytest.mark.parametrize(
     ("mutate_candidate", "message"),
     [
@@ -1254,18 +1288,13 @@ def test_local_notification_state_requests_unpromoted_delivery(
             id="missing",
         ),
         pytest.param(
-            _duplicate_recovery_candidate,
-            "multiple candidates match delivered hash",
-            id="multiple",
-        ),
-        pytest.param(
             _symlink_recovery_candidate,
             "candidates must not contain symlinks",
             id="symlink",
         ),
     ],
 )
-def test_local_notification_state_fails_closed_without_unique_recovery_candidate(
+def test_local_notification_state_fails_closed_without_recoverable_candidate(
     tmp_path: Path,
     mutate_candidate: Callable[[Path], None],
     message: str,

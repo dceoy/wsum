@@ -605,7 +605,7 @@ class LocalNotificationStore:
         return current
 
     def _find_candidate_by_sha256(self, candidate_sha256: str) -> str:
-        """Find the unique safe runtime-relative candidate for recovery."""
+        """Find a deterministic safe runtime-relative candidate for recovery."""
         if not _SHA256_RE.fullmatch(candidate_sha256):
             raise LocalStoreError("candidate snapshot hash is invalid")
 
@@ -671,13 +671,14 @@ class LocalNotificationStore:
             raise LocalStoreError(
                 "cannot recover candidate snapshot: no candidate matches delivered hash"
             )
-        if len(matches) > 1:
-            raise LocalStoreError(
-                "cannot recover candidate snapshot: multiple candidates match "
-                "delivered hash"
-            )
         try:
-            relative = matches[0].relative_to(self._runtime_dir)
+            selected = min(
+                matches,
+                key=lambda candidate: candidate.relative_to(
+                    self._runtime_dir
+                ).as_posix(),
+            )
+            relative = selected.relative_to(self._runtime_dir)
         except ValueError as exc:
             raise LocalStoreError(
                 "cannot recover candidate snapshot: candidate is outside runtime_dir"

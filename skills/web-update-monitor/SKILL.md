@@ -82,11 +82,13 @@ runtime-relative `candidate_path` and then release; and
 new event while the target claim exists.
 
 For an unpromoted delivered claim, `candidate_path` is discovered by matching
-the claim's candidate hash against exactly one regular, non-symlinked file under
-`$RUNTIME_DIR/candidates/`. Invoke `local-snapshot-promote` with
-`--candidate "$RUNTIME_DIR/$candidate_path"` (or an equivalent absolute path),
-not a path retained by an earlier process. Missing, duplicate, or symlinked
-matches are errors; leave the claim in place and fail closed.
+the claim's candidate hash against regular, non-symlinked files under
+`$RUNTIME_DIR/candidates/`. If multiple files contain the same matching bytes,
+select the lexicographically first runtime-relative path. Invoke
+`local-snapshot-promote` with `--candidate "$RUNTIME_DIR/$candidate_path"` (or
+an equivalent absolute path), not a path retained by an earlier process.
+Missing or symlinked matches are errors; leave the claim in place and fail
+closed.
 
 For local mode, pass that complete response to the deterministic local backend:
 
