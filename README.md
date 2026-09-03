@@ -7,8 +7,9 @@ The implementation separates deterministic mechanics from model judgment:
 - `monitor.py` performs bounded fetch/read, normalization, hashing, diff generation,
   and atomic candidate-snapshot writes.
 - `workflow.py` validates targets and owns deterministic workflow decisions,
-  notification state transitions, idempotency keys, expected-baseline snapshot
-  promotion, and crash-safe local persistence operations.
+  notification state transitions, occurrence-scoped idempotency keys,
+  expected-baseline snapshot promotion, and crash-safe local persistence
+  operations.
 - the agent performs connector/browser I/O, judges whether a bounded diff is
   material to `watch_focus`, writes the summary, and sends Slack notifications only
   when directed by the workflow helper.
@@ -47,6 +48,15 @@ uv run python skills/web-update-monitor/scripts/workflow.py \
   --candidate .runtime/candidates/example-baseline.txt < promotion-request.json
 ```
 
+Notification event IDs scope a notification to one occurrence of a baseline
+transition. The helper hashes `target_id`, the previous event ID (or an empty
+segment), the nullable `expected_snapshot_sha256`, and the candidate `sha256`
+with NUL separators. The per-target cursor advances only after delivery and
+snapshot promotion, so retries reuse an unfinished event while a later
+recurrence receives a new event ID. A delivered record remains the active
+outbox until its candidate snapshot is durably promoted; it is then retired
+before the cursor and target claim are finalized.
+
 The request uses `expected_sha256: null` and `claim_event_id: null` for this
 initial baseline. Compare a later fetch with the canonical baseline:
 
@@ -71,20 +81,33 @@ cat targets-request.json | \
 ```
 
 The workflow helper also exposes `change-action`, `notification-step`,
-`local-notification-cas`, `local-notification-release`, and
+`local-notification-state`, `local-notification-cas`, `local-notification-release`, and
 `local-snapshot-promote`. These commands keep baseline promotion, local
 crash-safe persistence, target-scoped notification claims, and the durable
-`pending` → `sending` → `delivered` notification protocol out of model
-instructions. For local mode, pass each `compare_and_swap` response to
+`pending` → `sending` → `delivered` notification protocol (version 3) out of
+model instructions. Notification records use schema version 2 and include the
+expected baseline hash and previous event ID; target claims use the same
+occurrence identity. For local mode, read the cursor with
+`local-notification-state --runtime-dir <runtime-dir>`, pass each
+`compare_and_swap` response to
 `local-notification-cas --runtime-dir <runtime-dir>`, route every
 `promote_snapshot` result through `local-snapshot-promote --runtime-dir
 <runtime-dir> --candidate <candidate>`, and release the target claim only after
-the notification's terminal action and snapshot promotion; the agent reports
-only confirmed connector outcomes back to the helper.
+the notification's terminal action and snapshot promotion. Delivered records
+are removed durably during the delivered release after the cursor CAS and before
+the claim is removed; the agent reports only confirmed connector outcomes back
+to the helper.
 
 Carry the monitor result's `previous_sha256` (using `null` when it is empty) as
-`expected_snapshot_sha256` through the local notification request so a stale
-comparison cannot create a `sending` claim.
+`expected_snapshot_sha256` through the local notification request. Also carry
+the `previous_event_id` returned by `local-notification-state` (using `null` for
+the first occurrence) so a stale cursor cannot create a new `sending` claim.
+
+Existing notification records or target claims from protocol 2, and protocol-3
+records created before occurrence cursors, lack the required lineage and cannot
+be migrated safely. Stop the runners, reconcile or archive that notification
+state, and start the current protocol with the canonical snapshots unchanged;
+the helper rejects legacy state before Slack or snapshot promotion.
 
 For browser-rendered content, use browser mode only with a tool that enforces
 public-unicast egress, bounded redirects/subresources, a total timeout, and a

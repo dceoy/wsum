@@ -47,6 +47,7 @@ def _event_payload(**overrides: object) -> dict[str, object]:
         "signal": "start",
         "notification": None,
         "expected_snapshot_sha256": None,
+        "previous_event_id": None,
     }
     payload.update(overrides)
     return payload
@@ -83,11 +84,23 @@ def _run_local_cas(
     )
 
 
+def _run_local_state(runtime_dir: Path) -> dict[str, object]:
+    return workflow.run(
+        "local-notification-state",
+        {
+            "protocol_version": 3,
+            "action": "read_notification_state",
+            "target_id": "example",
+        },
+        runtime_dir=runtime_dir,
+    )
+
+
 def _run_local_release(
     record: Mapping[str, object], expected_status: str, runtime_dir: Path
 ) -> dict[str, object]:
     payload = {
-        "protocol_version": 2,
+        "protocol_version": 3,
         "action": "release_target_claim",
         "target_id": record["target_id"],
         "event_id": record["event_id"],
@@ -112,7 +125,7 @@ def _local_snapshot_payload(
     claim_event_id: str | None = None,
 ) -> dict[str, object]:
     return {
-        "version": 1,
+        "version": 2,
         "action": "promote_snapshot",
         "target_id": target_id,
         "expected_sha256": expected_sha256,
@@ -136,11 +149,13 @@ def _create_sending_claim(
     runtime_dir: Path,
     sha256: str,
     expected_snapshot_sha256: str | None = None,
+    previous_event_id: str | None = None,
 ) -> dict[str, object]:
     first = notification_step(
         _event_payload(
             sha256=sha256,
             expected_snapshot_sha256=expected_snapshot_sha256,
+            previous_event_id=previous_event_id,
         )
     )
     _run_local_cas(first, runtime_dir)
@@ -151,9 +166,67 @@ def _create_sending_claim(
             sha256=sha256,
             signal="pending_persisted",
             expected_snapshot_sha256=expected_snapshot_sha256,
+            previous_event_id=previous_event_id,
         )
     )
     return _record(_run_local_cas(claim, runtime_dir))
+
+
+def _deliver_local_notification(
+    runtime_dir: Path,
+    previous_content: str,
+    current_content: str,
+    candidate_name: str,
+) -> tuple[dict[str, object], Path, str, str]:
+    previous_sha256 = hashlib.sha256(previous_content.encode()).hexdigest()
+    state = _run_local_state(runtime_dir)
+    previous_event_id = state["previous_event_id"]
+    candidate, current_sha256 = _write_candidate(
+        runtime_dir, candidate_name, current_content
+    )
+    start = notification_step(
+        _event_payload(
+            sha256=current_sha256,
+            expected_snapshot_sha256=previous_sha256,
+            previous_event_id=previous_event_id,
+        )
+    )
+    pending = _record(_run_local_cas(start, runtime_dir))
+    sending_step = notification_step(
+        _event_payload(
+            notification=pending,
+            sha256=current_sha256,
+            expected_snapshot_sha256=previous_sha256,
+            previous_event_id=previous_event_id,
+            signal="pending_persisted",
+        )
+    )
+    sending = _record(_run_local_cas(sending_step, runtime_dir))
+    assert (
+        notification_step(
+            _event_payload(
+                notification=sending,
+                sha256=current_sha256,
+                expected_snapshot_sha256=previous_sha256,
+                previous_event_id=previous_event_id,
+                signal="sending_claimed",
+            )
+        )["action"]
+        == "send_slack"
+    )
+    delivered_step = notification_step(
+        _event_payload(
+            notification=sending,
+            sha256=current_sha256,
+            expected_snapshot_sha256=previous_sha256,
+            previous_event_id=previous_event_id,
+            signal="slack_delivered",
+        )
+    )
+    delivered = _record(_run_local_cas(delivered_step, runtime_dir))
+    record_path = runtime_dir / "notifications" / f"{delivered['event_id']}.json"
+    assert record_path.exists()
+    return delivered, candidate, previous_sha256, current_sha256
 
 
 def test_validate_targets_normalizes_defaults() -> None:
@@ -283,21 +356,130 @@ def test_change_action(payload: dict[str, object], action: str) -> None:
     assert change_action(payload) == {"action": action}
 
 
+@pytest.mark.parametrize(
+    (
+        "sha256",
+        "expected_snapshot_sha256",
+        "previous_event_id",
+        "expected_event_id",
+    ),
+    [
+        (
+            "b" * 64,
+            "a" * 64,
+            None,
+            "578795babbda5177e677fbdf039233d4baf2f7b5f6da1ab7a40a3256b2b224af",
+        ),
+        (
+            "b" * 64,
+            "a" * 64,
+            "c" * 64,
+            "a2720743d8ac5321ec8fda688e2147f2ee4612f53d2996acc6403032b1f6f080",
+        ),
+        (
+            "b" * 64,
+            None,
+            None,
+            "ba0b4e936c6896608e2e80d7aaaf185281ec94dbae7530cd88030c84a9c0615d",
+        ),
+    ],
+    ids=[
+        "first-baseline-transition",
+        "recurring-baseline-transition",
+        "initial-baseline",
+    ],
+)
+def test_notification_event_id_scopes_the_baseline_transition(
+    sha256: str,
+    expected_snapshot_sha256: str | None,
+    previous_event_id: str | None,
+    expected_event_id: str,
+) -> None:
+    assert (
+        workflow.notification_event_id(
+            "example", sha256, expected_snapshot_sha256, previous_event_id
+        )
+        == expected_event_id
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["expected_snapshot_sha256", "previous_event_id"],
+    ids=["expected-snapshot", "previous-event"],
+)
+def test_notification_step_requires_explicit_transition_state(field: str) -> None:
+    payload = _event_payload()
+    payload.pop(field)
+
+    with pytest.raises(WorkflowError, match=field):
+        notification_step(payload)
+
+
+def test_local_notification_state_starts_without_a_cursor(tmp_path: Path) -> None:
+    assert _run_local_state(tmp_path) == {
+        "protocol_version": 3,
+        "action": "notification_state_read",
+        "target_id": "example",
+        "previous_event_id": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("cursor", "message"),
+    [
+        (
+            {"version": 2, "target_id": "example", "last_event_id": None},
+            "version",
+        ),
+        (
+            {"version": 1, "target_id": "other", "last_event_id": None},
+            "target_id",
+        ),
+        (
+            {"version": 1, "target_id": "example", "last_event_id": "invalid"},
+            "schema",
+        ),
+        (
+            {
+                "version": 1,
+                "target_id": "example",
+                "last_event_id": None,
+                "extra": True,
+            },
+            "schema",
+        ),
+    ],
+    ids=["wrong-version", "wrong-target", "bad-event", "extra-field"],
+)
+def test_local_notification_state_rejects_invalid_cursor(
+    tmp_path: Path, cursor: dict[str, object], message: str
+) -> None:
+    notifications_dir = tmp_path / "notifications"
+    notifications_dir.mkdir()
+    (notifications_dir / ".example.cursor.json").write_text(json.dumps(cursor))
+
+    with pytest.raises(LocalStoreError, match=message):
+        _run_local_state(tmp_path)
+
+
 def test_notification_protocol_success_path() -> None:
     first = notification_step(_event_payload())
-    assert first["protocol_version"] == 2
+    assert first["protocol_version"] == 3
     assert first["action"] == "compare_and_swap"
     assert first["expected_notification"] is None
     assert first["next_signal"] == "pending_persisted"
     pending = _record(first)
     assert pending["status"] == "pending"
     assert pending["attempt"] == 0
+    assert pending["previous_event_id"] is None
+    assert pending["expected_snapshot_sha256"] is None
     assert re.fullmatch(r"[0-9a-f]{64}", str(pending["event_id"]))
 
     sending_step = notification_step(
         _event_payload(notification=pending, signal="pending_persisted")
     )
-    assert sending_step["protocol_version"] == 2
+    assert sending_step["protocol_version"] == 3
     assert sending_step["action"] == "compare_and_swap"
     assert sending_step["expected_notification"] == pending
     sending = _record(sending_step)
@@ -308,7 +490,7 @@ def test_notification_protocol_success_path() -> None:
     send = notification_step(
         _event_payload(notification=sending, signal="sending_claimed")
     )
-    assert send["protocol_version"] == 2
+    assert send["protocol_version"] == 3
     assert send["action"] == "send_slack"
 
     delivered_step = notification_step(
@@ -323,7 +505,7 @@ def test_notification_protocol_success_path() -> None:
     done = notification_step(
         _event_payload(notification=delivered, signal="delivered_persisted")
     )
-    assert done == {"protocol_version": 2, "action": "promote_snapshot"}
+    assert done == {"protocol_version": 3, "action": "promote_snapshot"}
 
 
 def test_notification_protocol_restart_and_failure_paths() -> None:
@@ -337,7 +519,7 @@ def test_notification_protocol_restart_and_failure_paths() -> None:
 
     ambiguous = notification_step(_event_payload(notification=sending))
     assert ambiguous == {
-        "protocol_version": 2,
+        "protocol_version": 3,
         "action": "manual_reconciliation",
     }
 
@@ -358,12 +540,12 @@ def test_notification_protocol_restart_and_failure_paths() -> None:
     stopped = notification_step(
         _event_payload(notification=retry, signal="failure_persisted")
     )
-    assert stopped == {"protocol_version": 2, "action": "stop"}
+    assert stopped == {"protocol_version": 3, "action": "stop"}
 
     delivered = dict(sending)
     delivered["status"] = "delivered"
     assert notification_step(_event_payload(notification=delivered)) == {
-        "protocol_version": 2,
+        "protocol_version": 3,
         "action": "promote_snapshot",
     }
 
@@ -372,7 +554,7 @@ def test_local_notification_cas_persists_and_reads_back(tmp_path: Path) -> None:
     first = notification_step(_event_payload())
     applied = _run_local_cas(first, tmp_path)
 
-    assert applied["protocol_version"] == 2
+    assert applied["protocol_version"] == 3
     assert applied["action"] == "compare_and_swap_applied"
     assert applied["next_signal"] == first["next_signal"]
     pending = _record(applied)
@@ -416,7 +598,7 @@ def test_local_notification_cas_conflict_returns_current_record(
 
     conflict = _run_local_cas(second_claim, tmp_path)
     assert conflict == {
-        "protocol_version": 2,
+        "protocol_version": 3,
         "action": "compare_and_swap_conflict",
         "notification": winner,
     }
@@ -465,7 +647,7 @@ def test_local_notification_cas_rejects_stale_baseline_before_sending(
     )
 
     assert _run_local_cas(sending, tmp_path) == {
-        "protocol_version": 2,
+        "protocol_version": 3,
         "action": "snapshot_compare_and_swap_conflict",
         "expected_snapshot_sha256": expected_sha256,
         "current_snapshot_sha256": candidate_sha256,
@@ -481,12 +663,15 @@ def test_local_notification_cas_rejects_present_record_for_absent_expected(
     _run_local_cas(first, tmp_path)
     pending = _record(first)
     claim = notification_step(
-        _event_payload(notification=pending, signal="pending_persisted")
+        _event_payload(
+            notification=pending,
+            signal="pending_persisted",
+        )
     )
     claim["expected_notification"] = None
 
     assert _run_local_cas(claim, tmp_path) == {
-        "protocol_version": 2,
+        "protocol_version": 3,
         "action": "compare_and_swap_conflict",
         "notification": pending,
     }
@@ -683,7 +868,7 @@ def test_local_notification_cas_reports_directory_fsync_failure_after_replace(
     assert json.loads(record_path.read_text()) == sending
     assert list(record_path.parent.glob(".*.tmp")) == []
     assert notification_step(_event_payload(notification=sending)) == {
-        "protocol_version": 2,
+        "protocol_version": 3,
         "action": "manual_reconciliation",
     }
 
@@ -691,56 +876,104 @@ def test_local_notification_cas_reports_directory_fsync_failure_after_replace(
 def test_local_notification_cas_serializes_different_events_until_promotion(
     tmp_path: Path,
 ) -> None:
-    first = notification_step(_event_payload())
-    _run_local_cas(first, tmp_path)
-    pending = _record(first)
-    claim = notification_step(
-        _event_payload(notification=pending, signal="pending_persisted")
+    delivered_sha256 = hashlib.sha256(b"delivered\n").hexdigest()
+    second_sha256 = hashlib.sha256(b"second\n").hexdigest()
+    (tmp_path / "snapshots").mkdir()
+    (tmp_path / "snapshots" / "example.txt").write_text("delivered\n")
+    first = notification_step(
+        _event_payload(
+            sha256=delivered_sha256,
+            expected_snapshot_sha256=delivered_sha256,
+        )
     )
-    claimed = _run_local_cas(claim, tmp_path)
-    sending = _record(claimed)
+    _run_local_cas(first, tmp_path)
+    sending = _record(
+        _run_local_cas(
+            notification_step(
+                _event_payload(
+                    notification=_record(first),
+                    sha256=delivered_sha256,
+                    expected_snapshot_sha256=delivered_sha256,
+                    previous_event_id=None,
+                    signal="pending_persisted",
+                )
+            ),
+            tmp_path,
+        )
+    )
     claim_path = tmp_path / "notifications" / ".example.claim.json"
     assert json.loads(claim_path.read_text()) == {
-        "version": 1,
+        "version": 2,
         "target_id": "example",
         "event_id": sending["event_id"],
-        "sha256": "a" * 64,
+        "previous_event_id": sending["previous_event_id"],
+        "expected_snapshot_sha256": delivered_sha256,
+        "sha256": delivered_sha256,
     }
 
-    second = notification_step(_event_payload(sha256="b" * 64))
+    second = notification_step(
+        _event_payload(
+            sha256=second_sha256,
+            expected_snapshot_sha256=delivered_sha256,
+        )
+    )
     assert _run_local_cas(second, tmp_path) == {
-        "protocol_version": 2,
+        "protocol_version": 3,
         "action": "target_claim_conflict",
         "target_claim": {
-            "version": 1,
+            "version": 2,
             "target_id": "example",
             "event_id": sending["event_id"],
-            "sha256": "a" * 64,
+            "previous_event_id": sending["previous_event_id"],
+            "expected_snapshot_sha256": delivered_sha256,
+            "sha256": delivered_sha256,
         },
         "notification": None,
     }
 
-    delivered = notification_step(
-        _event_payload(notification=sending, signal="slack_delivered")
-    )
-    delivered_result = _run_local_cas(delivered, tmp_path)
-    delivered_record = _record(delivered_result)
     assert claim_path.exists()
     assert _run_local_cas(second, tmp_path)["action"] == "target_claim_conflict"
 
-    assert _run_local_release(delivered_record, "delivered", tmp_path) == {
-        "protocol_version": 2,
+    assert _run_local_release(
+        _record(
+            _run_local_cas(
+                notification_step(
+                    _event_payload(
+                        notification=sending,
+                        sha256=delivered_sha256,
+                        expected_snapshot_sha256=delivered_sha256,
+                        signal="slack_delivered",
+                    )
+                ),
+                tmp_path,
+            )
+        ),
+        "delivered",
+        tmp_path,
+    ) == {
+        "protocol_version": 3,
         "action": "target_claim_released",
         "target_id": "example",
-        "event_id": delivered_record["event_id"],
+        "event_id": sending["event_id"],
     }
     assert not claim_path.exists()
-    pending_result = _run_local_cas(second, tmp_path)
-    assert pending_result["action"] == "compare_and_swap_applied"
+    assert _run_local_cas(second, tmp_path)["action"] == "notification_cursor_conflict"
+    state = _run_local_state(tmp_path)
+    second = notification_step(
+        _event_payload(
+            sha256=second_sha256,
+            expected_snapshot_sha256=delivered_sha256,
+            previous_event_id=state["previous_event_id"],
+        )
+    )
+    second_result = _run_local_cas(second, tmp_path)
+    assert second_result["action"] == "compare_and_swap_applied"
     second_claim = notification_step(
         _event_payload(
-            sha256="b" * 64,
-            notification=_record(pending_result),
+            sha256=second_sha256,
+            expected_snapshot_sha256=delivered_sha256,
+            notification=_record(second_result),
+            previous_event_id=state["previous_event_id"],
             signal="pending_persisted",
         )
     )
@@ -768,9 +1001,11 @@ def test_local_notification_cas_backfills_legacy_sending_claim(
     blocked = _run_local_cas(second, tmp_path)
     assert blocked["action"] == "target_claim_conflict"
     assert blocked["target_claim"] == {
-        "version": 1,
+        "version": 2,
         "target_id": "example",
         "event_id": event_id,
+        "previous_event_id": sending["previous_event_id"],
+        "expected_snapshot_sha256": None,
         "sha256": "a" * 64,
     }
     assert (
@@ -793,6 +1028,200 @@ def test_local_notification_release_rejects_in_flight_claim(
 
     with pytest.raises(LocalStoreError, match="not ready to release"):
         _run_local_release(sending, "delivered", tmp_path)
+
+
+def test_local_notification_release_requires_durable_snapshot_promotion(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "before\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    delivered, candidate, expected_sha256, candidate_sha256 = (
+        _deliver_local_notification(tmp_path, baseline, "after\n", "after.txt")
+    )
+    event_id = str(delivered["event_id"])
+    record_path = tmp_path / "notifications" / f"{event_id}.json"
+    claim_path = tmp_path / "notifications" / ".example.claim.json"
+
+    with pytest.raises(LocalStoreError, match="durably promoted"):
+        _run_local_release(delivered, "delivered", tmp_path)
+    assert record_path.exists()
+    assert claim_path.exists()
+
+    promotion = _run_local_snapshot_promote(
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=expected_sha256,
+            candidate_sha256=candidate_sha256,
+            claim_event_id=event_id,
+        ),
+        candidate,
+        tmp_path,
+    )
+    assert promotion["action"] == "snapshot_promoted"
+    assert _run_local_release(delivered, "delivered", tmp_path)["action"] == (
+        "target_claim_released"
+    )
+    assert not record_path.exists()
+    assert not claim_path.exists()
+
+
+def test_local_notification_recurring_transition_sends_after_retirement(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    (snapshots_dir / "example.txt").write_text("A\n")
+    transitions = [
+        ("A\n", "B\n", "a-to-b-first.txt"),
+        ("B\n", "A\n", "b-to-a.txt"),
+        ("A\n", "B\n", "a-to-b-again.txt"),
+    ]
+    event_ids: list[str] = []
+    send_actions: list[str] = []
+
+    for previous_content, current_content, candidate_name in transitions:
+        delivered, candidate, expected_sha256, candidate_sha256 = (
+            _deliver_local_notification(
+                tmp_path, previous_content, current_content, candidate_name
+            )
+        )
+        event_id = str(delivered["event_id"])
+        event_ids.append(event_id)
+        send_actions.append("send_slack")
+
+        retry = notification_step(
+            _event_payload(
+                notification=delivered,
+                sha256=candidate_sha256,
+                expected_snapshot_sha256=expected_sha256,
+                previous_event_id=delivered["previous_event_id"],
+            )
+        )
+        assert retry == {"protocol_version": 3, "action": "promote_snapshot"}
+
+        promotion = _run_local_snapshot_promote(
+            _local_snapshot_payload(
+                target_id="example",
+                expected_sha256=expected_sha256,
+                candidate_sha256=candidate_sha256,
+                claim_event_id=event_id,
+            ),
+            candidate,
+            tmp_path,
+        )
+        assert promotion["action"] == "snapshot_promoted"
+        assert _run_local_release(delivered, "delivered", tmp_path)["action"] == (
+            "target_claim_released"
+        )
+        assert not (tmp_path / "notifications" / f"{event_id}.json").exists()
+
+    assert send_actions == ["send_slack", "send_slack", "send_slack"]
+    assert len(set(event_ids)) == 3
+    assert _run_local_state(tmp_path)["previous_event_id"] == event_ids[-1]
+    assert json.loads(
+        (tmp_path / "notifications" / ".example.cursor.json").read_text()
+    ) == {
+        "version": 1,
+        "target_id": "example",
+        "last_event_id": event_ids[-1],
+    }
+    assert (snapshots_dir / "example.txt").read_text() == "B\n"
+
+
+def test_local_notification_cas_rejects_stale_recreated_transition(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "before\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    delivered, candidate, expected_sha256, candidate_sha256 = (
+        _deliver_local_notification(tmp_path, baseline, "after\n", "after.txt")
+    )
+    event_id = str(delivered["event_id"])
+    promotion = _run_local_snapshot_promote(
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=expected_sha256,
+            candidate_sha256=candidate_sha256,
+            claim_event_id=event_id,
+        ),
+        candidate,
+        tmp_path,
+    )
+    assert promotion["action"] == "snapshot_promoted"
+    assert _run_local_release(delivered, "delivered", tmp_path)["action"] == (
+        "target_claim_released"
+    )
+
+    stale = notification_step(
+        _event_payload(
+            sha256=candidate_sha256,
+            expected_snapshot_sha256=expected_sha256,
+            previous_event_id=delivered["previous_event_id"],
+        )
+    )
+    assert _run_local_cas(stale, tmp_path) == {
+        "protocol_version": 3,
+        "action": "notification_cursor_conflict",
+        "previous_event_id": delivered["event_id"],
+        "notification": None,
+    }
+
+
+def test_local_notification_cas_rejects_legacy_record(
+    tmp_path: Path,
+) -> None:
+    directive = notification_step(_event_payload())
+    legacy = dict(_record(directive))
+    legacy.pop("previous_event_id")
+    legacy.pop("expected_snapshot_sha256")
+    legacy["version"] = 1
+    legacy["event_id"] = hashlib.sha256(f"example\0{'a' * 64}".encode()).hexdigest()
+    notifications_dir = tmp_path / "notifications"
+    notifications_dir.mkdir()
+    (notifications_dir / f"{legacy['event_id']}.json").write_text(json.dumps(legacy))
+
+    with pytest.raises(LocalStoreError, match="legacy"):
+        _run_local_cas(directive, tmp_path)
+
+
+def test_local_notification_release_recovers_after_cursor_advance_and_retirement(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "before\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    delivered, candidate, expected_sha256, candidate_sha256 = (
+        _deliver_local_notification(tmp_path, baseline, "after\n", "after.txt")
+    )
+    event_id = str(delivered["event_id"])
+    _run_local_snapshot_promote(
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=expected_sha256,
+            candidate_sha256=candidate_sha256,
+            claim_event_id=event_id,
+        ),
+        candidate,
+        tmp_path,
+    )
+
+    store = LocalNotificationStore(tmp_path, "example")
+    store._advance_cursor(  # pyright: ignore[reportPrivateUsage]
+        cast("str | None", delivered["previous_event_id"]), event_id
+    )
+    store._retire_record(  # pyright: ignore[reportPrivateUsage]
+        tmp_path / "notifications" / f"{event_id}.json"
+    )
+
+    assert _run_local_release(delivered, "delivered", tmp_path)["action"] == (
+        "target_claim_released"
+    )
+    assert _run_local_state(tmp_path)["previous_event_id"] == event_id
 
 
 @pytest.mark.parametrize(
@@ -823,7 +1252,7 @@ def test_local_snapshot_promote_uses_expected_baseline_cas(
     )
 
     assert result == {
-        "version": 1,
+        "version": 2,
         "action": "snapshot_promoted",
         "target_id": "example",
         "previous_sha256": expected_sha256,
@@ -855,13 +1284,15 @@ def test_local_snapshot_promote_blocks_active_claim(tmp_path: Path) -> None:
     )
 
     assert result == {
-        "version": 1,
+        "version": 2,
         "action": "target_claim_conflict",
         "current_sha256": hashlib.sha256(baseline.encode()).hexdigest(),
         "target_claim": {
-            "version": 1,
+            "version": 2,
             "target_id": "example",
             "event_id": sending["event_id"],
+            "previous_event_id": sending["previous_event_id"],
+            "expected_snapshot_sha256": hashlib.sha256(b"previous\n").hexdigest(),
             "sha256": "a" * 64,
         },
     }
@@ -909,6 +1340,7 @@ def test_local_snapshot_promote_accepts_delivered_claim_until_release(
         _event_payload(
             notification=sending,
             sha256=candidate_sha256,
+            expected_snapshot_sha256=hashlib.sha256(b"previous\n").hexdigest(),
             signal="slack_delivered",
         )
     )
@@ -966,7 +1398,7 @@ def test_local_snapshot_promote_rejects_stale_candidate_after_newer_promotion(
 
     assert first["action"] == "snapshot_promoted"
     assert second == {
-        "version": 1,
+        "version": 2,
         "action": "snapshot_compare_and_swap_conflict",
         "expected_sha256": expected_sha256,
         "current_sha256": newer_sha256,
@@ -994,7 +1426,7 @@ def test_local_snapshot_promote_reports_already_promoted_snapshot(
     )
 
     assert result == {
-        "version": 1,
+        "version": 2,
         "action": "snapshot_already_promoted",
         "target_id": "example",
         "previous_sha256": candidate_sha256,
@@ -1015,14 +1447,19 @@ def test_local_snapshot_promote_rejects_missing_claim_for_delivered_path(
             target_id="example",
             expected_sha256=hashlib.sha256(b"previous\n").hexdigest(),
             candidate_sha256=candidate_sha256,
-            claim_event_id=workflow.notification_event_id("example", candidate_sha256),
+            claim_event_id=workflow.notification_event_id(
+                "example",
+                candidate_sha256,
+                hashlib.sha256(b"previous\n").hexdigest(),
+                None,
+            ),
         ),
         candidate,
         tmp_path,
     )
 
     assert result == {
-        "version": 1,
+        "version": 2,
         "action": "target_claim_conflict",
         "current_sha256": hashlib.sha256(b"previous\n").hexdigest(),
         "target_claim": None,
@@ -1033,11 +1470,11 @@ def test_local_snapshot_promote_rejects_missing_claim_for_delivered_path(
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("version", 2, "version"),
+        ("version", 1, "version"),
         ("action", "copy_snapshot", "action"),
         ("expected_sha256", "invalid", "expected_sha256"),
         ("candidate_sha256", "invalid", "candidate_sha256"),
-        ("claim_event_id", "0" * 64, "claim_event_id"),
+        ("claim_event_id", "invalid", "claim_event_id"),
     ],
     ids=["wrong-version", "wrong-action", "bad-expected", "bad-candidate", "bad-claim"],
 )
@@ -1178,6 +1615,7 @@ def test_local_snapshot_promote_keeps_claim_after_directory_fsync_failure(
         _event_payload(
             notification=sending,
             sha256=candidate_sha256,
+            expected_snapshot_sha256=hashlib.sha256(b"previous\n").hexdigest(),
             signal="slack_delivered",
         )
     )

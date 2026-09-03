@@ -38,15 +38,37 @@ Persistence remains connector-owned. Local mode stores equivalent target,
 snapshot, and notification records under a caller-selected runtime directory.
 Google Drive mode stores them through the connected Google Sheets/Drive app.
 
-The notification helper uses protocol version `2`. Persist notification records
+The notification helper uses protocol version `3`. Persist notification records
 exactly as returned by `workflow.py` and read them back before continuing a
-protocol transition. Every state-changing response has
+protocol transition. Each notification record uses schema version `2` and
+contains the candidate `sha256`, nullable `expected_snapshot_sha256`, and
+nullable `previous_event_id`. Its `event_id` hashes
+`target_id\0previous_event_id\0expected_snapshot_sha256\0sha256` (using empty
+segments for `null`), so it identifies one occurrence of a baseline transition.
+The per-target previous-event cursor advances only after delivery and snapshot
+promotion; retries reuse an unfinished event while a later recurrence gets a
+new event ID. Every state-changing response has
 `action: "compare_and_swap"`, an `expected_notification` record (or `null` for
 create-if-absent), the exact replacement `notification`, the run's
 `expected_snapshot_sha256` (or `null` when no baseline should exist), and a
-`next_signal`. The helper checks that expected baseline under the per-target lock
-before it creates the `sending` claim; a stale notification therefore cannot
-reach Slack.
+`next_signal`. Start each run by reading the previous-event cursor; the helper
+checks that cursor and expected baseline under the per-target lock before every
+local record mutation, including record creation. A stale notification
+therefore cannot reach Slack or recreate an old transition.
+
+For local mode, read the cursor before constructing `notification-step` input:
+
+```bash
+uv run python skills/web-update-monitor/scripts/workflow.py \
+  local-notification-state --runtime-dir "$RUNTIME_DIR" < state-request.json
+```
+
+Use `action: "read_notification_state"`, the protocol version, and the target
+ID. The response's `previous_event_id` is `null` for a target with no completed
+notification, or the last completed event ID. Local mode stores that cursor at
+`notifications/.<target_id>.cursor.json` with a version-1 schema. Treat a
+cursor conflict as a state conflict: re-read the cursor and restart the
+notification protocol without submitting a stale signal or calling Slack.
 
 For local mode, pass that complete response to the deterministic local backend:
 
@@ -55,11 +77,13 @@ uv run python skills/web-update-monitor/scripts/workflow.py \
   local-notification-cas --runtime-dir "$RUNTIME_DIR" < request.json
 ```
 
-The backend derives `notifications/<event_id>.json` and the per-target lock
+The backend derives `notifications/<event_id>.json`, the per-target cursor
+`notifications/.<target_id>.cursor.json`, and the per-target lock
 `notifications/.<target_id>.lock` from validated record fields. Under that
-process-shared lock it compares the stored JSON object exactly. Before a
-`pending` → `sending` replacement, it also compares the canonical snapshot's
-hash to `expected_snapshot_sha256`. It writes replacements through a
+process-shared lock it compares the stored JSON object exactly. Before every
+record mutation, it also compares the canonical snapshot's hash to
+`expected_snapshot_sha256` and the record's `previous_event_id` to the cursor.
+It writes replacements and cursor updates through a
 same-directory temporary file, flushes and `fsync`s the file, atomically replaces
 the ledger entry, `fsync`s the directory, and reads back the durable replacement
 before returning. The runtime directory must be an existing caller-controlled
@@ -76,11 +100,12 @@ uv run python skills/web-update-monitor/scripts/workflow.py \
   --candidate "$CANDIDATE" < request.json
 ```
 
-The request must contain exactly `version: 1`, `action: "promote_snapshot"`, the
+The request must contain exactly `version: 2`, `action: "promote_snapshot"`, the
 `target_id`, `expected_sha256` (or `null` when no baseline should exist),
 `candidate_sha256` from the monitor result, and `claim_event_id` (`null` for a
-baseline or non-material change, or the delivered notification event ID for a
-post-notification promotion). The backend reads the canonical baseline at
+baseline or non-material change, or the occurrence-scoped delivered notification
+event ID for a post-notification promotion). The backend reads the canonical
+baseline at
 `snapshots/<target_id>.txt`, verifies the candidate hash, and performs an
 expected-baseline compare-and-swap under the same per-target lock as notification
 claims. It writes the candidate through a same-directory temporary file, flushes
@@ -99,8 +124,9 @@ candidate only after that success. The backend returns `target_claim_conflict`
 or `snapshot_compare_and_swap_conflict` without changing the baseline.
 
 When a replacement claims `sending`, the backend also creates a durable,
-target-scoped claim at `notifications/.<target_id>.claim.json`. While that claim
-exists, a CAS for a different event (including a different snapshot SHA) returns
+target-scoped version-2 claim at `notifications/.<target_id>.claim.json`. The
+claim records the previous event ID, baseline, candidate, and event ID. While
+that claim exists, a CAS for a different event (including a different snapshot SHA) returns
 `action: "target_claim_conflict"` without changing the other event's record; stop
 that target and retry it only after the current owner releases its claim. The
 claim remains through the external Slack call, terminal notification persistence,
@@ -109,9 +135,14 @@ notification windows. The per-target `flock` protects each individual operation;
 the durable claim preserves the ownership between operations.
 
 For existing local state created before target claims were added, the backend
-detects and durably backfills a claim for a single `sending` record. Multiple
-legacy `sending` records for one target are an error requiring manual
-reconciliation; do not send or promote that target automatically.
+detects and durably backfills a claim for a single current-protocol `sending`
+record. Multiple `sending` records for one target are an error requiring manual
+reconciliation; do not send or promote that target automatically. Protocol-2
+notification records, version-1 target claims, and protocol-3 records created
+before occurrence cursors lack the required lineage and are legacy state: stop
+runners, reconcile or archive that notification state, and restart with the
+current protocol. The helper rejects it before Slack or snapshot promotion
+rather than guessing its transition identity.
 
 An applied response includes the durable notification and the unchanged
 `next_signal`; only then continue the protocol. A normal CAS conflict includes
@@ -125,7 +156,7 @@ records in place.
 
 After a confirmed failure has been persisted and the helper returns `stop`, or
 after a confirmed delivery has been persisted and the candidate snapshot has
-been promoted, release the target claim with the local backend:
+been durably promoted, release the target claim with the local backend:
 
 ```bash
 uv run python skills/web-update-monitor/scripts/workflow.py \
@@ -134,18 +165,31 @@ uv run python skills/web-update-monitor/scripts/workflow.py \
 
 Use `action: "release_target_claim"`, the target and event IDs, and
 `expected_status: "pending"` for the failure path or `"delivered"` for the
-promotion path. Never release a claim while its notification is `sending`.
+promotion path. For the delivered path, the backend verifies that the canonical
+snapshot has the delivered hash, compare-and-swaps the cursor from the record's
+`previous_event_id` to its `event_id`, durably removes the delivered notification
+record, reads that removal back, and only then removes the target claim. If the
+cursor already contains that exact event ID, recovery may finish the remaining
+cleanup; any other cursor value is a conflict. Never release a claim while its
+notification is `sending`.
 If release fails, leave the claim in place and fail closed; a later recovery can
 retry the release after confirming the terminal state and snapshot outcome.
 
-For Google Drive mode, serialize each target from the state comparison through
-Slack outcome persistence/read-back, or use an equivalent atomic compare-and-swap
-with the same ownership guarantee. Fail closed before Slack when the connected
-workflow cannot provide that serialization or atomicity. Python does not
-authenticate to Google APIs or contain deployment identifiers.
+For Google Drive mode, keep an equivalent per-target cursor in connector-owned
+durable state. Read it before `notification-step`, compare it with the record's
+`previous_event_id` during every transition, and advance it from the previous
+event ID to the delivered event only after snapshot promotion, before retiring
+the delivered record and releasing the target serialization. Serialize each
+target from state comparison through Slack outcome persistence/read-back, or use
+an equivalent atomic compare-and-swap with the same ownership guarantee. Fail
+closed before Slack when the connected workflow cannot provide that serialization
+or atomicity. Python does not authenticate to Google APIs or contain deployment
+identifiers.
 
 The protocol transitions are:
 
+- Read the target's previous-event cursor, then start with that exact
+  `previous_event_id` and the monitor's `previous_sha256`.
 - `start` without a record: compare-and-swap absent → `pending`, then use
   `pending_persisted` after exact read-back.
 - `start` or `pending_persisted` with `pending`: compare-and-swap the exact
@@ -160,13 +204,21 @@ The protocol transitions are:
   then use `failure_persisted` after exact read-back, stop, and release the local
   target claim.
 - `start` with `sending`: use `manual_reconciliation`; never resend
-  automatically. `start` with `delivered` can promote the snapshot.
+  automatically. `start` with `delivered` can promote the snapshot. Once that
+  promotion is durable, advance the cursor, retire the delivered record, and
+  release the claim. A later observation uses the advanced cursor, so a
+  recurring baseline-to-candidate transition receives a new event ID and can
+  notify again.
 
 For local mode, release the target claim only after `local-snapshot-promote`
 reports `snapshot_promoted` or `snapshot_already_promoted`, or after the `stop`
-action has completed. For Google Drive mode, keep the connector's
+action has completed. If a process fails after the cursor advances or the
+delivered record is retired but before the claim is removed, recovery must
+accept only that exact cursor/event pair, verify the canonical snapshot against
+the claim, and finish claim release; do not create another notification while
+that claim exists. For Google Drive mode, keep the connector's
 per-target serialization through state comparison, Slack outcome persistence,
-and snapshot promotion, then release it at the same terminal points.
+snapshot promotion, delivered-record retirement, and claim release.
 
 The old `sending_persisted` signal is invalid. A `sending` record is the
 delivery claim, and its owner must keep the target claim/serialization through
@@ -218,8 +270,10 @@ name, and `watch_focus`. Then start the notification protocol:
 uv run python skills/web-update-monitor/scripts/workflow.py notification-step < request.json
 ```
 
-Start every new run or recovery with `signal: "start"`. Execute only the returned
-action. For local `compare_and_swap`, pass the complete response to
+Start every new run or recovery with `signal: "start"`, the cursor's
+`previous_event_id` (`null` for the first occurrence), and the monitor result's
+`previous_sha256` as `expected_snapshot_sha256` (`null` for the initial baseline).
+Execute only the returned action. For local `compare_and_swap`, pass the complete response to
 `local-notification-cas` and use its durable read-back; for Google Drive, apply
 the exact conditional replacement under the connector's required
 lock/serialization and read it back. Invoke the helper with the returned

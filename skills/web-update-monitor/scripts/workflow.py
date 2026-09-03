@@ -29,11 +29,15 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PERSISTENCE_MODES = {"local", "google-drive"}
 _FETCH_MODES = {"static", "browser"}
 _NOTIFICATION_STATUSES = {"pending", "sending", "delivered"}
-_NOTIFICATION_PROTOCOL_VERSION = 2
+_NOTIFICATION_PROTOCOL_VERSION = 3
+_NOTIFICATION_RECORD_VERSION = 2
+_NOTIFICATION_CURSOR_VERSION = 1
 _NOTIFICATION_FIELDS = frozenset({
     "version",
     "event_id",
     "target_id",
+    "previous_event_id",
+    "expected_snapshot_sha256",
     "sha256",
     "destination",
     "message",
@@ -50,7 +54,6 @@ _LOCAL_CAS_FIELDS = frozenset({
     "expected_snapshot_sha256",
     "next_signal",
 })
-_LOCAL_CAS_LEGACY_FIELDS = _LOCAL_CAS_FIELDS - {"expected_snapshot_sha256"}
 _LOCAL_CAS_SIGNALS = frozenset({
     "pending_persisted",
     "sending_claimed",
@@ -64,6 +67,11 @@ _LOCAL_RELEASE_FIELDS = frozenset({
     "event_id",
     "expected_status",
 })
+_LOCAL_STATE_FIELDS = frozenset({
+    "protocol_version",
+    "action",
+    "target_id",
+})
 _LOCAL_SNAPSHOT_FIELDS = frozenset({
     "version",
     "action",
@@ -76,12 +84,28 @@ _TARGET_CLAIM_FIELDS = frozenset({
     "version",
     "target_id",
     "event_id",
+    "previous_event_id",
+    "expected_snapshot_sha256",
     "sha256",
 })
+_NOTIFICATION_CURSOR_FIELDS = frozenset({
+    "version",
+    "target_id",
+    "last_event_id",
+})
+_LEGACY_NOTIFICATION_FIELDS = _NOTIFICATION_FIELDS - {"previous_event_id"}
+_LEGACY_PROTOCOL2_NOTIFICATION_FIELDS = _LEGACY_NOTIFICATION_FIELDS - {
+    "expected_snapshot_sha256"
+}
+_LEGACY_TARGET_CLAIM_FIELDS = _TARGET_CLAIM_FIELDS - {"previous_event_id"}
+_LEGACY_PROTOCOL1_TARGET_CLAIM_FIELDS = _LEGACY_TARGET_CLAIM_FIELDS - {
+    "expected_snapshot_sha256"
+}
 _RELEASEABLE_NOTIFICATION_STATUSES = {"pending", "delivered"}
 _MAX_LOCAL_RECORD_BYTES = 1024 * 1024
 _MAX_LOCAL_SNAPSHOT_BYTES = 40 * 1024 * 1024
-_LOCAL_SNAPSHOT_PROTOCOL_VERSION = 1
+_LOCAL_SNAPSHOT_PROTOCOL_VERSION = 2
+_TARGET_CLAIM_VERSION = 2
 _MIN_CANDIDATE_PATH_PARTS = 2
 
 
@@ -99,6 +123,8 @@ class NotificationRecord(TypedDict):
     version: int
     event_id: str
     target_id: str
+    previous_event_id: str | None
+    expected_snapshot_sha256: str | None
     sha256: str
     destination: str
     message: str
@@ -114,7 +140,17 @@ class TargetClaim(TypedDict):
     version: int
     target_id: str
     event_id: str
+    previous_event_id: str | None
+    expected_snapshot_sha256: str | None
     sha256: str
+
+
+class NotificationCursor(TypedDict):
+    """Validated durable cursor for one target's completed notifications."""
+
+    version: int
+    target_id: str
+    last_event_id: str | None
 
 
 def _require_string(value: object, field: str, *, allow_empty: bool = False) -> str:
@@ -233,13 +269,32 @@ def change_action(payload: Mapping[str, object]) -> dict[str, object]:
     return {"action": "promote_snapshot"}
 
 
-def notification_event_id(target_id: str, sha256: str) -> str:
-    """Return the stable event ID for one target and normalized snapshot hash."""
+def notification_event_id(
+    target_id: str,
+    sha256: str,
+    expected_snapshot_sha256: str | None,
+    previous_event_id: str | None,
+) -> str:
+    """Return the stable event ID for one notification transition occurrence."""
     if not _TARGET_ID_RE.fullmatch(target_id):
         raise WorkflowError("invalid_target_id")
     if not _SHA256_RE.fullmatch(sha256):
         raise WorkflowError("sha256 must be a lowercase hexadecimal SHA-256")
-    return hashlib.sha256(f"{target_id}\0{sha256}".encode()).hexdigest()
+    if expected_snapshot_sha256 is not None and not _SHA256_RE.fullmatch(
+        expected_snapshot_sha256
+    ):
+        raise WorkflowError(
+            "expected_snapshot_sha256 must be a lowercase hexadecimal SHA-256"
+        )
+    if previous_event_id is not None and not _SHA256_RE.fullmatch(previous_event_id):
+        raise WorkflowError("previous_event_id must be a lowercase hexadecimal SHA-256")
+    identity = "\0".join((
+        target_id,
+        previous_event_id or "",
+        expected_snapshot_sha256 or "",
+        sha256,
+    ))
+    return hashlib.sha256(identity.encode()).hexdigest()
 
 
 def _snapshot_hash(
@@ -269,6 +324,7 @@ class LocalNotificationStore:
         self._notifications_dir = self._runtime_dir / "notifications"
         self._lock_path = self._notifications_dir / f".{target_id}.lock"
         self._claim_path = self._notifications_dir / f".{target_id}.claim.json"
+        self._cursor_path = self._notifications_dir / f".{target_id}.cursor.json"
         self._snapshots_dir = self._runtime_dir / "snapshots"
 
     def compare_and_swap(
@@ -277,7 +333,7 @@ class LocalNotificationStore:
         expected: Mapping[str, object] | None,
         replacement: Mapping[str, object],
         *,
-        expected_snapshot_sha256: str | None = None,
+        expected_snapshot_sha256: str | None,
     ) -> dict[str, object]:
         """Apply an exact replacement and return the durable read-back."""
         path = self._record_path(event_id)
@@ -287,7 +343,15 @@ class LocalNotificationStore:
         if expected_record is not None:
             self._validate_record(expected_record, event_id)
         self._validate_record(replacement_record, event_id)
+        if replacement_record["expected_snapshot_sha256"] != expected_snapshot_sha256:
+            raise LocalStoreError("notification baseline does not match the request")
+        if (
+            expected_record is not None
+            and expected_record["expected_snapshot_sha256"] != expected_snapshot_sha256
+        ):
+            raise LocalStoreError("expected notification baseline does not match")
         with self._locked():
+            current_event_id = self._read_notification_state_locked()
             current = self._read_record(path)
             if current is not None:
                 self._validate_record(current, event_id)
@@ -300,25 +364,38 @@ class LocalNotificationStore:
                 }
             if current != expected_record:
                 return {"applied": False, "notification": current}
-            if replacement_record["status"] == "sending":
-                self._validate_snapshots_directory()
-                current_snapshot = self._read_snapshot(
-                    self._snapshot_path(), "local snapshot"
-                )
-                current_snapshot_sha256 = self._snapshot_sha256(current_snapshot)
-                if current_snapshot_sha256 != expected_snapshot_sha256:
-                    return {
-                        "applied": False,
-                        "notification": current,
-                        "snapshot_conflict": {
-                            "expected_sha256": expected_snapshot_sha256,
-                            "current_sha256": current_snapshot_sha256,
-                        },
-                    }
+            if replacement_record["previous_event_id"] != current_event_id:
+                return {
+                    "applied": False,
+                    "notification": current,
+                    "cursor_conflict": {
+                        "expected_event_id": replacement_record["previous_event_id"],
+                        "current_event_id": current_event_id,
+                    },
+                }
+            self._validate_snapshots_directory()
+            current_snapshot = self._read_snapshot(
+                self._snapshot_path(), "local snapshot"
+            )
+            current_snapshot_sha256 = self._snapshot_sha256(current_snapshot)
+            if current_snapshot_sha256 != expected_snapshot_sha256:
+                return {
+                    "applied": False,
+                    "notification": current,
+                    "snapshot_conflict": {
+                        "expected_sha256": expected_snapshot_sha256,
+                        "current_sha256": current_snapshot_sha256,
+                    },
+                }
             if replacement_record["status"] == "sending" and target_claim is None:
                 self._write_record(
                     self._claim_path,
-                    self._new_claim(event_id, replacement_record["sha256"]),
+                    self._new_claim(
+                        event_id,
+                        replacement_record["sha256"],
+                        replacement_record["expected_snapshot_sha256"],
+                        replacement_record["previous_event_id"],
+                    ),
                 )
             self._write_record(path, replacement_record)
             durable = self._read_record(path)
@@ -331,10 +408,17 @@ class LocalNotificationStore:
         path = self._record_path(event_id)
         self._ensure_notifications_directory()
         with self._locked():
+            self._read_notification_state_locked()
             record = self._read_record(path)
             if record is not None:
                 self._validate_record(record, event_id)
             return record
+
+    def read_notification_state(self) -> str | None:
+        """Read the last completed notification event under the target lock."""
+        self._ensure_notifications_directory()
+        with self._locked():
+            return self._read_notification_state_locked()
 
     def promote_snapshot(
         self,
@@ -347,9 +431,7 @@ class LocalNotificationStore:
         """Promote a candidate snapshot with target ownership and a baseline CAS."""
         if not _SHA256_RE.fullmatch(candidate_sha256):
             raise LocalStoreError("candidate snapshot hash is invalid")
-        if claim_event_id is not None and claim_event_id != notification_event_id(
-            self._target_id, candidate_sha256
-        ):
+        if claim_event_id is not None and not _SHA256_RE.fullmatch(claim_event_id):
             raise LocalStoreError("claim event does not match candidate snapshot")
         if expected_sha256 is not None and not _SHA256_RE.fullmatch(expected_sha256):
             raise LocalStoreError("expected snapshot hash is invalid")
@@ -360,11 +442,21 @@ class LocalNotificationStore:
         destination = self._snapshot_path()
 
         with self._locked():
+            self._read_notification_state_locked()
             target_claim = self._load_target_claim()
             current = self._read_snapshot(destination, "local snapshot")
             current_sha256 = self._snapshot_sha256(current)
             if target_claim is not None:
                 if claim_event_id != target_claim["event_id"]:
+                    return {
+                        "applied": False,
+                        "current_sha256": current_sha256,
+                        "target_claim": target_claim,
+                    }
+                if (
+                    target_claim["sha256"] != candidate_sha256
+                    or target_claim["expected_snapshot_sha256"] != expected_sha256
+                ):
                     return {
                         "applied": False,
                         "current_sha256": current_sha256,
@@ -376,7 +468,12 @@ class LocalNotificationStore:
                 if notification is None:
                     raise LocalStoreError("target claim notification is missing")
                 self._validate_record(notification, target_claim["event_id"])
-                if notification["status"] != "delivered":
+                if (
+                    notification["status"] != "delivered"
+                    or notification["sha256"] != target_claim["sha256"]
+                    or notification["expected_snapshot_sha256"]
+                    != target_claim["expected_snapshot_sha256"]
+                ):
                     raise LocalStoreError("target claim notification is not delivered")
             elif claim_event_id is not None:
                 return {
@@ -504,6 +601,41 @@ class LocalNotificationStore:
     def _snapshot_path(self) -> Path:
         return self._snapshots_dir / f"{self._target_id}.txt"
 
+    def _read_notification_state_locked(self) -> str | None:
+        """Validate compatible local state and return the durable cursor value."""
+        raw_cursor = self._read_cursor(self._cursor_path)
+        cursor = None if raw_cursor is None else self._validate_cursor(raw_cursor)
+        records = self._find_notification_records()
+        raw_claim = self._read_claim(self._claim_path)
+        target_claim = None if raw_claim is None else self._validate_claim(raw_claim)
+        if target_claim is not None:
+            matching_record = next(
+                (
+                    record
+                    for record in records
+                    if record.get("event_id") == target_claim["event_id"]
+                ),
+                None,
+            )
+            if matching_record is None and (
+                cursor is None or cursor != target_claim["event_id"]
+            ):
+                raise LocalStoreError("target claim notification is missing")
+        if cursor is None:
+            for record in records:
+                if record["previous_event_id"] is not None:
+                    raise LocalStoreError(
+                        "notification cursor is missing for existing state"
+                    )
+            if (
+                target_claim is not None
+                and target_claim["previous_event_id"] is not None
+            ):
+                raise LocalStoreError(
+                    "notification cursor is missing for existing target claim"
+                )
+        return None if cursor is None else cursor["last_event_id"]
+
     def _load_target_claim(self) -> TargetClaim | None:
         target_claim_record = self._read_claim(self._claim_path)
         target_claim = None
@@ -522,6 +654,8 @@ class LocalNotificationStore:
                 target_claim = self._new_claim(
                     _require_string(sending_record["event_id"], "event_id"),
                     sending_record["sha256"],
+                    sending_record["expected_snapshot_sha256"],
+                    sending_record["previous_event_id"],
                 )
                 self._write_record(self._claim_path, target_claim)
             elif target_claim["event_id"] != sending_record["event_id"]:
@@ -530,15 +664,15 @@ class LocalNotificationStore:
                 )
         return target_claim
 
-    def _find_sending_records(self) -> list[dict[str, object]]:
+    def _find_notification_records(self) -> list[dict[str, object]]:
         try:
             candidates = self._notifications_dir.iterdir()
         except OSError as exc:
             raise LocalStoreError("cannot scan local notification records") from exc
 
-        sending_records: list[dict[str, object]] = []
+        records: list[dict[str, object]] = []
         for candidate in candidates:
-            if candidate in {self._claim_path, self._lock_path}:
+            if candidate in {self._claim_path, self._cursor_path, self._lock_path}:
                 continue
             if not candidate.name.endswith(".json"):
                 continue
@@ -558,10 +692,42 @@ class LocalNotificationStore:
                     event_id=event_id,
                 )
             except WorkflowError as exc:
+                message = str(exc)
+                if message.startswith("legacy "):
+                    raise LocalStoreError(message) from exc
                 raise LocalStoreError("notification record schema is invalid") from exc
-            if record_target_id == self._target_id and record["status"] == "sending":
-                sending_records.append(record)
-        return sending_records
+            if record_target_id == self._target_id:
+                records.append(record)
+        return records
+
+    def _find_sending_records(self) -> list[dict[str, object]]:
+        return [
+            record
+            for record in self._find_notification_records()
+            if record["status"] == "sending"
+        ]
+
+    def _advance_cursor(self, previous_event_id: str | None, event_id: str) -> None:
+        """Advance the completed-event cursor with an exact local CAS."""
+        raw_cursor = self._read_cursor(self._cursor_path)
+        cursor = None if raw_cursor is None else self._validate_cursor(raw_cursor)
+        current_event_id = None if cursor is None else cursor["last_event_id"]
+        if current_event_id == event_id:
+            return
+        if current_event_id != previous_event_id:
+            raise LocalStoreError("notification cursor compare-and-swap conflict")
+        replacement = {
+            "version": _NOTIFICATION_CURSOR_VERSION,
+            "target_id": self._target_id,
+            "last_event_id": event_id,
+        }
+        self._write_cursor(self._cursor_path, replacement)
+        durable_raw = self._read_cursor(self._cursor_path)
+        if durable_raw is None:
+            raise LocalStoreError("notification cursor read-back mismatch")
+        durable = self._validate_cursor(durable_raw)
+        if durable != replacement:
+            raise LocalStoreError("notification cursor read-back mismatch")
 
     def release_target_claim(
         self, event_id: str, expected_status: str
@@ -578,11 +744,17 @@ class LocalNotificationStore:
             target_claim = self._read_claim(self._claim_path)
             if target_claim is None:
                 if record is None:
-                    raise LocalStoreError("target claim is missing")
+                    return {"released": False}
                 if record["status"] == "sending":
                     raise LocalStoreError("target claim is missing")
                 if record["status"] != expected_status:
                     raise LocalStoreError("notification is not ready to release")
+                if expected_status == "delivered":
+                    self._ensure_promoted_snapshot(record["sha256"])
+                    self._advance_cursor(
+                        cast("str | None", record["previous_event_id"]), event_id
+                    )
+                    self._retire_record(path)
                 return {"released": False, "notification": record}
             self._validate_claim(target_claim)
             if target_claim["event_id"] != event_id:
@@ -591,8 +763,28 @@ class LocalNotificationStore:
                     "notification": record,
                     "target_claim": target_claim,
                 }
-            if record is None or record["status"] != expected_status:
+            if record is None:
+                if expected_status != "delivered":
+                    raise LocalStoreError("notification is not ready to release")
+                self._ensure_promoted_snapshot(target_claim["sha256"])
+                self._advance_cursor(
+                    cast("str | None", target_claim["previous_event_id"]), event_id
+                )
+            elif record["status"] != expected_status:
                 raise LocalStoreError("notification is not ready to release")
+            else:
+                if (
+                    record["sha256"] != target_claim["sha256"]
+                    or record["expected_snapshot_sha256"]
+                    != target_claim["expected_snapshot_sha256"]
+                ):
+                    raise LocalStoreError("target claim notification does not match")
+                if expected_status == "delivered":
+                    self._ensure_promoted_snapshot(record["sha256"])
+                    self._advance_cursor(
+                        cast("str | None", record["previous_event_id"]), event_id
+                    )
+                    self._retire_record(path)
             try:
                 self._claim_path.unlink()
             except OSError as exc:
@@ -602,6 +794,23 @@ class LocalNotificationStore:
                 raise LocalStoreError("target claim read-back mismatch")
             return {"released": True, "target_claim": target_claim}
 
+    def _ensure_promoted_snapshot(self, sha256: object) -> None:
+        """Require the canonical snapshot to contain the delivered content."""
+        self._validate_snapshots_directory()
+        snapshot = self._read_snapshot(self._snapshot_path(), "local snapshot")
+        if self._snapshot_sha256(snapshot) != sha256:
+            raise LocalStoreError("snapshot has not been durably promoted")
+
+    def _retire_record(self, path: Path) -> None:
+        """Remove a completed notification record and durably sync its directory."""
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise LocalStoreError("cannot retire notification record") from exc
+        self._fsync_directory(path.parent)
+        if self._read_record(path) is not None:
+            raise LocalStoreError("notification retirement read-back mismatch")
+
     def _validate_record(self, record: Mapping[str, object], event_id: str) -> None:
         try:
             _validate_local_record(
@@ -610,22 +819,44 @@ class LocalNotificationStore:
                 event_id=event_id,
             )
         except WorkflowError as exc:
+            if str(exc).startswith("legacy "):
+                raise LocalStoreError(str(exc)) from exc
             raise LocalStoreError("notification record schema is invalid") from exc
 
     def _validate_claim(self, value: object) -> TargetClaim:
         try:
             claim = _validate_target_claim(value)
         except WorkflowError as exc:
+            if str(exc).startswith("legacy "):
+                raise LocalStoreError(str(exc)) from exc
             raise LocalStoreError("target claim schema is invalid") from exc
         if claim["target_id"] != self._target_id:
             raise LocalStoreError("target claim target_id does not match")
         return claim
 
-    def _new_claim(self, event_id: str, sha256: object) -> TargetClaim:
+    def _new_claim(
+        self,
+        event_id: str,
+        sha256: object,
+        expected_snapshot_sha256: object,
+        previous_event_id: object,
+    ) -> TargetClaim:
+        expected = _snapshot_hash(
+            expected_snapshot_sha256,
+            "target claim expected_snapshot_sha256",
+            allow_none=True,
+        )
+        previous = _snapshot_hash(
+            previous_event_id,
+            "target claim previous_event_id",
+            allow_none=True,
+        )
         return {
-            "version": 1,
+            "version": _TARGET_CLAIM_VERSION,
             "target_id": self._target_id,
             "event_id": event_id,
+            "previous_event_id": previous,
+            "expected_snapshot_sha256": expected,
             "sha256": _require_string(sha256, "target claim sha256"),
         }
 
@@ -733,6 +964,10 @@ class LocalNotificationStore:
         return cls._read_json_object(path, "target claim")
 
     @classmethod
+    def _read_cursor(cls, path: Path) -> dict[str, object] | None:
+        return cls._read_json_object(path, "notification cursor")
+
+    @classmethod
     def _read_json_object(
         cls, path: Path, description: str
     ) -> dict[str, object] | None:
@@ -770,11 +1005,49 @@ class LocalNotificationStore:
             raise LocalStoreError(f"{description} is too large")
         return data
 
+    def _validate_cursor(self, value: object) -> NotificationCursor:
+        try:
+            cursor = _require_mapping(value, "notification cursor")
+        except WorkflowError as exc:
+            raise LocalStoreError("notification cursor schema is invalid") from exc
+        if frozenset(cursor) != _NOTIFICATION_CURSOR_FIELDS:
+            raise LocalStoreError("notification cursor schema is invalid")
+        if (
+            type(cursor.get("version")) is not int
+            or cursor.get("version") != _NOTIFICATION_CURSOR_VERSION
+        ):
+            raise LocalStoreError(
+                f"notification cursor version must be {_NOTIFICATION_CURSOR_VERSION}"
+            )
+        try:
+            target_id = _require_string(cursor.get("target_id"), "cursor target_id")
+            last_event_id = _snapshot_hash(
+                cursor.get("last_event_id"),
+                "cursor last_event_id",
+                allow_none=True,
+            )
+        except WorkflowError as exc:
+            raise LocalStoreError("notification cursor schema is invalid") from exc
+        if target_id != self._target_id:
+            raise LocalStoreError("notification cursor target_id does not match")
+        return {
+            "version": _NOTIFICATION_CURSOR_VERSION,
+            "target_id": target_id,
+            "last_event_id": last_event_id,
+        }
+
     @staticmethod
     def _write_record(path: Path, record: Mapping[str, object]) -> None:
-        data = LocalNotificationStore._serialize_record(record)
+        data = LocalNotificationStore._serialize_json(record, "notification record")
         LocalNotificationStore._write_bytes(
             path, data, "notification record", _MAX_LOCAL_RECORD_BYTES
+        )
+
+    @staticmethod
+    def _write_cursor(path: Path, cursor: Mapping[str, object]) -> None:
+        data = LocalNotificationStore._serialize_json(cursor, "notification cursor")
+        LocalNotificationStore._write_bytes(
+            path, data, "notification cursor", _MAX_LOCAL_RECORD_BYTES
         )
 
     @staticmethod
@@ -836,11 +1109,11 @@ class LocalNotificationStore:
             os.fsync(temporary_file.fileno())
 
     @staticmethod
-    def _serialize_record(record: Mapping[str, object]) -> bytes:
+    def _serialize_json(value: Mapping[str, object], description: str) -> bytes:
         try:
             data = (
                 json.dumps(
-                    record,
+                    value,
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
@@ -848,11 +1121,7 @@ class LocalNotificationStore:
                 + b"\n"
             )
         except (TypeError, ValueError) as exc:
-            raise LocalStoreError(
-                f"cannot serialize notification record: {exc}"
-            ) from exc
-        if len(data) > _MAX_LOCAL_RECORD_BYTES:
-            raise LocalStoreError("notification record is too large")
+            raise LocalStoreError(f"cannot serialize {description}: {exc}") from exc
         return data
 
     @classmethod
@@ -908,10 +1177,14 @@ class LocalNotificationStore:
 
 def _notification_context(
     payload: Mapping[str, object],
+    expected_snapshot_sha256: str | None,
+    previous_event_id: str | None,
 ) -> tuple[str, str, str, str, str]:
     target_id = _require_string(payload.get("target_id"), "target_id")
     sha256 = _require_string(payload.get("sha256"), "sha256")
-    event_id = notification_event_id(target_id, sha256)
+    event_id = notification_event_id(
+        target_id, sha256, expected_snapshot_sha256, previous_event_id
+    )
     destination = _require_string(payload.get("destination"), "destination")
     message = _require_string(payload.get("message"), "message")
     return target_id, sha256, event_id, destination, message
@@ -923,20 +1196,50 @@ def _validate_notification(
     target_id: str,
     sha256: str,
     event_id: str,
+    previous_event_id: str | None,
+    expected_snapshot_sha256: str | None,
     destination: str,
 ) -> NotificationRecord:
     record = _require_mapping(value, "notification")
-    if type(record.get("version")) is not int or record.get("version") != 1:
-        raise WorkflowError("notification version must be 1")
+    if frozenset(record) in {
+        _LEGACY_NOTIFICATION_FIELDS,
+        _LEGACY_PROTOCOL2_NOTIFICATION_FIELDS,
+    }:
+        raise WorkflowError("legacy notification record requires manual reconciliation")
+    if frozenset(record) != _NOTIFICATION_FIELDS:
+        raise WorkflowError("notification record fields are invalid")
+    if (
+        type(record.get("version")) is not int
+        or record.get("version") != _NOTIFICATION_RECORD_VERSION
+    ):
+        raise WorkflowError(
+            f"notification version must be {_NOTIFICATION_RECORD_VERSION}"
+        )
+    record_expected_snapshot_sha256 = _snapshot_hash(
+        record.get("expected_snapshot_sha256"),
+        "notification expected_snapshot_sha256",
+        allow_none=True,
+    )
+    record_previous_event_id = _snapshot_hash(
+        record.get("previous_event_id"),
+        "notification previous_event_id",
+        allow_none=True,
+    )
     expected = {
         "event_id": event_id,
         "target_id": target_id,
+        "previous_event_id": previous_event_id,
+        "expected_snapshot_sha256": expected_snapshot_sha256,
         "sha256": sha256,
         "destination": destination,
     }
     for field, expected_value in expected.items():
         if record.get(field) != expected_value:
             raise WorkflowError(f"notification {field} does not match the event")
+    if record_expected_snapshot_sha256 != expected_snapshot_sha256:
+        raise WorkflowError("notification expected_snapshot_sha256 is invalid")
+    if record_previous_event_id != previous_event_id:
+        raise WorkflowError("notification previous_event_id is invalid")
     message = _require_string(record.get("message"), "notification message")
     status = _require_string(record.get("status"), "notification status")
     if status not in _NOTIFICATION_STATUSES:
@@ -949,9 +1252,11 @@ def _validate_notification(
     )
     updated_at = _require_string(record.get("updated_at"), "notification updated_at")
     return {
-        "version": 1,
+        "version": _NOTIFICATION_RECORD_VERSION,
         "event_id": event_id,
         "target_id": target_id,
+        "previous_event_id": previous_event_id,
+        "expected_snapshot_sha256": expected_snapshot_sha256,
         "sha256": sha256,
         "destination": destination,
         "message": message,
@@ -965,21 +1270,49 @@ def _validate_notification(
 def _validate_target_claim(value: object) -> TargetClaim:
     """Validate the exact schema stored by the local target-claim backend."""
     claim = _require_mapping(value, "target claim")
+    if frozenset(claim) in {
+        _LEGACY_TARGET_CLAIM_FIELDS,
+        _LEGACY_PROTOCOL1_TARGET_CLAIM_FIELDS,
+    }:
+        raise WorkflowError("legacy target claim requires manual reconciliation")
     if frozenset(claim) != _TARGET_CLAIM_FIELDS:
         raise WorkflowError("target claim fields are invalid")
-    if type(claim.get("version")) is not int or claim.get("version") != 1:
-        raise WorkflowError("target claim version is invalid")
+    if (
+        type(claim.get("version")) is not int
+        or claim.get("version") != _TARGET_CLAIM_VERSION
+    ):
+        raise WorkflowError(f"target claim version must be {_TARGET_CLAIM_VERSION}")
     target_id = _require_string(claim.get("target_id"), "target claim target_id")
     if not _TARGET_ID_RE.fullmatch(target_id):
         raise WorkflowError("target claim target_id is invalid")
     event_id = _require_string(claim.get("event_id"), "target claim event_id")
+    previous_event_id = _snapshot_hash(
+        claim.get("previous_event_id"),
+        "target claim previous_event_id",
+        allow_none=True,
+    )
+    expected_snapshot_sha256 = _snapshot_hash(
+        claim.get("expected_snapshot_sha256"),
+        "target claim expected_snapshot_sha256",
+        allow_none=True,
+    )
     sha256 = _require_string(claim.get("sha256"), "target claim sha256")
-    if notification_event_id(target_id, sha256) != event_id:
+    if (
+        notification_event_id(
+            target_id,
+            sha256,
+            expected_snapshot_sha256,
+            previous_event_id,
+        )
+        != event_id
+    ):
         raise WorkflowError("target claim event_id does not match")
     return {
-        "version": 1,
+        "version": _TARGET_CLAIM_VERSION,
         "target_id": target_id,
         "event_id": event_id,
+        "previous_event_id": previous_event_id,
+        "expected_snapshot_sha256": expected_snapshot_sha256,
         "sha256": sha256,
     }
 
@@ -988,33 +1321,67 @@ def _validate_local_record(
     value: Mapping[str, object], *, target_id: str, event_id: str
 ) -> dict[str, object]:
     """Validate the exact schema stored by the local notification backend."""
+    if frozenset(value) in {
+        _LEGACY_NOTIFICATION_FIELDS,
+        _LEGACY_PROTOCOL2_NOTIFICATION_FIELDS,
+    }:
+        raise WorkflowError("legacy notification record requires manual reconciliation")
     if frozenset(value) != _NOTIFICATION_FIELDS:
         raise WorkflowError("notification record fields are invalid")
     record_target_id = _require_string(value.get("target_id"), "target_id")
     record_sha256 = _require_string(value.get("sha256"), "sha256")
+    previous_event_id = _snapshot_hash(
+        value.get("previous_event_id"),
+        "notification previous_event_id",
+        allow_none=True,
+    )
+    expected_snapshot_sha256 = _snapshot_hash(
+        value.get("expected_snapshot_sha256"),
+        "notification expected_snapshot_sha256",
+        allow_none=True,
+    )
     if record_target_id != target_id:
         raise WorkflowError("notification target_id does not match the event")
     if not _SHA256_RE.fullmatch(record_sha256):
         raise WorkflowError("notification sha256 is invalid")
-    if notification_event_id(target_id, record_sha256) != event_id:
+    if (
+        notification_event_id(
+            target_id,
+            record_sha256,
+            expected_snapshot_sha256,
+            previous_event_id,
+        )
+        != event_id
+    ):
         raise WorkflowError("notification event_id does not match the event")
     _validate_notification(
         value,
         target_id=target_id,
         sha256=record_sha256,
         event_id=event_id,
+        previous_event_id=previous_event_id,
+        expected_snapshot_sha256=expected_snapshot_sha256,
         destination=_require_string(value.get("destination"), "destination"),
     )
     return dict(value)
 
 
 def _new_notification(
-    *, target_id: str, sha256: str, event_id: str, destination: str, message: str
+    *,
+    target_id: str,
+    sha256: str,
+    event_id: str,
+    previous_event_id: str | None,
+    expected_snapshot_sha256: str | None,
+    destination: str,
+    message: str,
 ) -> NotificationRecord:
     return {
-        "version": 1,
+        "version": _NOTIFICATION_RECORD_VERSION,
         "event_id": event_id,
         "target_id": target_id,
+        "previous_event_id": previous_event_id,
+        "expected_snapshot_sha256": expected_snapshot_sha256,
         "sha256": sha256,
         "destination": destination,
         "message": message,
@@ -1075,6 +1442,8 @@ def _strict_notification(
     target_id: str,
     sha256: str,
     event_id: str,
+    previous_event_id: str | None,
+    expected_snapshot_sha256: str | None,
     destination: str | None = None,
 ) -> dict[str, object]:
     record = _require_mapping(value, field)
@@ -1090,22 +1459,54 @@ def _strict_notification(
         target_id=target_id,
         sha256=sha256,
         event_id=event_id,
+        previous_event_id=previous_event_id,
+        expected_snapshot_sha256=expected_snapshot_sha256,
         destination=record_destination,
     )
     return dict(record)
+
+
+def local_notification_state(
+    payload: Mapping[str, object], runtime_dir: str | Path
+) -> dict[str, object]:
+    """Read the durable previous-event cursor for one local target."""
+    if frozenset(payload) != _LOCAL_STATE_FIELDS:
+        raise WorkflowError("local notification state request fields are invalid")
+    if (
+        type(payload.get("protocol_version")) is not int
+        or payload.get("protocol_version") != _NOTIFICATION_PROTOCOL_VERSION
+    ):
+        raise WorkflowError(
+            f"protocol_version must be {_NOTIFICATION_PROTOCOL_VERSION}"
+        )
+    if payload.get("action") != "read_notification_state":
+        raise WorkflowError("action must be read_notification_state")
+    target_id = _require_string(payload.get("target_id"), "target_id")
+    if not _TARGET_ID_RE.fullmatch(target_id):
+        raise WorkflowError("invalid_target_id")
+    previous_event_id = LocalNotificationStore(
+        runtime_dir, target_id
+    ).read_notification_state()
+    return _protocol_response(
+        "notification_state_read",
+        target_id=target_id,
+        previous_event_id=previous_event_id,
+    )
 
 
 def local_notification_cas(
     payload: Mapping[str, object], runtime_dir: str | Path
 ) -> dict[str, object]:
     """Apply one protocol CAS in the local durable notification store."""
-    if frozenset(payload) not in {_LOCAL_CAS_FIELDS, _LOCAL_CAS_LEGACY_FIELDS}:
+    if frozenset(payload) != _LOCAL_CAS_FIELDS:
         raise WorkflowError("local CAS request fields are invalid")
     if (
         type(payload.get("protocol_version")) is not int
         or payload.get("protocol_version") != _NOTIFICATION_PROTOCOL_VERSION
     ):
-        raise WorkflowError("protocol_version must be 2")
+        raise WorkflowError(
+            f"protocol_version must be {_NOTIFICATION_PROTOCOL_VERSION}"
+        )
     if payload.get("action") != "compare_and_swap":
         raise WorkflowError("action must be compare_and_swap")
     expected_snapshot_sha256 = _snapshot_hash(
@@ -1120,29 +1521,37 @@ def local_notification_cas(
     raw_replacement = _require_mapping(payload.get("notification"), "notification")
     target_id = _require_string(raw_replacement.get("target_id"), "target_id")
     sha256 = _require_string(raw_replacement.get("sha256"), "sha256")
-    event_id = notification_event_id(target_id, sha256)
+    previous_event_id = _snapshot_hash(
+        raw_replacement.get("previous_event_id"),
+        "notification previous_event_id",
+        allow_none=True,
+    )
+    event_id = notification_event_id(
+        target_id, sha256, expected_snapshot_sha256, previous_event_id
+    )
     replacement = _strict_notification(
         raw_replacement,
         field="notification",
         target_id=target_id,
         sha256=sha256,
         event_id=event_id,
+        previous_event_id=previous_event_id,
+        expected_snapshot_sha256=expected_snapshot_sha256,
     )
-    replacement_destination = _require_string(
-        replacement.get("destination"), "notification destination"
-    )
-
-    raw_expected = payload.get("expected_notification")
-    if raw_expected is None:
+    if payload.get("expected_notification") is None:
         expected = None
     else:
         expected = _strict_notification(
-            raw_expected,
+            payload["expected_notification"],
             field="expected_notification",
             target_id=target_id,
             sha256=sha256,
             event_id=event_id,
-            destination=replacement_destination,
+            previous_event_id=previous_event_id,
+            expected_snapshot_sha256=expected_snapshot_sha256,
+            destination=_require_string(
+                replacement.get("destination"), "notification destination"
+            ),
         )
 
     result = LocalNotificationStore(runtime_dir, target_id).compare_and_swap(
@@ -1152,6 +1561,15 @@ def local_notification_cas(
         expected_snapshot_sha256=expected_snapshot_sha256,
     )
     if not result["applied"]:
+        cursor_conflict = result.get("cursor_conflict")
+        if cursor_conflict is not None:
+            conflict = _require_mapping(cursor_conflict, "cursor conflict")
+            return {
+                "protocol_version": _NOTIFICATION_PROTOCOL_VERSION,
+                "action": "notification_cursor_conflict",
+                "previous_event_id": conflict["current_event_id"],
+                "notification": result["notification"],
+            }
         snapshot_conflict = result.get("snapshot_conflict")
         if snapshot_conflict is not None:
             conflict = _require_mapping(snapshot_conflict, "snapshot conflict")
@@ -1193,7 +1611,9 @@ def local_notification_release(
         type(payload.get("protocol_version")) is not int
         or payload.get("protocol_version") != _NOTIFICATION_PROTOCOL_VERSION
     ):
-        raise WorkflowError("protocol_version must be 2")
+        raise WorkflowError(
+            f"protocol_version must be {_NOTIFICATION_PROTOCOL_VERSION}"
+        )
     if payload.get("action") != "release_target_claim":
         raise WorkflowError("action must be release_target_claim")
     target_id = _require_string(payload.get("target_id"), "target_id")
@@ -1238,7 +1658,7 @@ def local_snapshot_promote(
         type(payload.get("version")) is not int
         or payload.get("version") != _LOCAL_SNAPSHOT_PROTOCOL_VERSION
     ):
-        raise WorkflowError("version must be 1")
+        raise WorkflowError(f"version must be {_LOCAL_SNAPSHOT_PROTOCOL_VERSION}")
     if payload.get("action") != "promote_snapshot":
         raise WorkflowError("action must be promote_snapshot")
     target_id = _require_string(payload.get("target_id"), "target_id")
@@ -1256,9 +1676,6 @@ def local_snapshot_promote(
     claim_event_id = _snapshot_hash(
         raw_claim_event_id, "claim_event_id", allow_none=True
     )
-    expected_event_id = notification_event_id(target_id, candidate_sha256)
-    if claim_event_id is not None and claim_event_id != expected_event_id:
-        raise WorkflowError("claim_event_id does not match candidate_sha256")
     result = LocalNotificationStore(runtime_dir, target_id).promote_snapshot(
         Path(candidate_path),
         expected_sha256=expected_sha256,
@@ -1293,11 +1710,20 @@ def local_snapshot_promote(
 
 def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
     """Advance the durable notification protocol by one verified step."""
-    target_id, sha256, event_id, destination, message = _notification_context(payload)
+    if "expected_snapshot_sha256" not in payload:
+        raise WorkflowError("expected_snapshot_sha256 is required")
+    if "previous_event_id" not in payload:
+        raise WorkflowError("previous_event_id is required")
     expected_snapshot_sha256 = _snapshot_hash(
         payload.get("expected_snapshot_sha256"),
         "expected_snapshot_sha256",
         allow_none=True,
+    )
+    previous_event_id = _snapshot_hash(
+        payload.get("previous_event_id"), "previous_event_id", allow_none=True
+    )
+    target_id, sha256, event_id, destination, message = _notification_context(
+        payload, expected_snapshot_sha256, previous_event_id
     )
     signal = _require_string(payload.get("signal", "start"), "signal")
     raw_record = payload.get("notification")
@@ -1309,6 +1735,8 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
             target_id=target_id,
             sha256=sha256,
             event_id=event_id,
+            previous_event_id=previous_event_id,
+            expected_snapshot_sha256=expected_snapshot_sha256,
             destination=destination,
         )
     )
@@ -1321,6 +1749,8 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
                     target_id=target_id,
                     sha256=sha256,
                     event_id=event_id,
+                    previous_event_id=previous_event_id,
+                    expected_snapshot_sha256=expected_snapshot_sha256,
                     destination=destination,
                     message=message,
                 ),
@@ -1415,6 +1845,7 @@ def _parser() -> argparse.ArgumentParser:
             "validate-targets",
             "change-action",
             "notification-step",
+            "local-notification-state",
             "local-notification-cas",
             "local-notification-release",
             "local-snapshot-promote",
@@ -1439,6 +1870,10 @@ def run(
         return change_action(payload)
     if operation == "notification-step":
         return notification_step(payload)
+    if operation == "local-notification-state":
+        if runtime_dir is None:
+            raise WorkflowError("--runtime-dir is required for local persistence")
+        return local_notification_state(payload, runtime_dir)
     if operation == "local-notification-cas":
         if runtime_dir is None:
             raise WorkflowError("--runtime-dir is required for local persistence")
