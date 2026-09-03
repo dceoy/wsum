@@ -73,11 +73,14 @@ notification protocol without submitting a stale signal or calling Slack.
 If an active target claim remains, the response instead uses
 `action: "notification_state_recovery"` and includes `target_claim` plus its
 matching `notification` record (or `null` after cursor advancement and record
-retirement), plus `recovery_action`. Recover it before fetching or classifying
-a new candidate: `release_target_claim` releases a `pending` failure, or a
-delivered claim whose candidate hash is already canonical; `promote_snapshot`
-means perform the exact delivered promotion using the response's
-runtime-relative `candidate_path` and then release; and
+retirement), plus `recovery_action`. When `recovery_action` is
+`release_target_claim`, it also includes a complete `release_request`; pass that
+request unchanged to `local-notification-release`. Recover it before fetching
+or classifying a new candidate: `release_target_claim` releases a `pending`
+failure, or a delivered claim whose candidate hash is already canonical;
+`promote_snapshot` means perform the exact delivered promotion using the
+response's runtime-relative `candidate_path` and then use the returned
+`release_request`; and
 `manual_reconciliation` means stop when the record is `sending`. Never create a
 new event while the target claim exists.
 

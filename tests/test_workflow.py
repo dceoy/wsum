@@ -1118,6 +1118,13 @@ def test_local_notification_state_surfaces_delivered_claim_after_promotion(
             "sha256": candidate_sha256,
         },
         "notification": delivered,
+        "release_request": {
+            "protocol_version": 3,
+            "action": "release_target_claim",
+            "target_id": "example",
+            "event_id": event_id,
+            "expected_status": "delivered",
+        },
     }
 
     assert _run_local_release(delivered, "delivered", tmp_path)["action"] == (
@@ -1163,6 +1170,13 @@ def test_local_notification_state_surfaces_failed_pending_claim(
         (tmp_path / "notifications" / ".example.claim.json").read_text()
     )
     assert state["notification"] == failed_record
+    assert state["release_request"] == {
+        "protocol_version": 3,
+        "action": "release_target_claim",
+        "target_id": "example",
+        "event_id": failed_record["event_id"],
+        "expected_status": "pending",
+    }
     assert failed_record["status"] == "pending"
 
     assert _run_local_release(failed_record, "pending", tmp_path)["action"] == (
@@ -1548,7 +1562,8 @@ def test_local_notification_release_recovers_after_cursor_advance_and_retirement
         tmp_path / "notifications" / f"{event_id}.json"
     )
 
-    assert _run_local_state(tmp_path) == {
+    state = _run_local_state(tmp_path)
+    assert state == {
         "protocol_version": 3,
         "action": "notification_state_recovery",
         "target_id": "example",
@@ -1558,10 +1573,18 @@ def test_local_notification_release_recovers_after_cursor_advance_and_retirement
             (tmp_path / "notifications" / ".example.claim.json").read_text()
         ),
         "notification": None,
+        "release_request": {
+            "protocol_version": 3,
+            "action": "release_target_claim",
+            "target_id": "example",
+            "event_id": event_id,
+            "expected_status": "delivered",
+        },
     }
-    assert _run_local_release(delivered, "delivered", tmp_path)["action"] == (
-        "target_claim_released"
-    )
+    release_request = _dict_field(state, "release_request")
+    assert workflow.run(
+        "local-notification-release", release_request, runtime_dir=tmp_path
+    )["action"] == ("target_claim_released")
     assert _run_local_state(tmp_path)["previous_event_id"] == event_id
 
 

@@ -433,8 +433,10 @@ class LocalNotificationStore:
             if notification is not None:
                 self._validate_record(notification, event_id)
             candidate_path: str | None = None
+            release_status: str | None = None
             if notification is None or notification["status"] == "pending":
                 recovery_action = "release_target_claim"
+                release_status = "delivered" if notification is None else "pending"
             elif notification["status"] == "sending":
                 recovery_action = "manual_reconciliation"
             else:
@@ -443,6 +445,7 @@ class LocalNotificationStore:
                 snapshot_sha256 = self._snapshot_sha256(snapshot)
                 if snapshot_sha256 == target_claim["sha256"]:
                     recovery_action = "release_target_claim"
+                    release_status = "delivered"
                 elif snapshot_sha256 == target_claim["expected_snapshot_sha256"]:
                     candidate_path = self._find_candidate_by_sha256(
                         target_claim["sha256"]
@@ -456,6 +459,14 @@ class LocalNotificationStore:
                 "target_claim": target_claim,
                 "notification": notification,
             }
+            if release_status is not None:
+                response["release_request"] = {
+                    "protocol_version": _NOTIFICATION_PROTOCOL_VERSION,
+                    "action": "release_target_claim",
+                    "target_id": self._target_id,
+                    "event_id": event_id,
+                    "expected_status": release_status,
+                }
             if candidate_path is not None:
                 response["candidate_path"] = candidate_path
             return response
