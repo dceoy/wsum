@@ -105,10 +105,15 @@ to the helper.
 
 When an active target claim remains, `local-notification-state` returns
 `action: "notification_state_recovery"` with the claim, matching notification
-record, and a `recovery_action`. Release a pending failure, promote an
-unpromoted delivered candidate, or release an already-promoted delivery before
-monitoring; stop for manual reconciliation when the notification is still
-`sending`, and never start a new event while the claim exists.
+record, and a `recovery_action`. For an unpromoted delivered candidate it also
+returns a runtime-relative `candidate_path` selected by matching exactly one
+regular, non-symlinked file under `candidates/` to the claim's candidate hash;
+pass `$runtime-dir/$candidate_path` (or an equivalent absolute path) to
+`local-snapshot-promote`. Release a pending failure, promote an unpromoted
+delivered candidate, or release an already-promoted delivery before monitoring;
+stop for manual reconciliation when the notification is still `sending`, and
+never start a new event while the claim exists. Missing, duplicate, or
+symlinked candidate matches fail closed and leave the claim in place.
 
 Carry the monitor result's `previous_sha256` (using `null` when it is empty) as
 `expected_snapshot_sha256` through the local notification request. Also carry

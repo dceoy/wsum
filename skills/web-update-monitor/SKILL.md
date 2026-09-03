@@ -76,9 +76,17 @@ matching `notification` record (or `null` after cursor advancement and record
 retirement), plus `recovery_action`. Recover it before fetching or classifying
 a new candidate: `release_target_claim` releases a `pending` failure, or a
 delivered claim whose candidate hash is already canonical; `promote_snapshot`
-means perform the exact delivered promotion and then release; and
+means perform the exact delivered promotion using the response's
+runtime-relative `candidate_path` and then release; and
 `manual_reconciliation` means stop when the record is `sending`. Never create a
 new event while the target claim exists.
+
+For an unpromoted delivered claim, `candidate_path` is discovered by matching
+the claim's candidate hash against exactly one regular, non-symlinked file under
+`$RUNTIME_DIR/candidates/`. Invoke `local-snapshot-promote` with
+`--candidate "$RUNTIME_DIR/$candidate_path"` (or an equivalent absolute path),
+not a path retained by an earlier process. Missing, duplicate, or symlinked
+matches are errors; leave the claim in place and fail closed.
 
 For local mode, pass that complete response to the deterministic local backend:
 

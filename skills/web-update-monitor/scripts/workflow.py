@@ -432,6 +432,7 @@ class LocalNotificationStore:
             notification = self._read_record(self._record_path(event_id))
             if notification is not None:
                 self._validate_record(notification, event_id)
+            candidate_path: str | None = None
             if notification is None or notification["status"] == "pending":
                 recovery_action = "release_target_claim"
             elif notification["status"] == "sending":
@@ -443,15 +444,21 @@ class LocalNotificationStore:
                 if snapshot_sha256 == target_claim["sha256"]:
                     recovery_action = "release_target_claim"
                 elif snapshot_sha256 == target_claim["expected_snapshot_sha256"]:
+                    candidate_path = self._find_candidate_by_sha256(
+                        target_claim["sha256"]
+                    )
                     recovery_action = "promote_snapshot"
                 else:
                     raise LocalStoreError("target claim snapshot is inconsistent")
-            return {
+            response: dict[str, object] = {
                 "previous_event_id": previous_event_id,
                 "recovery_action": recovery_action,
                 "target_claim": target_claim,
                 "notification": notification,
             }
+            if candidate_path is not None:
+                response["candidate_path"] = candidate_path
+            return response
 
     def promote_snapshot(
         self,
@@ -596,6 +603,86 @@ class LocalNotificationStore:
         if current == self._snapshots_dir / f"{self._target_id}.txt":
             raise LocalStoreError("candidate snapshot must differ from destination")
         return current
+
+    def _find_candidate_by_sha256(self, candidate_sha256: str) -> str:
+        """Find the unique safe runtime-relative candidate for recovery."""
+        if not _SHA256_RE.fullmatch(candidate_sha256):
+            raise LocalStoreError("candidate snapshot hash is invalid")
+
+        candidates_dir = self._runtime_dir / "candidates"
+        try:
+            info = candidates_dir.lstat()
+        except FileNotFoundError as exc:
+            raise LocalStoreError(
+                "cannot recover candidate snapshot: candidates directory is missing"
+            ) from exc
+        except OSError as exc:
+            raise LocalStoreError(
+                "cannot inspect candidate snapshots directory"
+            ) from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise LocalStoreError(
+                "cannot recover candidate snapshot: candidates directory "
+                "must not be a symlink"
+            )
+        if not stat.S_ISDIR(info.st_mode):
+            raise LocalStoreError(
+                "cannot recover candidate snapshot: candidates path must be a directory"
+            )
+
+        matches: list[Path] = []
+        directories = [candidates_dir]
+        while directories:
+            directory = directories.pop()
+            try:
+                entries = sorted(directory.iterdir(), key=lambda path: path.name)
+            except OSError as exc:
+                raise LocalStoreError(
+                    "cannot inspect candidate snapshots directory"
+                ) from exc
+            for entry in entries:
+                try:
+                    entry_info = entry.lstat()
+                except OSError as exc:
+                    raise LocalStoreError("cannot inspect candidate snapshot") from exc
+                if stat.S_ISLNK(entry_info.st_mode):
+                    raise LocalStoreError(
+                        "cannot recover candidate snapshot: candidates must not "
+                        "contain symlinks"
+                    )
+                if stat.S_ISDIR(entry_info.st_mode):
+                    directories.append(entry)
+                    continue
+                if not stat.S_ISREG(entry_info.st_mode):
+                    continue
+                candidate_bytes = self._read_bytes(
+                    entry,
+                    _MAX_LOCAL_SNAPSHOT_BYTES,
+                    "candidate snapshot",
+                )
+                if candidate_bytes is None:
+                    raise LocalStoreError(
+                        "cannot recover candidate snapshot: candidate disappeared"
+                    )
+                if hashlib.sha256(candidate_bytes).hexdigest() == candidate_sha256:
+                    matches.append(entry)
+
+        if not matches:
+            raise LocalStoreError(
+                "cannot recover candidate snapshot: no candidate matches delivered hash"
+            )
+        if len(matches) > 1:
+            raise LocalStoreError(
+                "cannot recover candidate snapshot: multiple candidates match "
+                "delivered hash"
+            )
+        try:
+            relative = matches[0].relative_to(self._runtime_dir)
+        except ValueError as exc:
+            raise LocalStoreError(
+                "cannot recover candidate snapshot: candidate is outside runtime_dir"
+            ) from exc
+        return relative.as_posix()
 
     def _ensure_snapshots_directory(self) -> None:
         created = False
