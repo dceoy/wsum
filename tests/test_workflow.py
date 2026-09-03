@@ -1237,6 +1237,13 @@ def test_local_notification_state_requests_unpromoted_delivery(
     candidate_path = state["candidate_path"]
     assert candidate_path == "candidates/after.txt"
     assert isinstance(candidate_path, str)
+    assert state["release_request"] == {
+        "protocol_version": 3,
+        "action": "release_target_claim",
+        "target_id": "example",
+        "event_id": delivered["event_id"],
+        "expected_status": "delivered",
+    }
 
     event_id = str(delivered["event_id"])
     assert (
@@ -1252,7 +1259,14 @@ def test_local_notification_state_requests_unpromoted_delivery(
         )["action"]
         == "snapshot_promoted"
     )
-    assert _run_local_state(tmp_path)["recovery_action"] == ("release_target_claim")
+    release_request = _dict_field(state, "release_request")
+    assert (
+        workflow.run(
+            "local-notification-release", release_request, runtime_dir=tmp_path
+        )["action"]
+        == "target_claim_released"
+    )
+    assert _run_local_state(tmp_path)["action"] == "notification_state_read"
 
 
 def test_local_notification_state_recovers_with_duplicate_candidates(

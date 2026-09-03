@@ -451,6 +451,7 @@ class LocalNotificationStore:
                         target_claim["sha256"]
                     )
                     recovery_action = "promote_snapshot"
+                    release_status = "delivered"
                 else:
                     raise LocalStoreError("target claim snapshot is inconsistent")
             response: dict[str, object] = {
