@@ -48,6 +48,11 @@ uv run python skills/web-update-monitor/scripts/workflow.py \
   --candidate .runtime/candidates/example-baseline.txt < promotion-request.json
 ```
 
+Relative `--candidate` paths are resolved from the caller's working directory
+and then checked for containment, regular-file type, and symlink safety under
+`runtime_dir/candidates/`. Thus the example above is valid when run from the
+repository containing `.runtime`.
+
 Notification event IDs scope a notification to one occurrence of a baseline
 transition. The helper hashes `target_id`, the previous event ID (or an empty
 segment), the nullable `expected_snapshot_sha256`, and the candidate `sha256`
@@ -97,6 +102,13 @@ the notification's terminal action and snapshot promotion. Delivered records
 are removed durably during the delivered release after the cursor CAS and before
 the claim is removed; the agent reports only confirmed connector outcomes back
 to the helper.
+
+When an active target claim remains, `local-notification-state` returns
+`action: "notification_state_recovery"` with the claim, matching notification
+record, and a `recovery_action`. Release a pending failure, promote an
+unpromoted delivered candidate, or release an already-promoted delivery before
+monitoring; stop for manual reconciliation when the notification is still
+`sending`, and never start a new event while the claim exists.
 
 Carry the monitor result's `previous_sha256` (using `null` when it is empty) as
 `expected_snapshot_sha256` through the local notification request. Also carry

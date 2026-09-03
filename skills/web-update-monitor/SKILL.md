@@ -70,6 +70,16 @@ notification, or the last completed event ID. Local mode stores that cursor at
 cursor conflict as a state conflict: re-read the cursor and restart the
 notification protocol without submitting a stale signal or calling Slack.
 
+If an active target claim remains, the response instead uses
+`action: "notification_state_recovery"` and includes `target_claim` plus its
+matching `notification` record (or `null` after cursor advancement and record
+retirement), plus `recovery_action`. Recover it before fetching or classifying
+a new candidate: `release_target_claim` releases a `pending` failure, or a
+delivered claim whose candidate hash is already canonical; `promote_snapshot`
+means perform the exact delivered promotion and then release; and
+`manual_reconciliation` means stop when the record is `sending`. Never create a
+new event while the target claim exists.
+
 For local mode, pass that complete response to the deterministic local backend:
 
 ```bash
@@ -111,6 +121,11 @@ expected-baseline compare-and-swap under the same per-target lock as notificatio
 claims. It writes the candidate through a same-directory temporary file, flushes
 and `fsync`s the file, atomically replaces the baseline, `fsync`s the directory,
 and reads the durable snapshot back before returning.
+
+The CLI resolves a relative `--candidate` from the caller's working directory,
+then verifies that it is a regular, non-symlinked file under the runtime's
+`candidates/` directory. Absolute paths are accepted only when they pass the
+same checks.
 
 For a monitor result whose `previous_sha256` is the empty string because no
 baseline existed, pass `expected_sha256: null`.

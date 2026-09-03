@@ -9,6 +9,7 @@ import re
 import stat
 import subprocess  # ruff: ignore[suspicious-subprocess-import] - trusted CLI
 import sys
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -1067,6 +1068,252 @@ def test_local_notification_release_requires_durable_snapshot_promotion(
     assert not claim_path.exists()
 
 
+def test_local_notification_state_surfaces_delivered_claim_after_promotion(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "before\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    delivered, candidate, expected_sha256, candidate_sha256 = (
+        _deliver_local_notification(tmp_path, baseline, "after\n", "after.txt")
+    )
+    event_id = str(delivered["event_id"])
+
+    assert (
+        _run_local_snapshot_promote(
+            _local_snapshot_payload(
+                target_id="example",
+                expected_sha256=expected_sha256,
+                candidate_sha256=candidate_sha256,
+                claim_event_id=event_id,
+            ),
+            candidate,
+            tmp_path,
+        )["action"]
+        == "snapshot_promoted"
+    )
+
+    state = _run_local_state(tmp_path)
+    assert state == {
+        "protocol_version": 3,
+        "action": "notification_state_recovery",
+        "target_id": "example",
+        "previous_event_id": None,
+        "recovery_action": "release_target_claim",
+        "target_claim": {
+            "version": 2,
+            "target_id": "example",
+            "event_id": event_id,
+            "previous_event_id": None,
+            "expected_snapshot_sha256": expected_sha256,
+            "sha256": candidate_sha256,
+        },
+        "notification": delivered,
+    }
+
+    assert _run_local_release(delivered, "delivered", tmp_path)["action"] == (
+        "target_claim_released"
+    )
+    assert _run_local_state(tmp_path) == {
+        "protocol_version": 3,
+        "action": "notification_state_read",
+        "target_id": "example",
+        "previous_event_id": event_id,
+    }
+    assert change_action({"status": "unchanged"}) == {"action": "discard_candidate"}
+
+    next_delivered, _, _, _ = _deliver_local_notification(
+        tmp_path, "after\n", "newer\n", "newer.txt"
+    )
+    assert next_delivered["previous_event_id"] == event_id
+
+
+def test_local_notification_state_surfaces_failed_pending_claim(
+    tmp_path: Path,
+) -> None:
+    first = notification_step(_event_payload())
+    _run_local_cas(first, tmp_path)
+    pending = _record(first)
+    sending = notification_step(
+        _event_payload(notification=pending, signal="pending_persisted")
+    )
+    sending_record = _record(_run_local_cas(sending, tmp_path))
+    failed = notification_step(
+        _event_payload(
+            notification=sending_record,
+            signal="slack_failed",
+            error="timeout",
+        )
+    )
+    failed_record = _record(_run_local_cas(failed, tmp_path))
+
+    state = _run_local_state(tmp_path)
+    assert state["action"] == "notification_state_recovery"
+    assert state["recovery_action"] == "release_target_claim"
+    assert state["target_claim"] == json.loads(
+        (tmp_path / "notifications" / ".example.claim.json").read_text()
+    )
+    assert state["notification"] == failed_record
+    assert failed_record["status"] == "pending"
+
+    assert _run_local_release(failed_record, "pending", tmp_path)["action"] == (
+        "target_claim_released"
+    )
+    assert _run_local_state(tmp_path)["action"] == "notification_state_read"
+    next_start = notification_step(_event_payload(sha256="b" * 64))
+    assert _run_local_cas(next_start, tmp_path)["action"] == (
+        "compare_and_swap_applied"
+    )
+
+
+def test_local_notification_state_requires_manual_reconciliation_for_sending_claim(
+    tmp_path: Path,
+) -> None:
+    first = notification_step(_event_payload())
+    _run_local_cas(first, tmp_path)
+    pending = _record(first)
+    sending = notification_step(
+        _event_payload(notification=pending, signal="pending_persisted")
+    )
+    sending_record = _record(_run_local_cas(sending, tmp_path))
+    event_id = str(sending_record["event_id"])
+    claim_path = tmp_path / "notifications" / ".example.claim.json"
+    record_path = tmp_path / "notifications" / f"{event_id}.json"
+    claim_bytes = claim_path.read_bytes()
+    record_bytes = record_path.read_bytes()
+
+    state = _run_local_state(tmp_path)
+    assert state == {
+        "protocol_version": 3,
+        "action": "notification_state_recovery",
+        "target_id": "example",
+        "previous_event_id": None,
+        "recovery_action": "manual_reconciliation",
+        "target_claim": json.loads(claim_bytes),
+        "notification": sending_record,
+    }
+    assert claim_path.read_bytes() == claim_bytes
+    assert record_path.read_bytes() == record_bytes
+
+
+def test_local_notification_state_requests_unpromoted_delivery(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "before\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    delivered, candidate, expected_sha256, candidate_sha256 = (
+        _deliver_local_notification(tmp_path, baseline, "after\n", "after.txt")
+    )
+
+    state = _run_local_state(tmp_path)
+    assert state["action"] == "notification_state_recovery"
+    assert state["recovery_action"] == "promote_snapshot"
+    assert state["notification"] == delivered
+
+    event_id = str(delivered["event_id"])
+    assert (
+        _run_local_snapshot_promote(
+            _local_snapshot_payload(
+                target_id="example",
+                expected_sha256=expected_sha256,
+                candidate_sha256=candidate_sha256,
+                claim_event_id=event_id,
+            ),
+            candidate,
+            tmp_path,
+        )["action"]
+        == "snapshot_promoted"
+    )
+    assert _run_local_state(tmp_path)["recovery_action"] == ("release_target_claim")
+
+
+def test_local_notification_state_rejects_inconsistent_delivered_claim(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "before\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    _deliver_local_notification(tmp_path, baseline, "after\n", "after.txt")
+    (snapshots_dir / "example.txt").write_text("unexpected\n")
+
+    with pytest.raises(LocalStoreError, match="inconsistent"):
+        _run_local_state(tmp_path)
+
+
+def test_local_snapshot_promote_accepts_readme_cwd_relative_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_dir = tmp_path / ".runtime"
+    runtime_dir.mkdir()
+    snapshots_dir = runtime_dir / "snapshots"
+    snapshots_dir.mkdir()
+    candidate, candidate_sha256 = _write_candidate(
+        runtime_dir, "candidate.txt", "next\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        StringIO(
+            json.dumps(
+                _local_snapshot_payload(
+                    target_id="example",
+                    expected_sha256=None,
+                    candidate_sha256=candidate_sha256,
+                )
+            )
+        ),
+    )
+
+    assert (
+        workflow.main([
+            "local-snapshot-promote",
+            "--runtime-dir",
+            ".runtime",
+            "--candidate",
+            ".runtime/candidates/candidate.txt",
+        ])
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result == {
+        "action": "snapshot_promoted",
+        "candidate_sha256": candidate_sha256,
+        "previous_sha256": None,
+        "target_id": "example",
+        "version": 2,
+    }
+    assert candidate == runtime_dir / "candidates" / "candidate.txt"
+
+
+def test_local_snapshot_promote_rejects_cwd_relative_candidate_outside_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_dir = tmp_path / ".runtime"
+    (runtime_dir / "candidates").mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("next\n")
+    candidate_sha256 = hashlib.sha256(b"next\n").hexdigest()
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(LocalStoreError, match="inside runtime_dir"):
+        _run_local_snapshot_promote(
+            _local_snapshot_payload(
+                target_id="example",
+                expected_sha256=None,
+                candidate_sha256=candidate_sha256,
+            ),
+            Path("outside.txt"),
+            runtime_dir,
+        )
+
+
 def test_local_notification_recurring_transition_sends_after_retirement(
     tmp_path: Path,
 ) -> None:
@@ -1218,6 +1465,17 @@ def test_local_notification_release_recovers_after_cursor_advance_and_retirement
         tmp_path / "notifications" / f"{event_id}.json"
     )
 
+    assert _run_local_state(tmp_path) == {
+        "protocol_version": 3,
+        "action": "notification_state_recovery",
+        "target_id": "example",
+        "previous_event_id": event_id,
+        "recovery_action": "release_target_claim",
+        "target_claim": json.loads(
+            (tmp_path / "notifications" / ".example.claim.json").read_text()
+        ),
+        "notification": None,
+    }
     assert _run_local_release(delivered, "delivered", tmp_path)["action"] == (
         "target_claim_released"
     )

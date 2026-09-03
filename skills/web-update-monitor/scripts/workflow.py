@@ -416,9 +416,42 @@ class LocalNotificationStore:
 
     def read_notification_state(self) -> str | None:
         """Read the last completed notification event under the target lock."""
+        state = self.read_notification_state_details()
+        return cast("str | None", state["previous_event_id"])
+
+    def read_notification_state_details(self) -> dict[str, object]:
+        """Read the cursor and any active target claim under the target lock."""
         self._ensure_notifications_directory()
         with self._locked():
-            return self._read_notification_state_locked()
+            previous_event_id = self._read_notification_state_locked()
+            target_claim = self._load_target_claim()
+            if target_claim is None:
+                return {"previous_event_id": previous_event_id}
+
+            event_id = _require_string(target_claim["event_id"], "event_id")
+            notification = self._read_record(self._record_path(event_id))
+            if notification is not None:
+                self._validate_record(notification, event_id)
+            if notification is None or notification["status"] == "pending":
+                recovery_action = "release_target_claim"
+            elif notification["status"] == "sending":
+                recovery_action = "manual_reconciliation"
+            else:
+                self._validate_snapshots_directory()
+                snapshot = self._read_snapshot(self._snapshot_path(), "local snapshot")
+                snapshot_sha256 = self._snapshot_sha256(snapshot)
+                if snapshot_sha256 == target_claim["sha256"]:
+                    recovery_action = "release_target_claim"
+                elif snapshot_sha256 == target_claim["expected_snapshot_sha256"]:
+                    recovery_action = "promote_snapshot"
+                else:
+                    raise LocalStoreError("target claim snapshot is inconsistent")
+            return {
+                "previous_event_id": previous_event_id,
+                "recovery_action": recovery_action,
+                "target_claim": target_claim,
+                "notification": notification,
+            }
 
     def promote_snapshot(
         self,
@@ -524,7 +557,7 @@ class LocalNotificationStore:
     def _candidate_path(self, candidate_path: Path) -> Path:
         base = self._runtime_dir.absolute()
         raw_path = Path(candidate_path)
-        path = raw_path if raw_path.is_absolute() else base / raw_path
+        path = raw_path if raw_path.is_absolute() else Path.cwd() / raw_path
         path = path.absolute()
         try:
             relative = path.relative_to(base)
@@ -618,7 +651,7 @@ class LocalNotificationStore:
                 None,
             )
             if matching_record is None and (
-                cursor is None or cursor != target_claim["event_id"]
+                cursor is None or cursor["last_event_id"] != target_claim["event_id"]
             ):
                 raise LocalStoreError("target claim notification is missing")
         if cursor is None:
@@ -1484,13 +1517,15 @@ def local_notification_state(
     target_id = _require_string(payload.get("target_id"), "target_id")
     if not _TARGET_ID_RE.fullmatch(target_id):
         raise WorkflowError("invalid_target_id")
-    previous_event_id = LocalNotificationStore(
+    state = LocalNotificationStore(
         runtime_dir, target_id
-    ).read_notification_state()
+    ).read_notification_state_details()
     return _protocol_response(
-        "notification_state_read",
+        "notification_state_recovery"
+        if "target_claim" in state
+        else "notification_state_read",
         target_id=target_id,
-        previous_event_id=previous_event_id,
+        **state,
     )
 
 
