@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -45,6 +46,7 @@ def _event_payload(**overrides: object) -> dict[str, object]:
         "message": "changed",
         "signal": "start",
         "notification": None,
+        "expected_snapshot_sha256": None,
     }
     payload.update(overrides)
     return payload
@@ -66,6 +68,7 @@ def _local_cas_payload(result: Mapping[str, object]) -> dict[str, object]:
         "action": result["action"],
         "expected_notification": result["expected_notification"],
         "notification": result["notification"],
+        "expected_snapshot_sha256": result["expected_snapshot_sha256"],
         "next_signal": result["next_signal"],
     }
 
@@ -91,6 +94,66 @@ def _run_local_release(
         "expected_status": expected_status,
     }
     return workflow.run("local-notification-release", payload, runtime_dir=runtime_dir)
+
+
+def _write_candidate(runtime_dir: Path, name: str, content: str) -> tuple[Path, str]:
+    candidates_dir = runtime_dir / "candidates"
+    candidates_dir.mkdir(exist_ok=True)
+    candidate = candidates_dir / name
+    candidate.write_text(content)
+    return candidate, hashlib.sha256(content.encode()).hexdigest()
+
+
+def _local_snapshot_payload(
+    *,
+    target_id: str,
+    expected_sha256: str | None,
+    candidate_sha256: str,
+    claim_event_id: str | None = None,
+) -> dict[str, object]:
+    return {
+        "version": 1,
+        "action": "promote_snapshot",
+        "target_id": target_id,
+        "expected_sha256": expected_sha256,
+        "candidate_sha256": candidate_sha256,
+        "claim_event_id": claim_event_id,
+    }
+
+
+def _run_local_snapshot_promote(
+    payload: Mapping[str, object], candidate: Path, runtime_dir: Path
+) -> dict[str, object]:
+    return workflow.run(
+        "local-snapshot-promote",
+        payload,
+        runtime_dir=runtime_dir,
+        candidate_path=candidate,
+    )
+
+
+def _create_sending_claim(
+    runtime_dir: Path,
+    sha256: str,
+    expected_snapshot_sha256: str | None = None,
+) -> dict[str, object]:
+    first = notification_step(
+        _event_payload(
+            sha256=sha256,
+            expected_snapshot_sha256=expected_snapshot_sha256,
+        )
+    )
+    _run_local_cas(first, runtime_dir)
+    pending = _record(first)
+    claim = notification_step(
+        _event_payload(
+            notification=pending,
+            sha256=sha256,
+            signal="pending_persisted",
+            expected_snapshot_sha256=expected_snapshot_sha256,
+        )
+    )
+    return _record(_run_local_cas(claim, runtime_dir))
 
 
 def test_validate_targets_normalizes_defaults() -> None:
@@ -362,6 +425,53 @@ def test_local_notification_cas_conflict_returns_current_record(
         json.loads((tmp_path / "notifications" / f"{event_id}.json").read_text())
         == winner
     )
+
+
+def test_local_notification_cas_rejects_stale_baseline_before_sending(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "previous\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    expected_sha256 = hashlib.sha256(baseline.encode()).hexdigest()
+    first = notification_step(
+        _event_payload(
+            sha256="a" * 64,
+            expected_snapshot_sha256=expected_sha256,
+        )
+    )
+    pending_result = _run_local_cas(first, tmp_path)
+    pending = _record(pending_result)
+    candidate, candidate_sha256 = _write_candidate(tmp_path, "candidate.txt", "newer\n")
+    promoted = _run_local_snapshot_promote(
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=expected_sha256,
+            candidate_sha256=candidate_sha256,
+        ),
+        candidate,
+        tmp_path,
+    )
+    assert promoted["action"] == "snapshot_promoted"
+
+    sending = notification_step(
+        _event_payload(
+            notification=pending,
+            sha256="a" * 64,
+            signal="pending_persisted",
+            expected_snapshot_sha256=expected_sha256,
+        )
+    )
+
+    assert _run_local_cas(sending, tmp_path) == {
+        "protocol_version": 2,
+        "action": "snapshot_compare_and_swap_conflict",
+        "expected_snapshot_sha256": expected_sha256,
+        "current_snapshot_sha256": candidate_sha256,
+        "notification": pending,
+    }
+    assert not (tmp_path / "notifications" / ".example.claim.json").exists()
 
 
 def test_local_notification_cas_rejects_present_record_for_absent_expected(
@@ -683,6 +793,480 @@ def test_local_notification_release_rejects_in_flight_claim(
 
     with pytest.raises(LocalStoreError, match="not ready to release"):
         _run_local_release(sending, "delivered", tmp_path)
+
+
+@pytest.mark.parametrize(
+    "baseline",
+    [None, "previous\n"],
+    ids=["new-baseline", "non-material-change"],
+)
+def test_local_snapshot_promote_uses_expected_baseline_cas(
+    tmp_path: Path, baseline: str | None
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    if baseline is not None:
+        (snapshots_dir / "example.txt").write_text(baseline)
+    candidate, candidate_sha256 = _write_candidate(tmp_path, "candidate.txt", "next\n")
+    expected_sha256 = (
+        None if baseline is None else hashlib.sha256(baseline.encode()).hexdigest()
+    )
+
+    result = _run_local_snapshot_promote(
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=expected_sha256,
+            candidate_sha256=candidate_sha256,
+        ),
+        candidate,
+        tmp_path,
+    )
+
+    assert result == {
+        "version": 1,
+        "action": "snapshot_promoted",
+        "target_id": "example",
+        "previous_sha256": expected_sha256,
+        "candidate_sha256": candidate_sha256,
+    }
+    assert (snapshots_dir / "example.txt").read_text() == "next\n"
+
+
+def test_local_snapshot_promote_blocks_active_claim(tmp_path: Path) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "previous\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    sending = _create_sending_claim(
+        tmp_path,
+        "a" * 64,
+        hashlib.sha256(baseline.encode()).hexdigest(),
+    )
+    candidate, candidate_sha256 = _write_candidate(tmp_path, "candidate.txt", "next\n")
+
+    result = _run_local_snapshot_promote(
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=hashlib.sha256(baseline.encode()).hexdigest(),
+            candidate_sha256=candidate_sha256,
+        ),
+        candidate,
+        tmp_path,
+    )
+
+    assert result == {
+        "version": 1,
+        "action": "target_claim_conflict",
+        "current_sha256": hashlib.sha256(baseline.encode()).hexdigest(),
+        "target_claim": {
+            "version": 1,
+            "target_id": "example",
+            "event_id": sending["event_id"],
+            "sha256": "a" * 64,
+        },
+    }
+    assert (snapshots_dir / "example.txt").read_text() == baseline
+
+
+def test_local_snapshot_promote_requires_delivered_claim(tmp_path: Path) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    (snapshots_dir / "example.txt").write_text("previous\n")
+    candidate, candidate_sha256 = _write_candidate(tmp_path, "candidate.txt", "next\n")
+    sending = _create_sending_claim(
+        tmp_path,
+        candidate_sha256,
+        hashlib.sha256(b"previous\n").hexdigest(),
+    )
+
+    with pytest.raises(LocalStoreError, match="not delivered"):
+        _run_local_snapshot_promote(
+            _local_snapshot_payload(
+                target_id="example",
+                expected_sha256=hashlib.sha256(b"previous\n").hexdigest(),
+                candidate_sha256=candidate_sha256,
+                claim_event_id=str(sending["event_id"]),
+            ),
+            candidate,
+            tmp_path,
+        )
+
+
+def test_local_snapshot_promote_accepts_delivered_claim_until_release(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "previous\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    candidate, candidate_sha256 = _write_candidate(tmp_path, "candidate.txt", "next\n")
+    sending = _create_sending_claim(
+        tmp_path,
+        candidate_sha256,
+        hashlib.sha256(baseline.encode()).hexdigest(),
+    )
+    delivered = notification_step(
+        _event_payload(
+            notification=sending,
+            sha256=candidate_sha256,
+            signal="slack_delivered",
+        )
+    )
+    delivered_result = _run_local_cas(delivered, tmp_path)
+    delivered_record = _record(delivered_result)
+
+    result = _run_local_snapshot_promote(
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=hashlib.sha256(baseline.encode()).hexdigest(),
+            candidate_sha256=candidate_sha256,
+            claim_event_id=str(delivered_record["event_id"]),
+        ),
+        candidate,
+        tmp_path,
+    )
+
+    assert result["action"] == "snapshot_promoted"
+    assert (snapshots_dir / "example.txt").read_text() == "next\n"
+    assert (tmp_path / "notifications" / ".example.claim.json").exists()
+    assert _run_local_release(delivered_record, "delivered", tmp_path)["action"] == (
+        "target_claim_released"
+    )
+
+
+def test_local_snapshot_promote_rejects_stale_candidate_after_newer_promotion(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "previous\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    newer, newer_sha256 = _write_candidate(tmp_path, "newer.txt", "newer\n")
+    older, older_sha256 = _write_candidate(tmp_path, "older.txt", "older\n")
+    expected_sha256 = hashlib.sha256(baseline.encode()).hexdigest()
+
+    first = _run_local_snapshot_promote(
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=expected_sha256,
+            candidate_sha256=newer_sha256,
+        ),
+        newer,
+        tmp_path,
+    )
+    second = _run_local_snapshot_promote(
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=expected_sha256,
+            candidate_sha256=older_sha256,
+        ),
+        older,
+        tmp_path,
+    )
+
+    assert first["action"] == "snapshot_promoted"
+    assert second == {
+        "version": 1,
+        "action": "snapshot_compare_and_swap_conflict",
+        "expected_sha256": expected_sha256,
+        "current_sha256": newer_sha256,
+    }
+    assert (snapshots_dir / "example.txt").read_text() == "newer\n"
+
+
+def test_local_snapshot_promote_reports_already_promoted_snapshot(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "same\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    candidate, candidate_sha256 = _write_candidate(tmp_path, "candidate.txt", baseline)
+
+    result = _run_local_snapshot_promote(
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=hashlib.sha256(b"previous\n").hexdigest(),
+            candidate_sha256=candidate_sha256,
+        ),
+        candidate,
+        tmp_path,
+    )
+
+    assert result == {
+        "version": 1,
+        "action": "snapshot_already_promoted",
+        "target_id": "example",
+        "previous_sha256": candidate_sha256,
+        "candidate_sha256": candidate_sha256,
+    }
+
+
+def test_local_snapshot_promote_rejects_missing_claim_for_delivered_path(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    (snapshots_dir / "example.txt").write_text("previous\n")
+    candidate, candidate_sha256 = _write_candidate(tmp_path, "candidate.txt", "next\n")
+
+    result = _run_local_snapshot_promote(
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=hashlib.sha256(b"previous\n").hexdigest(),
+            candidate_sha256=candidate_sha256,
+            claim_event_id=workflow.notification_event_id("example", candidate_sha256),
+        ),
+        candidate,
+        tmp_path,
+    )
+
+    assert result == {
+        "version": 1,
+        "action": "target_claim_conflict",
+        "current_sha256": hashlib.sha256(b"previous\n").hexdigest(),
+        "target_claim": None,
+    }
+    assert (snapshots_dir / "example.txt").read_text() == "previous\n"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("version", 2, "version"),
+        ("action", "copy_snapshot", "action"),
+        ("expected_sha256", "invalid", "expected_sha256"),
+        ("candidate_sha256", "invalid", "candidate_sha256"),
+        ("claim_event_id", "0" * 64, "claim_event_id"),
+    ],
+    ids=["wrong-version", "wrong-action", "bad-expected", "bad-candidate", "bad-claim"],
+)
+def test_local_snapshot_promote_rejects_invalid_request(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    candidate, candidate_sha256 = _write_candidate(tmp_path, "candidate.txt", "next\n")
+    payload = _local_snapshot_payload(
+        target_id="example",
+        expected_sha256=None,
+        candidate_sha256=candidate_sha256,
+    )
+    payload[field] = value
+
+    with pytest.raises(WorkflowError, match=message):
+        _run_local_snapshot_promote(payload, candidate, tmp_path)
+
+
+def test_local_snapshot_promote_rejects_unsafe_candidate(tmp_path: Path) -> None:
+    candidates_dir = tmp_path / "candidates"
+    candidates_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("next\n")
+    candidate = candidates_dir / "candidate.txt"
+    candidate.symlink_to(outside)
+    candidate_sha256 = hashlib.sha256(b"next\n").hexdigest()
+
+    with pytest.raises(LocalStoreError, match="must not be a symlink"):
+        _run_local_snapshot_promote(
+            _local_snapshot_payload(
+                target_id="example",
+                expected_sha256=None,
+                candidate_sha256=candidate_sha256,
+            ),
+            candidate,
+            tmp_path,
+        )
+
+
+def test_local_snapshot_promote_rejects_nonregular_candidate(tmp_path: Path) -> None:
+    candidates_dir = tmp_path / "candidates"
+    candidates_dir.mkdir()
+    candidate = candidates_dir / "candidate.txt"
+    candidate.mkdir()
+
+    with pytest.raises(LocalStoreError, match="regular file"):
+        _run_local_snapshot_promote(
+            _local_snapshot_payload(
+                target_id="example",
+                expected_sha256=None,
+                candidate_sha256="a" * 64,
+            ),
+            candidate,
+            tmp_path,
+        )
+
+
+def test_local_snapshot_promote_rejects_invalid_snapshot_encoding(
+    tmp_path: Path,
+) -> None:
+    candidate, candidate_sha256 = _write_candidate(tmp_path, "candidate.txt", "next\n")
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    (snapshots_dir / "example.txt").write_bytes(b"\xff")
+
+    with pytest.raises(LocalStoreError, match="UTF-8"):
+        _run_local_snapshot_promote(
+            _local_snapshot_payload(
+                target_id="example",
+                expected_sha256=hashlib.sha256(b"\xff").hexdigest(),
+                candidate_sha256=candidate_sha256,
+            ),
+            candidate,
+            tmp_path,
+        )
+
+
+def test_local_snapshot_promote_rejects_candidate_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    candidate, _ = _write_candidate(tmp_path, "candidate.txt", "next\n")
+
+    with pytest.raises(LocalStoreError, match="hash mismatch"):
+        _run_local_snapshot_promote(
+            _local_snapshot_payload(
+                target_id="example",
+                expected_sha256=None,
+                candidate_sha256="0" * 64,
+            ),
+            candidate,
+            tmp_path,
+        )
+
+
+def test_local_snapshot_promote_preserves_baseline_on_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    notifications_dir = tmp_path / "notifications"
+    notifications_dir.mkdir()
+    baseline = "previous\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    candidate, candidate_sha256 = _write_candidate(tmp_path, "candidate.txt", "next\n")
+
+    def fail_fsync(_: int) -> None:
+        raise OSError
+
+    monkeypatch.setattr(workflow.os, "fsync", fail_fsync)
+    with pytest.raises(LocalStoreError, match="temporary snapshot"):
+        _run_local_snapshot_promote(
+            _local_snapshot_payload(
+                target_id="example",
+                expected_sha256=hashlib.sha256(baseline.encode()).hexdigest(),
+                candidate_sha256=candidate_sha256,
+            ),
+            candidate,
+            tmp_path,
+        )
+
+    assert (snapshots_dir / "example.txt").read_text() == baseline
+
+
+def test_local_snapshot_promote_keeps_claim_after_directory_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "previous\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    candidate, candidate_sha256 = _write_candidate(tmp_path, "candidate.txt", "next\n")
+    sending = _create_sending_claim(
+        tmp_path,
+        candidate_sha256,
+        hashlib.sha256(baseline.encode()).hexdigest(),
+    )
+    delivered = notification_step(
+        _event_payload(
+            notification=sending,
+            sha256=candidate_sha256,
+            signal="slack_delivered",
+        )
+    )
+    delivered_result = _run_local_cas(delivered, tmp_path)
+    delivered_record = _record(delivered_result)
+
+    def fail_directory_fsync(_: Path) -> None:
+        raise OSError
+
+    monkeypatch.setattr(
+        LocalNotificationStore,
+        "_fsync_directory",
+        staticmethod(fail_directory_fsync),
+    )
+    with pytest.raises(LocalStoreError, match="durably write snapshot"):
+        _run_local_snapshot_promote(
+            _local_snapshot_payload(
+                target_id="example",
+                expected_sha256=hashlib.sha256(baseline.encode()).hexdigest(),
+                candidate_sha256=candidate_sha256,
+                claim_event_id=str(delivered_record["event_id"]),
+            ),
+            candidate,
+            tmp_path,
+        )
+
+    assert (snapshots_dir / "example.txt").read_text() == "next\n"
+    assert (tmp_path / "notifications" / ".example.claim.json").exists()
+
+
+def test_local_snapshot_promote_serializes_same_baseline_processes(
+    tmp_path: Path,
+) -> None:
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    baseline = "previous\n"
+    (snapshots_dir / "example.txt").write_text(baseline)
+    first_candidate, first_sha256 = _write_candidate(tmp_path, "first.txt", "first\n")
+    second_candidate, second_sha256 = _write_candidate(
+        tmp_path, "second.txt", "second\n"
+    )
+    payloads = [
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=hashlib.sha256(baseline.encode()).hexdigest(),
+            candidate_sha256=first_sha256,
+        ),
+        _local_snapshot_payload(
+            target_id="example",
+            expected_sha256=hashlib.sha256(baseline.encode()).hexdigest(),
+            candidate_sha256=second_sha256,
+        ),
+    ]
+    command = [
+        sys.executable,
+        str(Path(workflow.__file__).resolve()),
+        "local-snapshot-promote",
+        "--runtime-dir",
+        str(tmp_path),
+    ]
+    processes = [
+        subprocess.Popen(  # ruff: ignore[subprocess-without-shell-equals-true]
+            [*command, "--candidate", str(candidate)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            text=True,
+        )
+        for candidate in (first_candidate, second_candidate)
+    ]
+    outputs = [
+        process.communicate(json.dumps(payload), timeout=10)
+        for process, payload in zip(processes, payloads, strict=True)
+    ]
+
+    assert [process.returncode for process in processes] == [0, 0]
+    results = [json.loads(stdout) for stdout, _ in outputs]
+    assert {result["action"] for result in results} == {
+        "snapshot_promoted",
+        "snapshot_compare_and_swap_conflict",
+    }
+    winner = next(
+        result for result in results if result["action"] == "snapshot_promoted"
+    )
+    winner_body = (
+        "first\n" if winner["candidate_sha256"] == first_sha256 else "second\n"
+    )
+    assert (snapshots_dir / "example.txt").read_text() == winner_body
 
 
 def test_local_notification_cas_serializes_separate_processes(tmp_path: Path) -> None:

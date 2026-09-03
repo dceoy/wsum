@@ -47,8 +47,10 @@ _LOCAL_CAS_FIELDS = frozenset({
     "action",
     "expected_notification",
     "notification",
+    "expected_snapshot_sha256",
     "next_signal",
 })
+_LOCAL_CAS_LEGACY_FIELDS = _LOCAL_CAS_FIELDS - {"expected_snapshot_sha256"}
 _LOCAL_CAS_SIGNALS = frozenset({
     "pending_persisted",
     "sending_claimed",
@@ -62,6 +64,14 @@ _LOCAL_RELEASE_FIELDS = frozenset({
     "event_id",
     "expected_status",
 })
+_LOCAL_SNAPSHOT_FIELDS = frozenset({
+    "version",
+    "action",
+    "target_id",
+    "expected_sha256",
+    "candidate_sha256",
+    "claim_event_id",
+})
 _TARGET_CLAIM_FIELDS = frozenset({
     "version",
     "target_id",
@@ -70,6 +80,9 @@ _TARGET_CLAIM_FIELDS = frozenset({
 })
 _RELEASEABLE_NOTIFICATION_STATUSES = {"pending", "delivered"}
 _MAX_LOCAL_RECORD_BYTES = 1024 * 1024
+_MAX_LOCAL_SNAPSHOT_BYTES = 40 * 1024 * 1024
+_LOCAL_SNAPSHOT_PROTOCOL_VERSION = 1
+_MIN_CANDIDATE_PATH_PARTS = 2
 
 
 class WorkflowError(RuntimeError):
@@ -229,6 +242,17 @@ def notification_event_id(target_id: str, sha256: str) -> str:
     return hashlib.sha256(f"{target_id}\0{sha256}".encode()).hexdigest()
 
 
+def _snapshot_hash(
+    value: object, field: str, *, allow_none: bool = False
+) -> str | None:
+    if value is None and allow_none:
+        return None
+    sha256 = _require_string(value, field)
+    if not _SHA256_RE.fullmatch(sha256):
+        raise WorkflowError(f"{field} must be a lowercase hexadecimal SHA-256")
+    return sha256
+
+
 def _timestamp() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -245,12 +269,15 @@ class LocalNotificationStore:
         self._notifications_dir = self._runtime_dir / "notifications"
         self._lock_path = self._notifications_dir / f".{target_id}.lock"
         self._claim_path = self._notifications_dir / f".{target_id}.claim.json"
+        self._snapshots_dir = self._runtime_dir / "snapshots"
 
     def compare_and_swap(
         self,
         event_id: str,
         expected: Mapping[str, object] | None,
         replacement: Mapping[str, object],
+        *,
+        expected_snapshot_sha256: str | None = None,
     ) -> dict[str, object]:
         """Apply an exact replacement and return the durable read-back."""
         path = self._record_path(event_id)
@@ -273,6 +300,21 @@ class LocalNotificationStore:
                 }
             if current != expected_record:
                 return {"applied": False, "notification": current}
+            if replacement_record["status"] == "sending":
+                self._validate_snapshots_directory()
+                current_snapshot = self._read_snapshot(
+                    self._snapshot_path(), "local snapshot"
+                )
+                current_snapshot_sha256 = self._snapshot_sha256(current_snapshot)
+                if current_snapshot_sha256 != expected_snapshot_sha256:
+                    return {
+                        "applied": False,
+                        "notification": current,
+                        "snapshot_conflict": {
+                            "expected_sha256": expected_snapshot_sha256,
+                            "current_sha256": current_snapshot_sha256,
+                        },
+                    }
             if replacement_record["status"] == "sending" and target_claim is None:
                 self._write_record(
                     self._claim_path,
@@ -294,11 +336,180 @@ class LocalNotificationStore:
                 self._validate_record(record, event_id)
             return record
 
+    def promote_snapshot(
+        self,
+        candidate_path: Path,
+        *,
+        expected_sha256: str | None,
+        candidate_sha256: str,
+        claim_event_id: str | None,
+    ) -> dict[str, object]:
+        """Promote a candidate snapshot with target ownership and a baseline CAS."""
+        if not _SHA256_RE.fullmatch(candidate_sha256):
+            raise LocalStoreError("candidate snapshot hash is invalid")
+        if claim_event_id is not None and claim_event_id != notification_event_id(
+            self._target_id, candidate_sha256
+        ):
+            raise LocalStoreError("claim event does not match candidate snapshot")
+        if expected_sha256 is not None and not _SHA256_RE.fullmatch(expected_sha256):
+            raise LocalStoreError("expected snapshot hash is invalid")
+
+        candidate = self._candidate_path(candidate_path)
+        self._ensure_notifications_directory()
+        self._ensure_snapshots_directory()
+        destination = self._snapshot_path()
+
+        with self._locked():
+            target_claim = self._load_target_claim()
+            current = self._read_snapshot(destination, "local snapshot")
+            current_sha256 = self._snapshot_sha256(current)
+            if target_claim is not None:
+                if claim_event_id != target_claim["event_id"]:
+                    return {
+                        "applied": False,
+                        "current_sha256": current_sha256,
+                        "target_claim": target_claim,
+                    }
+                notification = self._read_record(
+                    self._record_path(target_claim["event_id"])
+                )
+                if notification is None:
+                    raise LocalStoreError("target claim notification is missing")
+                self._validate_record(notification, target_claim["event_id"])
+                if notification["status"] != "delivered":
+                    raise LocalStoreError("target claim notification is not delivered")
+            elif claim_event_id is not None:
+                return {
+                    "applied": False,
+                    "current_sha256": current_sha256,
+                    "target_claim": None,
+                }
+
+            candidate_bytes = self._read_snapshot(candidate, "candidate snapshot")
+            if candidate_bytes is None:
+                raise LocalStoreError("candidate snapshot is missing")
+            if self._snapshot_sha256(candidate_bytes) != candidate_sha256:
+                raise LocalStoreError("candidate snapshot hash mismatch")
+            if current == candidate_bytes:
+                self._fsync_file(destination, "local snapshot")
+                self._fsync_directory(destination.parent)
+                durable = self._read_snapshot(destination, "local snapshot")
+                if durable != candidate_bytes:
+                    raise LocalStoreError("snapshot read-back mismatch")
+                return {
+                    "applied": True,
+                    "already": True,
+                    "previous_sha256": current_sha256,
+                    "sha256": candidate_sha256,
+                }
+            if current_sha256 != expected_sha256:
+                return {
+                    "applied": False,
+                    "current_sha256": current_sha256,
+                }
+
+            self._write_bytes(
+                destination,
+                candidate_bytes,
+                "snapshot",
+                _MAX_LOCAL_SNAPSHOT_BYTES,
+            )
+            durable = self._read_snapshot(destination, "local snapshot")
+            if durable != candidate_bytes:
+                raise LocalStoreError("snapshot read-back mismatch")
+            return {
+                "applied": True,
+                "already": False,
+                "previous_sha256": current_sha256,
+                "sha256": candidate_sha256,
+            }
+
+    def _candidate_path(self, candidate_path: Path) -> Path:
+        base = self._runtime_dir.absolute()
+        raw_path = Path(candidate_path)
+        path = raw_path if raw_path.is_absolute() else base / raw_path
+        path = path.absolute()
+        try:
+            relative = path.relative_to(base)
+        except ValueError as exc:
+            raise LocalStoreError(
+                "candidate snapshot must be inside runtime_dir"
+            ) from exc
+        if (
+            len(relative.parts) < _MIN_CANDIDATE_PATH_PARTS
+            or relative.parts[0] != "candidates"
+            or ".." in relative.parts
+        ):
+            raise LocalStoreError(
+                "candidate snapshot must be under the candidates directory"
+            )
+
+        current = base
+        for part in relative.parts:
+            current /= part
+            try:
+                info = current.lstat()
+            except FileNotFoundError as exc:
+                raise LocalStoreError("candidate snapshot is missing") from exc
+            except OSError as exc:
+                raise LocalStoreError("cannot inspect candidate snapshot") from exc
+            if stat.S_ISLNK(info.st_mode):
+                raise LocalStoreError("candidate snapshot must not be a symlink")
+        try:
+            final_info = current.lstat()
+        except OSError as exc:
+            raise LocalStoreError("cannot inspect candidate snapshot") from exc
+        if stat.S_ISLNK(final_info.st_mode):
+            raise LocalStoreError("candidate snapshot must not be a symlink")
+        if not stat.S_ISREG(final_info.st_mode):
+            raise LocalStoreError("candidate snapshot must be a regular file")
+        if current == self._snapshots_dir / f"{self._target_id}.txt":
+            raise LocalStoreError("candidate snapshot must differ from destination")
+        return current
+
+    def _ensure_snapshots_directory(self) -> None:
+        created = False
+        try:
+            info = self._snapshots_dir.lstat()
+        except FileNotFoundError:
+            try:
+                self._snapshots_dir.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            else:
+                created = True
+            try:
+                info = self._snapshots_dir.lstat()
+            except OSError as exc:
+                raise LocalStoreError(
+                    "local snapshots directory is unavailable"
+                ) from exc
+        except OSError as exc:
+            raise LocalStoreError("local snapshots directory is unavailable") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise LocalStoreError("local snapshots path must be a directory")
+        if created:
+            self._fsync_directory(self._runtime_dir)
+
+    def _validate_snapshots_directory(self) -> None:
+        try:
+            info = self._snapshots_dir.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise LocalStoreError("local snapshots directory is unavailable") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise LocalStoreError("local snapshots path must be a directory")
+
+    def _snapshot_path(self) -> Path:
+        return self._snapshots_dir / f"{self._target_id}.txt"
+
     def _load_target_claim(self) -> TargetClaim | None:
         target_claim_record = self._read_claim(self._claim_path)
         target_claim = None
         if target_claim_record is not None:
             target_claim = self._validate_claim(target_claim_record)
+            return target_claim
 
         sending_records = self._find_sending_records()
         if len(sending_records) > 1:
@@ -525,6 +736,19 @@ class LocalNotificationStore:
     def _read_json_object(
         cls, path: Path, description: str
     ) -> dict[str, object] | None:
+        data = cls._read_bytes(path, _MAX_LOCAL_RECORD_BYTES, description)
+        if data is None:
+            return None
+        try:
+            value: object = json.loads(data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LocalStoreError(f"{description} is not valid JSON") from exc
+        if not isinstance(value, dict):
+            raise LocalStoreError(f"{description} must be an object")
+        return cast("dict[str, object]", value)
+
+    @classmethod
+    def _read_bytes(cls, path: Path, max_bytes: int, description: str) -> bytes | None:
         try:
             file_descriptor = cls._open_regular(path, os.O_RDONLY)
         except FileNotFoundError:
@@ -536,41 +760,49 @@ class LocalNotificationStore:
         try:
             with os.fdopen(file_descriptor, "rb") as record_file:
                 file_descriptor = -1
-                data = record_file.read(_MAX_LOCAL_RECORD_BYTES + 1)
+                data = record_file.read(max_bytes + 1)
         except OSError as exc:
             raise LocalStoreError(f"cannot read {description}: {exc}") from exc
         finally:
             if file_descriptor != -1:
                 os.close(file_descriptor)
-        if len(data) > _MAX_LOCAL_RECORD_BYTES:
+        if len(data) > max_bytes:
             raise LocalStoreError(f"{description} is too large")
-        try:
-            value: object = json.loads(data)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise LocalStoreError(f"{description} is not valid JSON") from exc
-        if not isinstance(value, dict):
-            raise LocalStoreError(f"{description} must be an object")
-        return cast("dict[str, object]", value)
+        return data
 
     @staticmethod
     def _write_record(path: Path, record: Mapping[str, object]) -> None:
         data = LocalNotificationStore._serialize_record(record)
-        temporary_path = LocalNotificationStore._write_temporary_record(path, data)
+        LocalNotificationStore._write_bytes(
+            path, data, "notification record", _MAX_LOCAL_RECORD_BYTES
+        )
+
+    @staticmethod
+    def _write_bytes(path: Path, data: bytes, description: str, max_bytes: int) -> None:
+        if len(data) > max_bytes:
+            raise LocalStoreError(f"{description} is too large")
+        temporary_path = LocalNotificationStore._write_temporary_bytes(
+            path, data, description
+        )
         try:
             temporary_path.replace(path)
             LocalNotificationStore._fsync_directory(path.parent)
         except LocalStoreError:
             raise
         except OSError as exc:
-            raise LocalStoreError(
-                f"cannot durably write notification record: {exc}"
-            ) from exc
+            raise LocalStoreError(f"cannot durably write {description}: {exc}") from exc
         finally:
             with suppress(OSError):
                 temporary_path.unlink(missing_ok=True)
 
     @staticmethod
     def _write_temporary_record(path: Path, data: bytes) -> Path:
+        return LocalNotificationStore._write_temporary_bytes(
+            path, data, "notification record"
+        )
+
+    @staticmethod
+    def _write_temporary_bytes(path: Path, data: bytes, description: str) -> Path:
         try:
             file_descriptor, temporary_name = tempfile.mkstemp(
                 dir=path.parent,
@@ -578,9 +810,7 @@ class LocalNotificationStore:
                 suffix=".tmp",
             )
         except OSError as exc:
-            raise LocalStoreError(
-                "cannot create temporary notification record"
-            ) from exc
+            raise LocalStoreError(f"cannot create temporary {description}") from exc
         temporary_path = Path(temporary_name)
         completed = False
         try:
@@ -589,7 +819,7 @@ class LocalNotificationStore:
             completed = True
         except OSError as exc:
             raise LocalStoreError(
-                f"cannot write temporary notification record: {exc}"
+                f"cannot write temporary {description}: {exc}"
             ) from exc
         finally:
             os.close(file_descriptor)
@@ -624,6 +854,38 @@ class LocalNotificationStore:
         if len(data) > _MAX_LOCAL_RECORD_BYTES:
             raise LocalStoreError("notification record is too large")
         return data
+
+    @classmethod
+    def _read_snapshot(cls, path: Path, description: str) -> bytes | None:
+        data = cls._read_bytes(path, _MAX_LOCAL_SNAPSHOT_BYTES, description)
+        if data is None:
+            return None
+        if not data:
+            raise LocalStoreError(f"{description} is empty")
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LocalStoreError(f"{description} is not valid UTF-8") from exc
+        return data
+
+    @staticmethod
+    def _snapshot_sha256(data: bytes | None) -> str | None:
+        if data is None:
+            return None
+        return hashlib.sha256(data).hexdigest()
+
+    @classmethod
+    def _fsync_file(cls, path: Path, description: str) -> None:
+        try:
+            file_descriptor = cls._open_regular(path, os.O_RDONLY)
+        except OSError as exc:
+            raise LocalStoreError(f"cannot open {description}") from exc
+        try:
+            os.fsync(file_descriptor)
+        except OSError as exc:
+            raise LocalStoreError(f"cannot fsync {description}") from exc
+        finally:
+            os.close(file_descriptor)
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
@@ -794,12 +1056,14 @@ def _compare_and_swap_response(
     expected: NotificationRecord | None,
     replacement: NotificationRecord,
     next_signal: str,
+    expected_snapshot_sha256: str | None,
 ) -> dict[str, object]:
     """Describe one exact durable notification replacement."""
     return _protocol_response(
         "compare_and_swap",
         expected_notification=expected,
         notification=replacement,
+        expected_snapshot_sha256=expected_snapshot_sha256,
         next_signal=next_signal,
     )
 
@@ -835,7 +1099,7 @@ def local_notification_cas(
     payload: Mapping[str, object], runtime_dir: str | Path
 ) -> dict[str, object]:
     """Apply one protocol CAS in the local durable notification store."""
-    if frozenset(payload) != _LOCAL_CAS_FIELDS:
+    if frozenset(payload) not in {_LOCAL_CAS_FIELDS, _LOCAL_CAS_LEGACY_FIELDS}:
         raise WorkflowError("local CAS request fields are invalid")
     if (
         type(payload.get("protocol_version")) is not int
@@ -844,6 +1108,11 @@ def local_notification_cas(
         raise WorkflowError("protocol_version must be 2")
     if payload.get("action") != "compare_and_swap":
         raise WorkflowError("action must be compare_and_swap")
+    expected_snapshot_sha256 = _snapshot_hash(
+        payload.get("expected_snapshot_sha256"),
+        "expected_snapshot_sha256",
+        allow_none=True,
+    )
     next_signal = _require_string(payload.get("next_signal"), "next_signal")
     if next_signal not in _LOCAL_CAS_SIGNALS:
         raise WorkflowError("next_signal is invalid")
@@ -877,9 +1146,22 @@ def local_notification_cas(
         )
 
     result = LocalNotificationStore(runtime_dir, target_id).compare_and_swap(
-        event_id, expected, replacement
+        event_id,
+        expected,
+        replacement,
+        expected_snapshot_sha256=expected_snapshot_sha256,
     )
     if not result["applied"]:
+        snapshot_conflict = result.get("snapshot_conflict")
+        if snapshot_conflict is not None:
+            conflict = _require_mapping(snapshot_conflict, "snapshot conflict")
+            return {
+                "protocol_version": _NOTIFICATION_PROTOCOL_VERSION,
+                "action": "snapshot_compare_and_swap_conflict",
+                "expected_snapshot_sha256": conflict["expected_sha256"],
+                "current_snapshot_sha256": conflict["current_sha256"],
+                "notification": result["notification"],
+            }
         target_claim = result.get("target_claim")
         if target_claim is not None:
             return {
@@ -944,9 +1226,79 @@ def local_notification_release(
     }
 
 
+def local_snapshot_promote(
+    payload: Mapping[str, object],
+    runtime_dir: str | Path,
+    candidate_path: str | Path,
+) -> dict[str, object]:
+    """Promote one local candidate through a target-scoped snapshot CAS."""
+    if frozenset(payload) != _LOCAL_SNAPSHOT_FIELDS:
+        raise WorkflowError("local snapshot request fields are invalid")
+    if (
+        type(payload.get("version")) is not int
+        or payload.get("version") != _LOCAL_SNAPSHOT_PROTOCOL_VERSION
+    ):
+        raise WorkflowError("version must be 1")
+    if payload.get("action") != "promote_snapshot":
+        raise WorkflowError("action must be promote_snapshot")
+    target_id = _require_string(payload.get("target_id"), "target_id")
+    if not _TARGET_ID_RE.fullmatch(target_id):
+        raise WorkflowError("invalid_target_id")
+    expected_sha256 = _snapshot_hash(
+        payload.get("expected_sha256"), "expected_sha256", allow_none=True
+    )
+    candidate_sha256 = _snapshot_hash(
+        payload.get("candidate_sha256"), "candidate_sha256"
+    )
+    if candidate_sha256 is None:
+        raise WorkflowError("candidate_sha256 is required")
+    raw_claim_event_id = payload.get("claim_event_id")
+    claim_event_id = _snapshot_hash(
+        raw_claim_event_id, "claim_event_id", allow_none=True
+    )
+    expected_event_id = notification_event_id(target_id, candidate_sha256)
+    if claim_event_id is not None and claim_event_id != expected_event_id:
+        raise WorkflowError("claim_event_id does not match candidate_sha256")
+    result = LocalNotificationStore(runtime_dir, target_id).promote_snapshot(
+        Path(candidate_path),
+        expected_sha256=expected_sha256,
+        candidate_sha256=candidate_sha256,
+        claim_event_id=claim_event_id,
+    )
+    if not result["applied"]:
+        target_claim = result.get("target_claim")
+        if "target_claim" in result:
+            return {
+                "version": _LOCAL_SNAPSHOT_PROTOCOL_VERSION,
+                "action": "target_claim_conflict",
+                "current_sha256": result["current_sha256"],
+                "target_claim": target_claim,
+            }
+        return {
+            "version": _LOCAL_SNAPSHOT_PROTOCOL_VERSION,
+            "action": "snapshot_compare_and_swap_conflict",
+            "expected_sha256": expected_sha256,
+            "current_sha256": result["current_sha256"],
+        }
+    return {
+        "version": _LOCAL_SNAPSHOT_PROTOCOL_VERSION,
+        "action": (
+            "snapshot_already_promoted" if result["already"] else "snapshot_promoted"
+        ),
+        "target_id": target_id,
+        "previous_sha256": result["previous_sha256"],
+        "candidate_sha256": result["sha256"],
+    }
+
+
 def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
     """Advance the durable notification protocol by one verified step."""
     target_id, sha256, event_id, destination, message = _notification_context(payload)
+    expected_snapshot_sha256 = _snapshot_hash(
+        payload.get("expected_snapshot_sha256"),
+        "expected_snapshot_sha256",
+        allow_none=True,
+    )
     signal = _require_string(payload.get("signal", "start"), "signal")
     raw_record = payload.get("notification")
     record = (
@@ -973,6 +1325,7 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
                     message=message,
                 ),
                 "pending_persisted",
+                expected_snapshot_sha256,
             )
         status = record["status"]
         if status == "pending":
@@ -985,6 +1338,7 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
                     last_error="",
                 ),
                 "sending_claimed",
+                expected_snapshot_sha256,
             )
         if status == "sending":
             return _protocol_response("manual_reconciliation")
@@ -1005,6 +1359,7 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
                 last_error="",
             ),
             "sending_claimed",
+            expected_snapshot_sha256,
         )
     if signal == "sending_claimed":
         if status != "sending":
@@ -1017,6 +1372,7 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
             record,
             _replace_status(record, "delivered", last_error=""),
             "delivered_persisted",
+            expected_snapshot_sha256,
         )
     if signal == "slack_failed":
         if status != "sending":
@@ -1026,6 +1382,7 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
             record,
             _replace_status(record, "pending", last_error=error),
             "failure_persisted",
+            expected_snapshot_sha256,
         )
     if signal == "delivered_persisted":
         if status != "delivered":
@@ -1060,9 +1417,11 @@ def _parser() -> argparse.ArgumentParser:
             "notification-step",
             "local-notification-cas",
             "local-notification-release",
+            "local-snapshot-promote",
         ),
     )
     parser.add_argument("--runtime-dir", type=Path)
+    parser.add_argument("--candidate", type=Path)
     return parser
 
 
@@ -1071,6 +1430,7 @@ def run(
     payload: Mapping[str, object],
     *,
     runtime_dir: str | Path | None = None,
+    candidate_path: str | Path | None = None,
 ) -> dict[str, object]:
     """Execute one workflow operation."""
     if operation == "validate-targets":
@@ -1087,6 +1447,12 @@ def run(
         if runtime_dir is None:
             raise WorkflowError("--runtime-dir is required for local persistence")
         return local_notification_release(payload, runtime_dir)
+    if operation == "local-snapshot-promote":
+        if runtime_dir is None:
+            raise WorkflowError("--runtime-dir is required for local persistence")
+        if candidate_path is None:
+            raise WorkflowError("--candidate is required")
+        return local_snapshot_promote(payload, runtime_dir, candidate_path)
     raise WorkflowError("operation is invalid")
 
 
@@ -1094,7 +1460,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point."""
     try:
         args = _parser().parse_args(argv)
-        result = run(args.operation, _read_payload(), runtime_dir=args.runtime_dir)
+        result = run(
+            args.operation,
+            _read_payload(),
+            runtime_dir=args.runtime_dir,
+            candidate_path=args.candidate,
+        )
     except (LocalStoreError, WorkflowError, OSError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 1
