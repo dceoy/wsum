@@ -12,11 +12,14 @@ from datetime import UTC, datetime
 from typing import TypedDict, cast
 from urllib.parse import urlsplit
 
+import monitor
+
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PERSISTENCE_MODES = {"local", "google-drive"}
 _FETCH_MODES = {"static", "browser"}
 _NOTIFICATION_STATUSES = {"pending", "sending", "delivered"}
+_NOTIFICATION_PROTOCOL_VERSION = 2
 
 
 class WorkflowError(RuntimeError):
@@ -61,14 +64,17 @@ def _validate_url(value: object) -> str:
     url = _require_string(value, "url")
     try:
         parsed = urlsplit(url)
+        host = parsed.hostname
     except ValueError as exc:
         raise WorkflowError("url is invalid") from exc
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+    if parsed.scheme.lower() not in {"http", "https"} or not host:
         raise WorkflowError("url must be an absolute HTTP(S) URL")
     if parsed.username is not None or parsed.password is not None:
         raise WorkflowError("url must not contain credentials")
     if parsed.fragment:
         raise WorkflowError("url must not contain a fragment")
+    if monitor.url_has_credentials(url):
+        raise WorkflowError("url must not contain credentials")
     return url
 
 
@@ -104,6 +110,7 @@ def validate_target(value: object) -> dict[str, object]:
         "name": name,
         "url": url,
         "enabled": enabled,
+        "action": "monitor" if enabled else "skip_disabled",
         "watch_focus": watch_focus,
         "notification_group": notification_group,
         "fetch_mode": fetch_mode,
@@ -253,6 +260,30 @@ def _replace_status(
     return updated
 
 
+def _protocol_response(action: str, **fields: object) -> dict[str, object]:
+    """Return one versioned notification protocol response."""
+    response: dict[str, object] = {
+        "protocol_version": _NOTIFICATION_PROTOCOL_VERSION,
+        "action": action,
+    }
+    response.update(fields)
+    return response
+
+
+def _compare_and_swap_response(
+    expected: NotificationRecord | None,
+    replacement: NotificationRecord,
+    next_signal: str,
+) -> dict[str, object]:
+    """Describe one exact durable notification replacement."""
+    return _protocol_response(
+        "compare_and_swap",
+        expected_notification=expected,
+        notification=replacement,
+        next_signal=next_signal,
+    )
+
+
 def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
     """Advance the durable notification protocol by one verified step."""
     target_id, sha256, event_id, destination, message = _notification_context(payload)
@@ -272,32 +303,32 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
 
     if signal == "start":
         if record is None:
-            return {
-                "action": "persist",
-                "notification": _new_notification(
+            return _compare_and_swap_response(
+                None,
+                _new_notification(
                     target_id=target_id,
                     sha256=sha256,
                     event_id=event_id,
                     destination=destination,
                     message=message,
                 ),
-                "next_signal": "pending_persisted",
-            }
+                "pending_persisted",
+            )
         status = record["status"]
         if status == "pending":
-            return {
-                "action": "persist",
-                "notification": _replace_status(
+            return _compare_and_swap_response(
+                record,
+                _replace_status(
                     record,
                     "sending",
                     attempt=record["attempt"] + 1,
                     last_error="",
                 ),
-                "next_signal": "sending_persisted",
-            }
+                "sending_claimed",
+            )
         if status == "sending":
-            return {"action": "manual_reconciliation"}
-        return {"action": "promote_snapshot"}
+            return _protocol_response("manual_reconciliation")
+        return _protocol_response("promote_snapshot")
 
     if record is None:
         raise WorkflowError("notification is required after start")
@@ -305,40 +336,45 @@ def notification_step(payload: Mapping[str, object]) -> dict[str, object]:
     if signal == "pending_persisted":
         if status != "pending":
             raise WorkflowError("pending_persisted requires a pending notification")
-        return {
-            "action": "persist",
-            "notification": _replace_status(
+        return _compare_and_swap_response(
+            record,
+            _replace_status(
                 record,
                 "sending",
                 attempt=record["attempt"] + 1,
                 last_error="",
             ),
-            "next_signal": "sending_persisted",
-        }
-    if signal == "sending_persisted":
+            "sending_claimed",
+        )
+    if signal == "sending_claimed":
         if status != "sending":
-            raise WorkflowError("sending_persisted requires a sending notification")
-        return {"action": "send_slack", "notification": record}
+            raise WorkflowError("sending_claimed requires a sending notification")
+        return _protocol_response("send_slack", notification=record)
     if signal == "slack_delivered":
         if status != "sending":
             raise WorkflowError("slack_delivered requires a sending notification")
-        return {
-            "action": "persist",
-            "notification": _replace_status(record, "delivered", last_error=""),
-            "next_signal": "delivered_persisted",
-        }
+        return _compare_and_swap_response(
+            record,
+            _replace_status(record, "delivered", last_error=""),
+            "delivered_persisted",
+        )
     if signal == "slack_failed":
         if status != "sending":
             raise WorkflowError("slack_failed requires a sending notification")
         error = _require_string(payload.get("error"), "error")
-        return {
-            "action": "persist_and_stop",
-            "notification": _replace_status(record, "pending", last_error=error),
-        }
+        return _compare_and_swap_response(
+            record,
+            _replace_status(record, "pending", last_error=error),
+            "failure_persisted",
+        )
     if signal == "delivered_persisted":
         if status != "delivered":
             raise WorkflowError("delivered_persisted requires a delivered notification")
-        return {"action": "promote_snapshot"}
+        return _protocol_response("promote_snapshot")
+    if signal == "failure_persisted":
+        if status != "pending":
+            raise WorkflowError("failure_persisted requires a pending notification")
+        return _protocol_response("stop")
     raise WorkflowError("signal is invalid")
 
 

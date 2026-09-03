@@ -1335,6 +1335,11 @@ def _destination_has_credentials(value: str) -> bool:
     )
 
 
+def url_has_credentials(value: str) -> bool:
+    """Return whether a URL contains embedded or query credentials."""
+    return _destination_has_credentials(value)
+
+
 def _feed_identity_token(field: str, value: str, base_url: str) -> str:
     """Return bounded feed identity text without exposing URI-shaped values."""
     try:
