@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import runpy
-from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from zipfile import ZipFile
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def test_cowork_package_has_one_manifest_and_runtime_files(tmp_path: Path) -> None:
