@@ -294,9 +294,12 @@ def _read_pending(state: Path, target_id: str) -> dict[str, object]:
         value = json.loads(data)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CoworkError("no valid pending decision exists for target") from exc
-    if not isinstance(value, dict) or set(value) != _PENDING_FIELDS:
+    if not isinstance(value, dict):
         raise CoworkError("pending decision is invalid")
-    return cast("dict[str, object]", value)
+    pending = cast("dict[str, object]", value)
+    if set(pending) != _PENDING_FIELDS:
+        raise CoworkError("pending decision is invalid")
+    return pending
 
 
 def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, object]:
