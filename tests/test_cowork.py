@@ -127,9 +127,11 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
     )
 
     assert result["action"] == "review"
+    assert len(str(result["revision"])) == 32
     assert result["watch_focus"] == "pricing"
     pending = json.loads((state / "pending" / "example.json").read_text())
     assert pending["target_id"] == "example"
+    assert pending["revision"] == result["revision"]
     assert candidate.exists()
 
 
@@ -146,6 +148,7 @@ def test_finalize_material_change_writes_report_and_promotes(tmp_path: Path) -> 
         state,
         {
             "target_id": "example",
+            "revision": "a" * 32,
             "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
             "candidate_sha256": hashlib.sha256(b"new\n").hexdigest(),
             "diff_truncated": False,
@@ -156,6 +159,7 @@ def test_finalize_material_change_writes_report_and_promotes(tmp_path: Path) -> 
         tmp_path,
         {
             "target_id": "example",
+            "revision": "a" * 32,
             "material": True,
             "report": "# Example\n\nPricing changed.\n",
         },
@@ -176,15 +180,112 @@ def test_finalize_non_material_truncated_diff_stops(tmp_path: Path) -> None:
         state,
         {
             "target_id": "example",
+            "revision": "a" * 32,
             "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
             "candidate_sha256": hashlib.sha256(b"new\n").hexdigest(),
             "diff_truncated": True,
         },
     )
 
-    result = finalize(tmp_path, {"target_id": "example", "material": False})
+    result = finalize(
+        tmp_path,
+        {"target_id": "example", "revision": "a" * 32, "material": False},
+    )
 
     assert result == {"action": "manual_review_required", "target_id": "example"}
+    assert (state / "pending" / "example.json").exists()
+
+
+def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    candidate_dir = state / "candidates"
+    snapshot_dir = state / "snapshots"
+    candidate_dir.mkdir(parents=True)
+    snapshot_dir.mkdir()
+    candidate = candidate_dir / "example.txt"
+    (snapshot_dir / "example.txt").write_text("old\n")
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    report = reports / "example.md"
+    report.write_text("current report\n")
+    target = {
+        "target_id": "example",
+        "name": "Example",
+        "url": "https://example.com/",
+        "watch_focus": "pricing",
+    }
+
+    candidate.write_text("first\n")
+    first = cowork._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
+        state, target, candidate, _changed_result(current="first\n")
+    )
+    first_revision = str(first["revision"])
+    candidate.write_text("second\n")
+    second = cowork._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
+        state, target, candidate, _changed_result(current="second\n")
+    )
+    pending = (state / "pending" / "example.json").read_bytes()
+
+    with pytest.raises(CoworkError, match="revision"):
+        finalize(
+            tmp_path,
+            {
+                "target_id": "example",
+                "revision": first_revision,
+                "material": True,
+                "report": "# Stale\n",
+            },
+        )
+
+    assert (snapshot_dir / "example.txt").read_text() == "old\n"
+    assert report.read_text() == "current report\n"
+    assert candidate.read_text() == "second\n"
+    assert (state / "pending" / "example.json").read_bytes() == pending
+    assert str(second["revision"]) != first_revision
+
+
+def test_finalize_material_snapshot_conflict_does_not_write_report(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    candidate_dir = state / "candidates"
+    snapshot_dir = state / "snapshots"
+    candidate_dir.mkdir(parents=True)
+    snapshot_dir.mkdir()
+    candidate = candidate_dir / "example.txt"
+    candidate.write_text("new\n")
+    snapshot = snapshot_dir / "example.txt"
+    snapshot.write_text("old\n")
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    report = reports / "example.md"
+    report.write_text("previous report\n")
+    cowork._write_pending(  # pyright: ignore[reportPrivateUsage]
+        state,
+        {
+            "target_id": "example",
+            "revision": "a" * 32,
+            "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
+            "candidate_sha256": hashlib.sha256(b"new\n").hexdigest(),
+            "diff_truncated": False,
+        },
+    )
+    snapshot.write_text("external\n")
+
+    result = finalize(
+        tmp_path,
+        {
+            "target_id": "example",
+            "revision": "a" * 32,
+            "material": True,
+            "report": "# Candidate\n",
+        },
+    )
+
+    assert result == {"action": "snapshot_conflict", "target_id": "example"}
+    assert snapshot.read_text() == "external\n"
+    assert report.read_text() == "previous report\n"
+    assert candidate.read_text() == "new\n"
     assert (state / "pending" / "example.json").exists()
 
 

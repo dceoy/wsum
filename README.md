@@ -15,13 +15,17 @@ The Cowork workflow is designed so a non-engineer only needs to manage a folder 
 
 ### 1. Install the skill
 
-Build the Cowork package from the repository:
+Download the latest successful `web-update-monitor-cowork-package` artifact from the [main-branch CI workflow runs](https://github.com/dceoy/wsum/actions/workflows/ci.yml?query=branch%3Amain). Extract the downloaded artifact and upload the contained `web-update-monitor.zip` in Claude's custom Skills UI.
+
+Workflow artifacts require GitHub access and expire, so use the newest successful main-branch run.
+
+Developers and maintainers with a repository checkout can build the same archive locally:
 
 ```bash
 python scripts/package_cowork_skill.py
 ```
 
-Upload `dist/web-update-monitor.zip` from Claude's custom Skills UI.
+Upload `dist/web-update-monitor.zip` from Claude's custom Skills UI after building it locally.
 
 The repository keeps the portable Agent Skill manifest as `SKILL.md`. The packager emits it as lowercase `skill.md` inside the Cowork ZIP and adds the Python and `pypdf` dependency metadata required by Cowork. This avoids keeping case-colliding `SKILL.md` and `skill.md` files in the source tree.
 
@@ -94,7 +98,7 @@ python skills/web-update-monitor/scripts/cowork.py \
   --workspace /path/to/workspace finalize < decision.json
 ```
 
-The facade then writes a report when needed, verifies the expected baseline, promotes the candidate snapshot, and clears pending state. A truncated diff cannot be finalized as non-material; it stops for manual review instead.
+The facade verifies the review revision, promotes the candidate snapshot, writes a report only after successful promotion, and clears pending state. If report persistence fails after promotion, retain the pending state and retry. A truncated diff cannot be finalized as non-material; it stops for manual review instead.
 
 ## Direct low-level workflow
 

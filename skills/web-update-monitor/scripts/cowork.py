@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import secrets
 import stat
 import sys
 import tempfile
@@ -30,10 +31,12 @@ _PENDING_FIELDS = {
     "candidate_sha256",
     "diff_truncated",
     "expected_sha256",
+    "revision",
     "target_id",
 }
 _TARGET_ID_PART_RE = re.compile(r"[^a-z0-9]+")
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_REVISION_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 class CoworkError(RuntimeError):
@@ -234,6 +237,7 @@ def _handle_monitor_result(
 
     pending = {
         "target_id": target_id,
+        "revision": secrets.token_hex(16),
         "expected_sha256": result.get("previous_sha256"),
         "candidate_sha256": result.get("sha256"),
         "diff_truncated": result.get("diff_truncated") is True,
@@ -242,6 +246,7 @@ def _handle_monitor_result(
     return {
         "action": "review",
         "target_id": target_id,
+        "revision": pending["revision"],
         "name": target["name"],
         "url": target["url"],
         "watch_focus": target["watch_focus"],
@@ -302,35 +307,45 @@ def _read_pending(state: Path, target_id: str) -> dict[str, object]:
     return pending
 
 
-def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, object]:
-    """Apply one semantic decision and safely advance its baseline."""
-    unsupported = set(payload) - {"material", "report", "target_id"}
+def _validate_decision(
+    payload: Mapping[str, object],
+) -> tuple[str, str, bool, str | None]:
+    """Validate a decision and return its target, revision, materiality, and report."""
+    unsupported = set(payload) - {"material", "report", "revision", "target_id"}
     if unsupported:
         raise CoworkError("decision contains unsupported fields")
     target_id = payload.get("target_id")
+    revision = payload.get("revision")
     material = payload.get("material")
     if not isinstance(target_id, str) or not _TARGET_ID_RE.fullmatch(target_id):
         raise CoworkError("target_id is invalid")
+    if not isinstance(revision, str) or not _REVISION_RE.fullmatch(revision):
+        raise CoworkError("revision is invalid")
     if not isinstance(material, bool):
         raise CoworkError("material must be a boolean")
+
+    report: str | None = None
+    if material:
+        report_value = payload.get("report")
+        if not isinstance(report_value, str) or not report_value:
+            raise CoworkError("material decisions require a non-empty report")
+        report = report_value
+    return target_id, revision, material, report
+
+
+def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, object]:
+    """Apply one semantic decision and safely advance its baseline."""
+    target_id, revision, material, report = _validate_decision(payload)
 
     root = _workspace(workspace)
     state = _state_dir(root)
     pending = _read_pending(state, target_id)
     if pending["target_id"] != target_id:
         raise CoworkError("pending decision target does not match")
+    if pending["revision"] != revision:
+        raise CoworkError("decision revision does not match pending review")
     if pending["diff_truncated"] is True and not material:
         return {"action": "manual_review_required", "target_id": target_id}
-
-    report_path: str | None = None
-    if material:
-        report = payload.get("report")
-        if not isinstance(report, str) or not report:
-            raise CoworkError("material decisions require a non-empty report")
-        report_result = workflow.write_report(
-            root, {"target_id": target_id, "report": report}
-        )
-        report_path = str(report_result["path"])
 
     candidate = state / "candidates" / f"{target_id}.txt"
     promoted = workflow.promote_snapshot(
@@ -344,6 +359,12 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
     )
     if promoted.get("action") == "snapshot_conflict":
         return {"action": "snapshot_conflict", "target_id": target_id}
+    report_path: str | None = None
+    if report is not None:
+        report_result = workflow.write_report(
+            root, {"target_id": target_id, "report": report}
+        )
+        report_path = str(report_result["path"])
     _cleanup_candidate(candidate)
     _remove_pending(state, target_id)
     result: dict[str, object] = {
