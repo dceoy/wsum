@@ -11,6 +11,7 @@ import stat
 import sys
 import tempfile
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -19,7 +20,14 @@ import monitor
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _FETCH_MODES = {"static", "browser"}
-_TARGET_FIELDS = {"target_id", "name", "url", "enabled", "watch_focus", "fetch_mode"}
+_TARGET_FIELDS = {
+    "enabled",
+    "fetch_mode",
+    "name",
+    "target_id",
+    "url",
+    "watch_focus",
+}
 _MAX_SNAPSHOT_BYTES = 40 * 1024 * 1024
 
 
@@ -47,9 +55,7 @@ def _target_id(value: object) -> str:
     return target_id
 
 
-def _sha256(value: object, field: str, *, optional: bool = False) -> str | None:
-    if optional and value is None:
-        return None
+def _digest(value: object, field: str) -> str:
     digest = _string(value, field)
     if not _SHA256_RE.fullmatch(digest):
         raise WorkflowError(f"{field} must be a lowercase hexadecimal SHA-256")
@@ -89,7 +95,9 @@ def validate_target(value: object) -> dict[str, object]:
         "url": _url(target.get("url")),
         "enabled": enabled,
         "action": "monitor" if enabled else "skip_disabled",
-        "watch_focus": _string(target.get("watch_focus", ""), "watch_focus", empty=True),
+        "watch_focus": _string(
+            target.get("watch_focus", ""), "watch_focus", empty=True
+        ),
         "fetch_mode": fetch_mode,
     }
 
@@ -113,7 +121,9 @@ def _directory(path: Path, description: str, *, create: bool = False) -> Path:
         info = path.lstat()
     except FileNotFoundError:
         if not create:
-            raise WorkflowError(f"{description} must be an existing directory") from None
+            raise WorkflowError(
+                f"{description} must be an existing directory"
+            ) from None
         try:
             path.mkdir(mode=0o700)
             info = path.lstat()
@@ -169,13 +179,14 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _replace_snapshot(destination: Path, data: bytes) -> None:
+    temporary: Path | None = None
     try:
         descriptor, name = tempfile.mkstemp(
             dir=destination.parent,
             prefix=f".{destination.name}.",
             suffix=".tmp",
         )
-        path = Path(name)
+        temporary = Path(name)
         try:
             os.fchmod(descriptor, 0o600)
             with os.fdopen(descriptor, "wb", closefd=False) as stream:
@@ -184,14 +195,12 @@ def _replace_snapshot(destination: Path, data: bytes) -> None:
                 os.fsync(stream.fileno())
         finally:
             os.close(descriptor)
-        path.replace(destination)
+        temporary.replace(destination)
         _fsync_directory(destination.parent)
     except OSError as exc:
-        if "path" in locals():
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
         raise WorkflowError("cannot promote snapshot") from exc
 
 
@@ -202,7 +211,9 @@ def promote_snapshot(
 ) -> dict[str, object]:
     """Atomically promote a local candidate when its expected baseline matches."""
     runtime = _directory(Path(runtime_dir), "runtime_dir")
-    candidates = _directory(runtime / "candidates", "runtime_dir/candidates", create=True)
+    candidates = _directory(
+        runtime / "candidates", "runtime_dir/candidates", create=True
+    )
     candidate = Path(candidate_path)
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
@@ -213,12 +224,17 @@ def promote_snapshot(
     candidate_data = _text_bytes(candidate, "candidate")
 
     target_id = _target_id(payload.get("target_id"))
-    expected = _sha256(payload.get("expected_sha256"), "expected_sha256", optional=True)
-    candidate_sha = _sha256(payload.get("candidate_sha256"), "candidate_sha256")
+    expected_value = payload.get("expected_sha256")
+    expected = (
+        None if expected_value is None else _digest(expected_value, "expected_sha256")
+    )
+    candidate_sha = _digest(payload.get("candidate_sha256"), "candidate_sha256")
     if hashlib.sha256(candidate_data).hexdigest() != candidate_sha:
         raise WorkflowError("candidate_sha256 does not match candidate")
 
-    snapshots = _directory(runtime / "snapshots", "runtime_dir/snapshots", create=True)
+    snapshots = _directory(
+        runtime / "snapshots", "runtime_dir/snapshots", create=True
+    )
     destination = snapshots / f"{target_id}.txt"
     current = _current_snapshot(destination)
     current_sha = None if current is None else hashlib.sha256(current).hexdigest()
