@@ -34,7 +34,6 @@ browser-profiles/
 *.key.json
 *.pem
 *.response
-*.snapshot
 *.webhook
 cookies*.json
 credentials*.json
