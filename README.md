@@ -85,7 +85,7 @@ The helper rejects a stale baseline instead of overwriting it. Remove the candid
 
 ## Execution model
 
-This local-only design intentionally avoids remote persistence and notification services. Do not run overlapping invocations against the same runtime directory. Use a scheduler or process supervisor that serializes runs.
+Do not run overlapping invocations against the same runtime directory. Use a scheduler or process supervisor that serializes runs.
 
 Browser-rendered targets are supported only when the browser/web tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Do not provide cookies or credentials.
 
