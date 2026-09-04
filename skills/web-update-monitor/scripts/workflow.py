@@ -164,11 +164,19 @@ def promote_snapshot(
     if hashlib.sha256(candidate_data).hexdigest() != candidate_sha256:
         raise WorkflowError("candidate_sha256 does not match candidate")
 
-    snapshots_dir = runtime / "snapshots"
-    snapshots_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    snapshots_dir = _ensure_directory(runtime / "snapshots", "runtime_dir/snapshots")
     destination = snapshots_dir / f"{target_id}.txt"
     current = _read_snapshot(destination)
     current_sha256 = None if current is None else hashlib.sha256(current).hexdigest()
+    if current_sha256 == candidate_sha256:
+        _fsync_snapshot_directory(snapshots_dir)
+        return {
+            "action": "snapshot_promoted",
+            "applied": True,
+            "already": True,
+            "path": str(destination),
+            "sha256": candidate_sha256,
+        }
     if current_sha256 != expected_sha256:
         return {
             "action": "snapshot_conflict",
@@ -178,13 +186,14 @@ def promote_snapshot(
 
     temporary = _write_temporary_snapshot(destination, candidate_data)
     try:
-        os.replace(temporary, destination)
+        temporary.replace(destination)
     except OSError as exc:
         raise WorkflowError("cannot promote snapshot") from exc
     finally:
         with suppress(OSError):
             temporary.unlink(missing_ok=True)
 
+    _fsync_snapshot_directory(snapshots_dir)
     durable = _read_snapshot(destination)
     durable_sha256 = None if durable is None else hashlib.sha256(durable).hexdigest()
     if durable_sha256 != candidate_sha256:
@@ -208,9 +217,31 @@ def _runtime_dir(value: str | Path) -> Path:
     return path.resolve()
 
 
+def _ensure_directory(path: Path, description: str) -> Path:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise WorkflowError(f"{description} is unavailable") from exc
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise WorkflowError(f"{description} is unavailable") from exc
+    except OSError as exc:
+        raise WorkflowError(f"{description} is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise WorkflowError(f"{description} must be a non-symlink directory")
+    return path
+
+
 def _candidate_path(runtime_dir: Path, value: str | Path) -> Path:
-    candidates_dir = runtime_dir / "candidates"
-    candidates_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    candidates_dir = _ensure_directory(
+        runtime_dir / "candidates", "runtime_dir/candidates"
+    )
     candidate = Path(value)
     original = Path.cwd() / candidate if not candidate.is_absolute() else candidate
     try:
@@ -225,6 +256,28 @@ def _candidate_path(runtime_dir: Path, value: str | Path) -> Path:
     except ValueError as exc:
         raise WorkflowError("candidate must be under runtime_dir/candidates") from exc
     return candidate
+
+
+def _fsync_directory(path: Path) -> None:
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    directory_fd = os.open(path, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _fsync_snapshot_directory(path: Path) -> None:
+    try:
+        _fsync_directory(path)
+    except OSError as exc:
+        raise WorkflowError("cannot fsync snapshot directory") from exc
 
 
 def _read_snapshot(path: Path) -> bytes | None:
@@ -266,11 +319,7 @@ def _write_temporary_snapshot(destination: Path, data: bytes) -> Path:
     path = Path(name)
     completed = False
     try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb", closefd=False) as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
+        _write_snapshot_data(descriptor, data)
         completed = True
     except OSError as exc:
         raise WorkflowError("cannot write temporary snapshot") from exc
@@ -280,6 +329,14 @@ def _write_temporary_snapshot(destination: Path, data: bytes) -> Path:
             with suppress(OSError):
                 path.unlink(missing_ok=True)
     return path
+
+
+def _write_snapshot_data(descriptor: int, data: bytes) -> None:
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "wb", closefd=False) as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def _read_payload() -> Mapping[str, object]:
@@ -301,16 +358,19 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _run_command(args: argparse.Namespace) -> dict[str, object]:
+    if args.command == "validate-targets":
+        return validate_targets(_read_payload())
+    if args.command == "change-action":
+        return change_action(_read_payload())
+    return promote_snapshot(args.runtime_dir, args.candidate, _read_payload())
+
+
 def main() -> int:
     """Run one deterministic workflow helper command."""
     args = _parser().parse_args()
     try:
-        if args.command == "validate-targets":
-            result = validate_targets(_read_payload())
-        elif args.command == "change-action":
-            result = change_action(_read_payload())
-        else:
-            result = promote_snapshot(args.runtime_dir, args.candidate, _read_payload())
+        result = _run_command(args)
     except WorkflowError as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 2

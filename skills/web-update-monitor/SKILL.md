@@ -103,7 +103,7 @@ Example request:
 
 The helper verifies that the candidate is a regular UTF-8 file under `$RUNTIME_DIR/candidates/`, checks its digest, compares the current baseline with `expected_sha256`, and atomically replaces `$RUNTIME_DIR/snapshots/<target_id>.txt`.
 
-If it returns `snapshot_conflict`, stop that target and rerun from the current baseline. Do not overwrite the snapshot manually.
+If it returns `snapshot_conflict`, stop that target and rerun from the current baseline. Do not overwrite the snapshot manually. If the candidate already matches the current baseline, the helper returns `snapshot_promoted` with `already: true`; treat that idempotent retry as success.
 
 After `snapshot_promoted`, delete the candidate.
 
@@ -115,13 +115,13 @@ For `notify`, summarize only:
 - `watch_focus`
 - the bounded diff returned by `monitor.py`
 
-Send Slack once. Report only a confirmed delivery or confirmed failure.
+Attempt one Slack delivery for each material change in the current run. Report only a confirmed delivery or confirmed failure.
 
 - confirmed delivery: promote the candidate, then delete it
 - confirmed failure: leave the baseline unchanged and stop
 - ambiguous outcome: leave the baseline unchanged and stop; do not claim delivery
 
-The skill intentionally does not maintain a durable notification ledger. Scheduler-level serialization is the concurrency boundary for this local-only design.
+The skill intentionally does not maintain a durable notification ledger. Notifications therefore have at-least-once semantics across retries and restarts: if Slack accepts a message but the process crashes before snapshot promotion, or the delivery outcome is ambiguous, a later run may send the same change again. Duplicates are possible. Scheduler-level serialization is the concurrency boundary for this local-only design.
 
 ## Safety and limits
 

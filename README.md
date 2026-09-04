@@ -84,7 +84,7 @@ uv run python skills/web-update-monitor/scripts/workflow.py \
 
 The helper rejects a stale baseline instead of overwriting it. Remove the candidate after successful promotion or when the result is unchanged.
 
-For a material change, send Slack once and promote the snapshot only after confirmed delivery. If delivery fails or is ambiguous, leave the baseline unchanged and stop that target.
+For a material change, attempt one Slack delivery in the current run and promote the snapshot only after confirmed delivery. Notifications have at-least-once semantics across retries and restarts: if Slack accepts a message but the process crashes before promotion, or delivery is ambiguous, a later run may send the same change again, so duplicates are possible. If delivery fails or is ambiguous, leave the baseline unchanged and stop that target.
 
 ## Execution model
 
