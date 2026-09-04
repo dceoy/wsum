@@ -167,14 +167,10 @@ addopts = [
 ]
 pythonpath = ["."]
 testpaths = ["tests"]
-python_files = ["test_*.py", "*_test.py"]
-python_classes = ["Test*"]
 python_functions = ["test_*"]
-minversion = "6.0"
 
 [tool.coverage.run]
 source = ["skills/web-update-monitor/scripts"]
-omit = ["tests/**"]
 
 [tool.coverage.report]
 show_missing = true
