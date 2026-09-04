@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
+import stat
 from typing import TYPE_CHECKING
 
 import pytest
 import workflow
-from workflow import WorkflowError, promote_snapshot, validate_targets
+from workflow import WorkflowError, promote_snapshot, validate_targets, write_report
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -97,6 +99,141 @@ def test_validate_targets_rejects_unsafe_urls(url: str) -> None:
 def test_validate_targets_rejects_duplicate_ids() -> None:
     with pytest.raises(WorkflowError, match="duplicate_target_id"):
         validate_targets({"targets": [_target(), _target(name="Second")]})
+
+
+def test_write_report_creates_private_report(tmp_path: Path) -> None:
+    report = "# Example\n\nA material update.\n"
+
+    result = write_report(
+        tmp_path,
+        {"target_id": "example", "report": report},
+    )
+
+    reports = tmp_path / "reports"
+    destination = reports / "example.md"
+    assert result == {"action": "report_written", "path": str(destination)}
+    assert destination.read_text() == report
+    assert stat.S_IMODE(reports.stat().st_mode) == 0o700
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+
+def test_write_report_replaces_existing_regular_report(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    destination = reports / "example.md"
+    destination.write_text("old report\n")
+
+    write_report(tmp_path, {"target_id": "example", "report": "new report\n"})
+
+    assert destination.read_text() == "new report\n"
+
+
+def test_main_writes_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        workflow.sys,
+        "stdin",
+        io.StringIO(json.dumps({"target_id": "example", "report": "update\n"})),
+    )
+    monkeypatch.setattr(
+        workflow.sys,
+        "argv",
+        ["workflow.py", "write-report", "--runtime-dir", str(tmp_path)],
+    )
+
+    assert workflow.main() == 0
+    assert (tmp_path / "reports" / "example.md").read_text() == "update\n"
+
+
+def test_write_report_rejects_unsupported_fields(tmp_path: Path) -> None:
+    with pytest.raises(WorkflowError, match="write-report contains unsupported"):
+        write_report(
+            tmp_path,
+            {"target_id": "example", "report": "update\n", "unexpected": True},
+        )
+
+
+@pytest.mark.parametrize(
+    "target_id",
+    ["../escape", "/absolute", "nested/path"],
+    ids=["traversal", "absolute", "separator"],
+)
+def test_write_report_rejects_invalid_target_id(tmp_path: Path, target_id: str) -> None:
+    with pytest.raises(WorkflowError, match="invalid_target_id"):
+        write_report(tmp_path, {"target_id": target_id, "report": "update\n"})
+
+
+def test_write_report_rejects_symlinked_reports_directory(tmp_path: Path) -> None:
+    outside = tmp_path / "outside-reports"
+    outside.mkdir()
+    (tmp_path / "reports").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(WorkflowError, match="runtime_dir/reports"):
+        write_report(tmp_path, {"target_id": "example", "report": "update\n"})
+
+    assert not (outside / "example.md").exists()
+
+
+def test_write_report_rejects_symlinked_destination(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("original\n")
+    destination = reports / "example.md"
+    destination.symlink_to(outside)
+
+    with pytest.raises(WorkflowError, match="regular non-symlink"):
+        write_report(tmp_path, {"target_id": "example", "report": "update\n"})
+
+    assert destination.is_symlink()
+    assert outside.read_text() == "original\n"
+
+
+def test_write_report_preserves_destination_when_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    destination = reports / "example.md"
+    destination.write_text("old report\n")
+
+    def fail_replace(_: Path, __: Path) -> Path:
+        raise OSError
+
+    monkeypatch.setattr(workflow.Path, "replace", fail_replace)
+    with pytest.raises(WorkflowError, match="cannot write report"):
+        write_report(tmp_path, {"target_id": "example", "report": "new report\n"})
+
+    assert destination.read_text() == "old report\n"
+    assert not list(reports.glob(".example.md.*.tmp"))
+
+
+def test_write_report_fsyncs_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fsynced: list[Path] = []
+    monkeypatch.setattr(workflow, "_fsync_directory", fsynced.append)
+
+    write_report(tmp_path, {"target_id": "example", "report": "update\n"})
+
+    assert fsynced == [tmp_path, tmp_path / "reports"]
+
+
+def test_write_report_reports_fsync_failure_after_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+
+    def fail(path: Path) -> None:
+        if path == reports:
+            raise OSError
+
+    monkeypatch.setattr(workflow, "_fsync_directory", fail)
+    with pytest.raises(WorkflowError, match="cannot fsync report directory"):
+        write_report(tmp_path, {"target_id": "example", "report": "update\n"})
+
+    assert (reports / "example.md").read_text() == "update\n"
+    assert not list(reports.glob(".example.md.*.tmp"))
 
 
 def test_promote_snapshot_creates_baseline(tmp_path: Path) -> None:
@@ -219,8 +356,8 @@ def test_promote_snapshot_rejects_symlink_candidate(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "directory_name",
-    ["candidates", "snapshots"],
-    ids=["candidates", "snapshots"],
+    ["candidates", "snapshots", "reports"],
+    ids=["candidates", "snapshots", "reports"],
 )
 def test_ensure_directory_rejects_symlink(tmp_path: Path, directory_name: str) -> None:
     target = tmp_path / f"outside-{directory_name}"

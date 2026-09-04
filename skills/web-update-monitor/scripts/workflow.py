@@ -29,6 +29,7 @@ _TARGET_FIELDS = {
     "url",
     "watch_focus",
 }
+_REPORT_FIELDS = {"report", "target_id"}
 _MAX_SNAPSHOT_BYTES = 40 * 1024 * 1024
 
 
@@ -127,6 +128,44 @@ def validate_targets(payload: Mapping[str, object]) -> dict[str, object]:
     if len(ids) != len(set(ids)):
         raise WorkflowError("duplicate_target_id")
     return {"targets": targets}
+
+
+def write_report(
+    runtime_dir: str | Path,
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    """Atomically write one local Markdown report under the runtime directory."""
+    runtime = _runtime_dir(runtime_dir)
+    unsupported_fields = set(payload) - _REPORT_FIELDS
+    if unsupported_fields:
+        raise WorkflowError("write-report contains unsupported fields")
+    target_id = _validate_target_id(payload.get("target_id"))
+    report = _require_string(payload.get("report"), "report")
+    report_data = report.encode("utf-8")
+    if len(report_data) > _MAX_SNAPSHOT_BYTES:
+        raise WorkflowError("report size is invalid")
+
+    reports_dir = _ensure_directory(
+        runtime / "reports", "runtime_dir/reports", sync_parent=True
+    )
+    destination = _report_path(reports_dir, target_id)
+    temporary = _write_temporary_report(destination, report_data)
+    try:
+        temporary.replace(destination)
+    except OSError as exc:
+        raise WorkflowError("cannot write report") from exc
+    finally:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+
+    try:
+        _fsync_directory(reports_dir)
+    except OSError as exc:
+        raise WorkflowError("cannot fsync report directory") from exc
+    durable = _read_text_bytes(destination, "report")
+    if durable != report_data:
+        raise WorkflowError("report read-back mismatch")
+    return {"action": "report_written", "path": str(destination)}
 
 
 def promote_snapshot(
@@ -256,6 +295,19 @@ def _candidate_path(runtime_dir: Path, value: str | Path) -> Path:
     return candidate
 
 
+def _report_path(reports_dir: Path, target_id: str) -> Path:
+    destination = reports_dir / f"{target_id}.md"
+    try:
+        info = destination.lstat()
+    except FileNotFoundError:
+        return destination
+    except OSError as exc:
+        raise WorkflowError("cannot stat report") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise WorkflowError("report must be a regular non-symlink file")
+    return destination
+
+
 def _fsync_directory(path: Path) -> None:
     if not hasattr(os, "O_DIRECTORY"):
         return
@@ -306,6 +358,14 @@ def _read_text_bytes(path: Path, description: str) -> bytes:
 
 
 def _write_temporary_snapshot(destination: Path, data: bytes) -> Path:
+    return _write_temporary_file(destination, data, "snapshot")
+
+
+def _write_temporary_report(destination: Path, data: bytes) -> Path:
+    return _write_temporary_file(destination, data, "report")
+
+
+def _write_temporary_file(destination: Path, data: bytes, description: str) -> Path:
     try:
         descriptor, name = tempfile.mkstemp(
             dir=destination.parent,
@@ -313,14 +373,14 @@ def _write_temporary_snapshot(destination: Path, data: bytes) -> Path:
             suffix=".tmp",
         )
     except OSError as exc:
-        raise WorkflowError("cannot create temporary snapshot") from exc
+        raise WorkflowError(f"cannot create temporary {description}") from exc
     path = Path(name)
     completed = False
     try:
-        _write_snapshot_data(descriptor, data)
+        _write_file_data(descriptor, data)
         completed = True
     except OSError as exc:
-        raise WorkflowError("cannot write temporary snapshot") from exc
+        raise WorkflowError(f"cannot write temporary {description}") from exc
     finally:
         os.close(descriptor)
         if not completed:
@@ -329,7 +389,7 @@ def _write_temporary_snapshot(destination: Path, data: bytes) -> Path:
     return path
 
 
-def _write_snapshot_data(descriptor: int, data: bytes) -> None:
+def _write_file_data(descriptor: int, data: bytes) -> None:
     os.fchmod(descriptor, 0o600)
     with os.fdopen(descriptor, "wb", closefd=False) as stream:
         stream.write(data)
@@ -349,6 +409,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate-targets")
+    report = subparsers.add_parser("write-report")
+    report.add_argument("--runtime-dir", required=True)
     promote = subparsers.add_parser("promote-snapshot")
     promote.add_argument("--runtime-dir", required=True)
     promote.add_argument("--candidate", required=True)
@@ -358,6 +420,8 @@ def _parser() -> argparse.ArgumentParser:
 def _run_command(args: argparse.Namespace) -> dict[str, object]:
     if args.command == "validate-targets":
         return validate_targets(_read_payload())
+    if args.command == "write-report":
+        return write_report(args.runtime_dir, _read_payload())
     return promote_snapshot(args.runtime_dir, args.candidate, _read_payload())
 
 

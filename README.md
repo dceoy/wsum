@@ -5,8 +5,8 @@ A local-first Agent Skill for detecting meaningful updates on websites and docum
 The implementation keeps deterministic mechanics in Python and semantic judgment in the agent:
 
 - `monitor.py` fetches or reads content, normalizes it, hashes it, and emits a bounded diff plus a candidate snapshot.
-- `workflow.py` validates targets and atomically promotes local snapshots with an expected-baseline check.
-- the agent judges materiality, writes a concise local Markdown report when a change matters, and manages candidates according to the monitor result.
+- `workflow.py` validates targets, safely writes local reports, and atomically promotes local snapshots with an expected-baseline check.
+- the agent judges materiality, composes a concise local Markdown report when a change matters, and manages candidates according to the monitor result.
 
 Runtime state and reports stay under a caller-selected local directory.
 
@@ -68,9 +68,24 @@ Handle the monitor result directly:
 
 - `baseline`: promote the candidate.
 - `unchanged`: delete the candidate.
-- `changed`: judge whether the bounded diff matters to `watch_focus`. For a material change, write `.runtime/reports/<target_id>.md`; for a non-material change, skip the report. If the diff is truncated and would otherwise be classified non-material, stop for manual review instead of promoting it.
+- `changed`: judge whether the bounded diff matters to `watch_focus`. For a material change, write `.runtime/reports/<target_id>.md` through the safe report helper below; for a non-material change, skip the report. If the diff is truncated and would otherwise be classified non-material, stop for manual review instead of promoting it.
 
-For a material change, write the report before promotion. If the report cannot be written, leave the baseline unchanged and stop that target.
+For a material change, put the complete Markdown report in a JSON object and write it before promotion:
+
+```json
+{
+  "target_id": "example",
+  "report": "# Example\n\nA concise summary of the material update.\n"
+}
+```
+
+```bash
+uv run python skills/web-update-monitor/scripts/workflow.py \
+  write-report \
+  --runtime-dir .runtime < report.json
+```
+
+The helper rejects symlinked or non-regular report paths and atomically installs a private file. Promote only after `report_written`; if report writing fails, leave the baseline unchanged and stop that target.
 
 Promote the candidate using the monitor result's `previous_sha256` as `expected_sha256` (`null` for the first baseline) and its `sha256` as `candidate_sha256`:
 

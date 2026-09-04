@@ -7,7 +7,7 @@ description: Monitor HTTP(S) websites, PDFs, feeds, and browser-rendered pages f
 
 Use local filesystem state only.
 
-`monitor.py` owns fetch/read, normalization, hashing, and bounded diff generation. `workflow.py` owns target validation and safe local snapshot promotion. The agent owns browser I/O, materiality judgment, summarization, local report writing, and candidate cleanup.
+`monitor.py` owns fetch/read, normalization, hashing, and bounded diff generation. `workflow.py` owns target validation, safe local report writing, and local snapshot promotion. The agent owns browser I/O, materiality judgment, summarization, report composition, and candidate cleanup.
 
 ## Inputs
 
@@ -74,13 +74,28 @@ For `changed`:
 
 ## 4. Write a material-change report
 
-Create `$RUNTIME_DIR/reports/` if needed and write `$RUNTIME_DIR/reports/<target_id>.md` with:
+Build a complete Markdown report with:
 
 - target name and source URL
 - `watch_focus`
 - a concise summary of the bounded diff
 
-Do not include credentials or unrelated fetched content. If the report cannot be written, leave the baseline unchanged and stop that target.
+Provide it to the safe local writer as a JSON object on standard input:
+
+```json
+{
+  "target_id": "example",
+  "report": "# Example\n\nA concise summary of the material update.\n"
+}
+```
+
+```bash
+uv run python skills/web-update-monitor/scripts/workflow.py \
+  write-report \
+  --runtime-dir "$RUNTIME_DIR" < report.json
+```
+
+The helper validates `target_id`, creates a non-symlink `reports/` directory when needed, rejects symlinked or non-regular report destinations, and atomically writes a private report file. Do not include credentials or unrelated fetched content. Promote the snapshot only after a `report_written` result; if report writing fails, including a directory durability failure after replacement, leave the baseline unchanged and stop that target.
 
 ## 5. Promote the local snapshot
 
