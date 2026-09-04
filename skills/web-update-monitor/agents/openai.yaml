@@ -1,4 +1,0 @@
-interface:
-  display_name: "Web Update Monitor"
-  short_description: "Monitor website updates with local filesystem state"
-  default_prompt: "Use $web-update-monitor to run a safe local website update check and write a local report when a meaningful change is found."

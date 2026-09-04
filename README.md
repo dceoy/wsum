@@ -1,117 +1,128 @@
 # Web Update Monitor
 
-A local-first Agent Skill for detecting meaningful updates on websites and documents.
+A local-first Agent Skill for detecting meaningful updates on public websites and documents.
 
 The implementation keeps deterministic mechanics in Python and semantic judgment in the agent:
 
 - `monitor.py` fetches or reads content, normalizes it, hashes it, and emits a bounded diff plus a candidate snapshot.
-- `workflow.py` validates targets, safely writes local reports, and atomically promotes local snapshots with an expected-baseline check.
-- the agent judges materiality, composes a concise local Markdown report when a change matters, and manages candidates according to the monitor result.
+- `workflow.py` safely validates targets, writes reports, and promotes snapshots.
+- `cowork.py` turns a simple CSV workspace into a multi-target Cowork workflow and hides internal IDs, hashes, and promotion details from the user.
+- the agent judges whether a bounded diff matters and composes a concise Markdown report only for material changes.
 
-Runtime state and reports stay under a caller-selected local directory.
+## Claude Cowork
 
-## Setup
+The Cowork workflow is designed so a non-engineer only needs to manage a folder and describe what to monitor.
+
+### 1. Install the skill
+
+Download the latest successful `web-update-monitor-cowork-package` artifact from the [main-branch CI workflow runs](https://github.com/dceoy/wsum/actions/workflows/ci.yml?query=branch%3Amain). Extract the downloaded artifact and upload the contained `web-update-monitor.zip` in Claude's custom Skills UI.
+
+Workflow artifacts require GitHub access and expire, so use the newest successful main-branch run.
+
+Developers and maintainers with a repository checkout can build the same archive locally:
+
+```bash
+python scripts/package_cowork_skill.py
+```
+
+Upload `dist/web-update-monitor.zip` from Claude's custom Skills UI after building it locally.
+
+The repository keeps the portable Agent Skill manifest as `SKILL.md`. The packager emits it as lowercase `skill.md` inside the Cowork ZIP and adds the Python and `pypdf` dependency metadata required by Cowork. This avoids keeping case-colliding `SKILL.md` and `skill.md` files in the source tree.
+
+### 2. Connect a workspace folder
+
+Use a local folder with a `targets.csv` file. A template is available at `skills/web-update-monitor/examples/targets.csv`.
+
+```csv
+name,url,watch_focus,enabled
+OpenAI Pricing,https://openai.com/api/pricing/,Pricing and plan changes,true
+Anthropic News,https://www.anthropic.com/news,Important product announcements,true
+```
+
+Columns:
+
+- `name`: required display name.
+- `url`: required public HTTP(S) URL.
+- `watch_focus`: optional natural-language description of meaningful changes.
+- `enabled`: optional `true` or `false`; blank defaults to `true`.
+
+`target_id` is intentionally not user-facing. It is derived deterministically from the URL.
+
+The workspace evolves into:
+
+```text
+workspace/
+├── targets.csv
+├── reports/
+└── .wsum/
+    ├── candidates/
+    ├── pending/
+    └── snapshots/
+```
+
+Users may edit `targets.csv`. `.wsum/` is internal state and should not be edited manually.
+
+### 3. Ask Cowork in natural language
+
+Examples:
+
+```text
+Check every target in targets.csv and summarize meaningful updates.
+```
+
+```text
+Add https://example.com/pricing to the monitor and watch for pricing changes.
+```
+
+```text
+Disable the Anthropic News target.
+```
+
+Cowork edits the CSV when needed, checks all enabled rows, and writes Markdown files under `reports/` only when a change is material.
+
+## Deterministic Cowork facade
+
+For development or direct invocation, run:
+
+```bash
+python skills/web-update-monitor/scripts/cowork.py \
+  --workspace /path/to/workspace check
+```
+
+The facade validates the complete CSV before fetching any target. It automatically handles first baselines, unchanged snapshots, disabled rows, and per-target failures. Changed targets are returned to the agent for semantic review.
+
+After the agent decides whether a change is material, it passes an internal decision to:
+
+```bash
+python skills/web-update-monitor/scripts/cowork.py \
+  --workspace /path/to/workspace finalize < decision.json
+```
+
+The facade verifies the review revision, promotes the candidate snapshot, writes a report only after successful promotion, and clears pending state. If report persistence fails after promotion, retain the pending state and retry. A truncated diff cannot be finalized as non-material; it stops for manual review instead.
+
+## Direct low-level workflow
+
+The existing deterministic helpers remain available for development and non-Cowork integrations.
+
+Set up the repository with:
 
 ```bash
 uv sync
-mkdir -p .runtime/candidates .runtime/snapshots .runtime/reports
 ```
 
-Keep target configuration in a local JSON file, for example:
+`monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workflow.py` provides target validation, safe report writing, and atomic snapshot promotion. See `skills/web-update-monitor/SKILL.md` for the canonical agent procedure.
 
-```json
-{
-  "targets": [
-    {
-      "target_id": "example",
-      "name": "Example",
-      "url": "https://example.com/",
-      "watch_focus": "Product or pricing changes"
-    }
-  ]
-}
-```
-
-Validate it before a run:
-
-```bash
-uv run python skills/web-update-monitor/scripts/workflow.py \
-  validate-targets < targets.json
-```
-
-## Local workflow
-
-For each enabled target, use the canonical baseline at:
-
-```text
-.runtime/snapshots/<target_id>.txt
-```
-
-Write the next normalized snapshot under `.runtime/candidates/`. On the first run, omit `--previous`:
-
-```bash
-uv run python skills/web-update-monitor/scripts/monitor.py \
-  --url https://example.com/ \
-  --output .runtime/candidates/example.txt
-```
-
-On later runs, compare with the local baseline:
-
-```bash
-uv run python skills/web-update-monitor/scripts/monitor.py \
-  --url https://example.com/ \
-  --previous .runtime/snapshots/example.txt \
-  --output .runtime/candidates/example.txt
-```
-
-Handle the monitor result directly:
-
-- `baseline`: promote the candidate.
-- `unchanged`: delete the candidate.
-- `changed`: judge whether the bounded diff matters to `watch_focus`. For a material change, write `.runtime/reports/<target_id>.md` through the safe report helper below; for a non-material change, skip the report. If the diff is truncated and would otherwise be classified non-material, stop for manual review instead of promoting it.
-
-For a material change, put the complete Markdown report in a JSON object and write it before promotion:
-
-```json
-{
-  "target_id": "example",
-  "report": "# Example\n\nA concise summary of the material update.\n"
-}
-```
-
-```bash
-uv run python skills/web-update-monitor/scripts/workflow.py \
-  write-report \
-  --runtime-dir .runtime < report.json
-```
-
-The helper rejects symlinked or non-regular report paths and atomically installs a private file. Promote only after `report_written`; if report writing fails, leave the baseline unchanged and stop that target.
-
-Promote the candidate using the monitor result's `previous_sha256` as `expected_sha256` (`null` for the first baseline) and its `sha256` as `candidate_sha256`:
-
-```bash
-uv run python skills/web-update-monitor/scripts/workflow.py \
-  promote-snapshot \
-  --runtime-dir .runtime \
-  --candidate .runtime/candidates/example.txt < promotion.json
-```
-
-The helper rejects a stale baseline instead of overwriting it. Remove the candidate after successful promotion.
-
-## Execution model
-
-Do not run overlapping invocations against the same runtime directory. Use a scheduler or process supervisor that serializes runs.
-
-Browser-rendered targets are supported only when the browser/web tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Do not provide cookies or credentials.
+Browser-rendered targets are intentionally outside the Cowork CSV facade. Do not auto-escalate a static failure to browser rendering. Use browser input only when the browser tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Never provide cookies or credentials.
 
 ## Validation
 
 ```bash
 uv run pytest
+python scripts/package_cowork_skill.py
 ```
 
-See `skills/web-update-monitor/SKILL.md` for the agent procedure.
+The local QA skill also runs Ruff, Pyright, Markdown formatting, and GitHub Actions checks.
 
 ## Repository boundary
 
-Do not commit fetched production content, snapshots, reports, runtime state, credentials, browser profiles, or other deployment data.
+Do not commit fetched production content, `targets.csv`, snapshots, reports, `.wsum/`, credentials, browser profiles, or other deployment data.

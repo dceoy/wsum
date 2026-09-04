@@ -50,7 +50,7 @@ select = [
   "PLW",    # Pylint warning (PLW)
   "FLY",    # flynt (FLY)
   "PERF",   # Perflint (PERF)
-  "FURB",   # refurb (FURB)
+  "FURB",    # refurb (FURB)
   "RUF",    # Ruff-specific rules (RUF)
   "YTT",    # flake8-2020 (YTT)
   "ANN",    # flake8-annotations (ANN)
@@ -95,6 +95,25 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"scripts/package_cowork_skill.py" = [
+  "docstring-missing-returns",  # concise packaging helper docstrings are sufficient
+  "docstring-missing-exception",  # packaging failures are direct RuntimeError messages
+  "implicit-namespace-package",  # repository scripts are executable helpers
+  "print",  # CLI prints the generated package path
+  "raise-vanilla-args",  # packaging errors are defined at the decision site
+  "raw-string-in-exception",  # CLI errors are intentionally direct literal messages
+]
+"skills/web-update-monitor/scripts/cowork.py" = [
+  "docstring-missing-returns",  # concise helper docstrings are sufficient here
+  "docstring-missing-exception",  # errors are represented by CoworkError messages
+  "f-string-in-exception",  # CSV validation errors are intentionally contextual
+  "implicit-namespace-package",  # skill scripts are executable helpers, not a package
+  "print",  # CLI writes its JSON result to stdout/stderr
+  "private-member-access",  # facade reuses monitor CLI defaults through its parser
+  "raise-vanilla-args",  # CoworkError messages are defined at the decision site
+  "raw-string-in-exception",  # CLI errors are intentionally direct literal messages
+  "too-many-statements-in-try-clause",  # atomic pending writes stay in one transaction
+]
 "skills/web-update-monitor/scripts/monitor.py" = [
   "any-type",  # Any is required at urllib callback boundaries
   "blind-except",  # urllib exposes heterogeneous transport failures
