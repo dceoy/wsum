@@ -210,22 +210,12 @@ tempCodeRunnerFile.py
 .pypirc
 
 # Website monitor operational data and secrets
-.runtime/
-.workspaces/
-artifacts/
-audit-exports/
+targets.csv
+reports/
+.wsum/
 browser-profiles/
-connector-config/
-diffs/
-drive-exports/
 fetched/
-logs/
-outbox-exports/
-replays/
-runs/
-sheets-exports/
 snapshots/
-tmp/
 *.har
 *.http
 *.key.json
@@ -238,7 +228,6 @@ credentials*.json
 service-account*.json
 token*.json
 webhook*.txt
-replay-manifest*.json
 
 # Synthetic fixtures are reviewed and intentionally tracked.
 !tests/fixtures/
