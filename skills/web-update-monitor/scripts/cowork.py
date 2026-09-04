@@ -1,4 +1,3 @@
-# ruff: noqa: DOC201, EM101, EM102, INP001, T201, TRY003
 """Cowork-facing orchestration for CSV-based web update monitoring."""
 
 from __future__ import annotations
@@ -114,7 +113,7 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
     if fieldnames is None or len(fieldnames) != len(set(fieldnames)):
         raise CoworkError(f"{_TARGETS_FILE} must have a unique header row")
     fields = set(fieldnames)
-    if not _REQUIRED_FIELDS <= fields:
+    if not _REQUIRED_FIELDS.issubset(fields):
         raise CoworkError(f"{_TARGETS_FILE} requires name and url columns")
     if fields - _ALLOWED_FIELDS:
         raise CoworkError(f"{_TARGETS_FILE} contains unsupported columns")
@@ -271,7 +270,12 @@ def check(workspace: str | Path) -> dict[str, object]:
             continue
         try:
             outcomes.append(_monitor_target(state, target))
-        except (monitor.MonitorError, OSError, CoworkError, workflow.WorkflowError) as exc:
+        except (
+            monitor.MonitorError,
+            OSError,
+            CoworkError,
+            workflow.WorkflowError,
+        ) as exc:
             outcomes.append(
                 {
                     "action": "error",
