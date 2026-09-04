@@ -304,6 +304,7 @@ def test_promote_snapshot_fsyncs_snapshot_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, digest = _candidate(tmp_path)
+    (tmp_path / "snapshots").mkdir()
     fsynced: list[Path] = []
     monkeypatch.setattr(workflow, "_fsync_directory", fsynced.append)
 
@@ -321,10 +322,32 @@ def test_promote_snapshot_fsyncs_snapshot_directory(
     assert fsynced == [tmp_path / "snapshots"]
 
 
+def test_promote_snapshot_fsyncs_runtime_when_creating_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate, digest = _candidate(tmp_path)
+    fsynced: list[Path] = []
+    monkeypatch.setattr(workflow, "_fsync_directory", fsynced.append)
+
+    result = promote_snapshot(
+        tmp_path,
+        candidate,
+        {
+            "target_id": "example",
+            "expected_sha256": None,
+            "candidate_sha256": digest,
+        },
+    )
+
+    assert result["action"] == "snapshot_promoted"
+    assert fsynced == [tmp_path, tmp_path / "snapshots"]
+
+
 def test_promote_snapshot_reports_fsync_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     candidate, digest = _candidate(tmp_path)
+    (tmp_path / "snapshots").mkdir()
 
     def fail(_: Path) -> None:
         raise OSError

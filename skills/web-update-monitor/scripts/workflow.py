@@ -164,7 +164,9 @@ def promote_snapshot(
     if hashlib.sha256(candidate_data).hexdigest() != candidate_sha256:
         raise WorkflowError("candidate_sha256 does not match candidate")
 
-    snapshots_dir = _ensure_directory(runtime / "snapshots", "runtime_dir/snapshots")
+    snapshots_dir = _ensure_directory(
+        runtime / "snapshots", "runtime_dir/snapshots", sync_parent=True
+    )
     destination = snapshots_dir / f"{target_id}.txt"
     current = _read_snapshot(destination)
     current_sha256 = None if current is None else hashlib.sha256(current).hexdigest()
@@ -217,7 +219,10 @@ def _runtime_dir(value: str | Path) -> Path:
     return path.resolve()
 
 
-def _ensure_directory(path: Path, description: str) -> Path:
+def _ensure_directory(
+    path: Path, description: str, *, sync_parent: bool = False
+) -> Path:
+    created = False
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -227,6 +232,8 @@ def _ensure_directory(path: Path, description: str) -> Path:
             pass
         except OSError as exc:
             raise WorkflowError(f"{description} is unavailable") from exc
+        else:
+            created = True
         try:
             info = path.lstat()
         except OSError as exc:
@@ -235,6 +242,13 @@ def _ensure_directory(path: Path, description: str) -> Path:
         raise WorkflowError(f"{description} is unavailable") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         raise WorkflowError(f"{description} must be a non-symlink directory")
+    if created and sync_parent:
+        try:
+            _fsync_directory(path.parent)
+        except OSError as exc:
+            raise WorkflowError(
+                f"cannot fsync parent directory for {description}"
+            ) from exc
     return path
 
 
