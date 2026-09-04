@@ -131,16 +131,14 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
         if not any(values.values()):
             continue
         url = values.get("url", "")
-        raw_targets.append(
-            {
-                "target_id": _target_id(url),
-                "name": values.get("name", ""),
-                "url": url,
-                "enabled": _parse_enabled(values.get("enabled", ""), row_number),
-                "watch_focus": values.get("watch_focus", ""),
-                "fetch_mode": "static",
-            }
-        )
+        raw_targets.append({
+            "target_id": _target_id(url),
+            "name": values.get("name", ""),
+            "url": url,
+            "enabled": _parse_enabled(values.get("enabled", ""), row_number),
+            "watch_focus": values.get("watch_focus", ""),
+            "fetch_mode": "static",
+        })
     if not raw_targets:
         raise CoworkError(f"{_TARGETS_FILE} contains no targets")
 
@@ -260,13 +258,11 @@ def check(workspace: str | Path) -> dict[str, object]:
     outcomes: list[dict[str, object]] = []
     for target in targets:
         if target["action"] == "skip_disabled":
-            outcomes.append(
-                {
-                    "action": "skipped",
-                    "target_id": target["target_id"],
-                    "name": target["name"],
-                }
-            )
+            outcomes.append({
+                "action": "skipped",
+                "target_id": target["target_id"],
+                "name": target["name"],
+            })
             continue
         try:
             outcomes.append(_monitor_target(state, target))
@@ -276,14 +272,12 @@ def check(workspace: str | Path) -> dict[str, object]:
             CoworkError,
             workflow.WorkflowError,
         ) as exc:
-            outcomes.append(
-                {
-                    "action": "error",
-                    "target_id": target["target_id"],
-                    "name": target["name"],
-                    "error": str(exc),
-                }
-            )
+            outcomes.append({
+                "action": "error",
+                "target_id": target["target_id"],
+                "name": target["name"],
+                "error": str(exc),
+            })
     return {"targets": outcomes}
 
 
