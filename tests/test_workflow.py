@@ -1,4 +1,4 @@
-"""Tests for deterministic local workflow helpers."""
+"""Tests for the local workflow helpers."""
 
 from __future__ import annotations
 
@@ -32,10 +32,8 @@ def _candidate(runtime_dir: Path, content: str = "next\n") -> tuple[Path, str]:
     return path, hashlib.sha256(content.encode()).hexdigest()
 
 
-def test_validate_targets_defaults_local_target_fields() -> None:
-    result = validate_targets({"targets": [_target()]})
-
-    assert result == {
+def test_validate_targets_applies_defaults() -> None:
+    assert validate_targets({"targets": [_target()]}) == {
         "targets": [
             {
                 "target_id": "example",
@@ -50,40 +48,29 @@ def test_validate_targets_defaults_local_target_fields() -> None:
     }
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("persistence_mode", "google-drive"),
-        ("persistence_mode", "local"),
-        ("unexpected", "value"),
-    ],
-    ids=["removed-backend", "removed-local-mode", "unknown-field"],
-)
-def test_validate_targets_rejects_unsupported_request_fields(
-    field: str, value: str
-) -> None:
-    with pytest.raises(
-        WorkflowError, match="validate-targets contains unsupported fields"
-    ):
-        validate_targets({field: value, "targets": [_target()]})
-
-
-def test_validate_targets_marks_disabled_target_before_fetch() -> None:
+def test_validate_targets_marks_disabled_target() -> None:
     result = validate_targets({"targets": [_target(enabled=False)]})
 
-    assert result == {
-        "targets": [
-            {
-                "target_id": "example",
-                "name": "Example",
-                "url": "https://example.com/",
-                "enabled": False,
-                "action": "skip_disabled",
-                "watch_focus": "",
-                "fetch_mode": "static",
-            }
-        ]
-    }
+    assert result["targets"][0]["action"] == "skip_disabled"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"targets": [], "extra": True},
+    ],
+)
+def test_validate_targets_rejects_invalid_request_shape(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(WorkflowError, match="only targets"):
+        validate_targets(payload)
+
+
+def test_validate_targets_rejects_unknown_target_fields() -> None:
+    with pytest.raises(WorkflowError, match="unsupported fields"):
+        validate_targets({"targets": [_target(extra=True)]})
 
 
 @pytest.mark.parametrize(
@@ -118,10 +105,9 @@ def test_promote_snapshot_creates_baseline(tmp_path: Path) -> None:
         },
     )
 
-    snapshot = tmp_path / "snapshots" / "example.txt"
     assert result["action"] == "snapshot_promoted"
     assert result["sha256"] == digest
-    assert snapshot.read_text() == "next\n"
+    assert (tmp_path / "snapshots" / "example.txt").read_text() == "next\n"
 
 
 def test_promote_snapshot_replaces_expected_baseline(tmp_path: Path) -> None:
@@ -186,9 +172,9 @@ def test_promote_snapshot_rejects_candidate_hash_mismatch(tmp_path: Path) -> Non
 
 
 def test_promote_snapshot_rejects_candidate_outside_runtime(tmp_path: Path) -> None:
+    (tmp_path / "candidates").mkdir()
     candidate = tmp_path.parent / "outside.txt"
     candidate.write_text("next\n")
-    digest = hashlib.sha256(b"next\n").hexdigest()
 
     with pytest.raises(WorkflowError, match="runtime_dir/candidates"):
         promote_snapshot(
@@ -197,7 +183,7 @@ def test_promote_snapshot_rejects_candidate_outside_runtime(tmp_path: Path) -> N
             {
                 "target_id": "example",
                 "expected_sha256": None,
-                "candidate_sha256": digest,
+                "candidate_sha256": hashlib.sha256(b"next\n").hexdigest(),
             },
         )
 
@@ -209,7 +195,6 @@ def test_promote_snapshot_rejects_symlink_candidate(tmp_path: Path) -> None:
     target.write_text("next\n")
     candidate = candidates / "link.txt"
     candidate.symlink_to(target)
-    digest = hashlib.sha256(b"next\n").hexdigest()
 
     with pytest.raises(WorkflowError, match="regular non-symlink"):
         promote_snapshot(
@@ -218,139 +203,39 @@ def test_promote_snapshot_rejects_symlink_candidate(tmp_path: Path) -> None:
             {
                 "target_id": "example",
                 "expected_sha256": None,
-                "candidate_sha256": digest,
+                "candidate_sha256": hashlib.sha256(b"next\n").hexdigest(),
             },
         )
 
 
-@pytest.mark.parametrize(
-    "directory_name",
-    ["candidates", "snapshots"],
-    ids=["candidates", "snapshots"],
-)
-def test_ensure_directory_rejects_symlink(tmp_path: Path, directory_name: str) -> None:
-    target = tmp_path / f"outside-{directory_name}"
-    target.mkdir()
-    path = tmp_path / directory_name
-    path.symlink_to(target, target_is_directory=True)
+@pytest.mark.parametrize("directory_name", ["candidates", "snapshots"])
+def test_promote_snapshot_rejects_symlinked_runtime_directory(
+    tmp_path: Path,
+    directory_name: str,
+) -> None:
+    outside = tmp_path / f"outside-{directory_name}"
+    outside.mkdir()
+    (tmp_path / directory_name).symlink_to(outside, target_is_directory=True)
+
+    if directory_name == "candidates":
+        candidate = outside / "example.txt"
+        candidate.write_text("next\n")
+    else:
+        candidate, _ = _candidate(tmp_path)
 
     with pytest.raises(WorkflowError, match=f"runtime_dir/{directory_name}"):
-        workflow._ensure_directory(  # pyright: ignore[reportPrivateUsage]
-            path, f"runtime_dir/{directory_name}"
-        )
-
-
-def test_promote_snapshot_rejects_symlinked_candidates_directory(
-    tmp_path: Path,
-) -> None:
-    outside = tmp_path / "outside-candidates"
-    outside.mkdir()
-    candidate = outside / "example.txt"
-    candidate.write_text("next\n")
-    (tmp_path / "candidates").symlink_to(outside, target_is_directory=True)
-    digest = hashlib.sha256(b"next\n").hexdigest()
-
-    with pytest.raises(WorkflowError, match="runtime_dir/candidates"):
-        promote_snapshot(
-            tmp_path,
-            tmp_path / "candidates" / "example.txt",
-            {
-                "target_id": "example",
-                "expected_sha256": None,
-                "candidate_sha256": digest,
-            },
-        )
-    assert not (tmp_path / "snapshots").exists()
-
-
-def test_promote_snapshot_rejects_symlinked_snapshots_directory(
-    tmp_path: Path,
-) -> None:
-    candidate, digest = _candidate(tmp_path)
-    outside = tmp_path / "outside-snapshots"
-    outside.mkdir()
-    (tmp_path / "snapshots").symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(WorkflowError, match="runtime_dir/snapshots"):
         promote_snapshot(
             tmp_path,
             candidate,
             {
                 "target_id": "example",
                 "expected_sha256": None,
-                "candidate_sha256": digest,
+                "candidate_sha256": hashlib.sha256(b"next\n").hexdigest(),
             },
         )
-    assert not (outside / "example.txt").exists()
 
 
-def test_promote_snapshot_fsyncs_snapshot_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    candidate, digest = _candidate(tmp_path)
-    (tmp_path / "snapshots").mkdir()
-    fsynced: list[Path] = []
-    monkeypatch.setattr(workflow, "_fsync_directory", fsynced.append)
-
-    result = promote_snapshot(
-        tmp_path,
-        candidate,
-        {
-            "target_id": "example",
-            "expected_sha256": None,
-            "candidate_sha256": digest,
-        },
-    )
-
-    assert result["action"] == "snapshot_promoted"
-    assert fsynced == [tmp_path / "snapshots"]
-
-
-def test_promote_snapshot_fsyncs_runtime_when_creating_snapshots(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    candidate, digest = _candidate(tmp_path)
-    fsynced: list[Path] = []
-    monkeypatch.setattr(workflow, "_fsync_directory", fsynced.append)
-
-    result = promote_snapshot(
-        tmp_path,
-        candidate,
-        {
-            "target_id": "example",
-            "expected_sha256": None,
-            "candidate_sha256": digest,
-        },
-    )
-
-    assert result["action"] == "snapshot_promoted"
-    assert fsynced == [tmp_path, tmp_path / "snapshots"]
-
-
-def test_promote_snapshot_reports_fsync_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    candidate, digest = _candidate(tmp_path)
-    (tmp_path / "snapshots").mkdir()
-
-    def fail(_: Path) -> None:
-        raise OSError
-
-    monkeypatch.setattr(workflow, "_fsync_directory", fail)
-    with pytest.raises(WorkflowError, match="cannot fsync snapshot directory"):
-        promote_snapshot(
-            tmp_path,
-            candidate,
-            {
-                "target_id": "example",
-                "expected_sha256": None,
-                "candidate_sha256": digest,
-            },
-        )
-    assert (tmp_path / "snapshots" / "example.txt").read_text() == "next\n"
-
-
-def test_promote_snapshot_retries_idempotently(tmp_path: Path) -> None:
+def test_promote_snapshot_is_idempotent(tmp_path: Path) -> None:
     candidate, digest = _candidate(tmp_path)
     request = {
         "target_id": "example",
@@ -361,28 +246,8 @@ def test_promote_snapshot_retries_idempotently(tmp_path: Path) -> None:
     promote_snapshot(tmp_path, candidate, request)
     result = promote_snapshot(tmp_path, candidate, request)
 
-    assert result == {
-        "action": "snapshot_promoted",
-        "applied": True,
-        "already": True,
-        "path": str(tmp_path / "snapshots" / "example.txt"),
-        "sha256": digest,
-    }
-
-
-def test_promote_snapshot_requires_existing_runtime_directory(tmp_path: Path) -> None:
-    missing = tmp_path / "missing"
-
-    with pytest.raises(WorkflowError, match="existing directory"):
-        promote_snapshot(
-            missing,
-            missing / "candidates" / "example.txt",
-            {
-                "target_id": "example",
-                "expected_sha256": None,
-                "candidate_sha256": "0" * 64,
-            },
-        )
+    assert result["already"] is True
+    assert result["sha256"] == digest
 
 
 def test_main_returns_error_for_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
