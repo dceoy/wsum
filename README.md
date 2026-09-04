@@ -15,12 +15,15 @@ The Cowork workflow is designed so a non-engineer only needs to manage a folder 
 
 ### 1. Install the skill
 
-Create a ZIP whose root folder is `web-update-monitor`, then upload it from Claude's custom Skills UI. The folder contains both:
+Build the Cowork package from the repository:
 
-- `skill.md` for Claude Cowork, including the Python and `pypdf` dependency metadata.
-- `SKILL.md` as the canonical Agent Skill procedure used by the repository and other compatible agents.
+```bash
+python scripts/package_cowork_skill.py
+```
 
-Claude custom Skills support executable scripts and dependency installation from standard package repositories.
+Upload `dist/web-update-monitor.zip` from Claude's custom Skills UI.
+
+The repository keeps the portable Agent Skill manifest as `SKILL.md`. The packager emits it as lowercase `skill.md` inside the Cowork ZIP and adds the Python and `pypdf` dependency metadata required by Cowork. This avoids keeping case-colliding `SKILL.md` and `skill.md` files in the source tree.
 
 ### 2. Connect a workspace folder
 
@@ -111,6 +114,7 @@ Browser-rendered targets are intentionally outside the Cowork CSV facade. Do not
 
 ```bash
 uv run pytest
+python scripts/package_cowork_skill.py
 ```
 
 The local QA skill also runs Ruff, Pyright, Markdown formatting, and GitHub Actions checks.
