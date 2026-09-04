@@ -1,4 +1,3 @@
-# ruff: noqa: EM102, T201, TRY003
 """Build a Claude Cowork ZIP from the canonical Agent Skill."""
 
 from __future__ import annotations
@@ -23,15 +22,15 @@ def _cowork_manifest(source: str) -> str:
         raise RuntimeError("SKILL.md frontmatter is not terminated")
     frontmatter = source[:closing]
     body = source[closing + len("\n---\n") :]
-    return (
-        f'{frontmatter}\ndependencies: "{_COWORK_DEPENDENCIES}"\n---\n{body}'
-    )
+    return f'{frontmatter}\ndependencies: "{_COWORK_DEPENDENCIES}"\n---\n{body}'
 
 
 def build_package(output: Path = _DEFAULT_OUTPUT) -> Path:
     """Create a Cowork-compatible ZIP and return its path."""
     output.parent.mkdir(parents=True, exist_ok=True)
-    manifest = _cowork_manifest((_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8"))
+    manifest = _cowork_manifest(
+        (_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    )
     with ZipFile(output, "w", ZIP_DEFLATED) as archive:
         archive.writestr(str(_ARCHIVE_ROOT / "skill.md"), manifest)
         for path in sorted(_SKILL_ROOT.rglob("*")):
