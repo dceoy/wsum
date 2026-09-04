@@ -18,7 +18,9 @@ def _write_targets(path: Path, rows: str) -> None:
     path.write_text(f"name,url,watch_focus,enabled\n{rows}", encoding="utf-8")
 
 
-def _changed_result(current: str = "new\n", previous: str = "old\n") -> dict[str, object]:
+def _changed_result(
+    current: str = "new\n", previous: str = "old\n"
+) -> dict[str, object]:
     return {
         "status": "changed",
         "sha256": hashlib.sha256(current.encode()).hexdigest(),
@@ -198,7 +200,7 @@ def test_check_batches_targets_and_contains_failures(
 
     def fake_monitor(_state: Path, target: dict[str, object]) -> dict[str, object]:
         if target["name"] == "Bad":
-            raise cowork.monitor.MonitorError("fetch failed")
+            raise cowork.monitor.MonitorError
         return {
             "action": "unchanged",
             "target_id": target["target_id"],
