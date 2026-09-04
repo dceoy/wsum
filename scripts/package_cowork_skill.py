@@ -28,9 +28,7 @@ def _cowork_manifest(source: str) -> str:
 def build_package(output: Path = _DEFAULT_OUTPUT) -> Path:
     """Create a Cowork-compatible ZIP and return its path."""
     output.parent.mkdir(parents=True, exist_ok=True)
-    manifest = _cowork_manifest(
-        (_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
-    )
+    manifest = _cowork_manifest((_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8"))
     with ZipFile(output, "w", ZIP_DEFLATED) as archive:
         archive.writestr(str(_ARCHIVE_ROOT / "skill.md"), manifest)
         for path in sorted(_SKILL_ROOT.rglob("*")):
