@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import workflow
-from workflow import WorkflowError, change_action, promote_snapshot, validate_targets
+from workflow import WorkflowError, promote_snapshot, validate_targets
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -44,7 +44,6 @@ def test_validate_targets_defaults_local_target_fields() -> None:
                 "enabled": True,
                 "action": "monitor",
                 "watch_focus": "",
-                "notification_group": "",
                 "fetch_mode": "static",
             }
         ]
@@ -81,7 +80,6 @@ def test_validate_targets_marks_disabled_target_before_fetch() -> None:
                 "enabled": False,
                 "action": "skip_disabled",
                 "watch_focus": "",
-                "notification_group": "",
                 "fetch_mode": "static",
             }
         ]
@@ -105,38 +103,6 @@ def test_validate_targets_rejects_unsafe_urls(url: str) -> None:
 def test_validate_targets_rejects_duplicate_ids() -> None:
     with pytest.raises(WorkflowError, match="duplicate_target_id"):
         validate_targets({"targets": [_target(), _target(name="Second")]})
-
-
-@pytest.mark.parametrize(
-    ("payload", "action"),
-    [
-        ({"status": "baseline"}, "promote_snapshot"),
-        ({"status": "unchanged"}, "discard_candidate"),
-        (
-            {"status": "changed", "diff_truncated": False, "materiality": None},
-            "assess_materiality",
-        ),
-        (
-            {"status": "changed", "diff_truncated": False, "materiality": False},
-            "promote_snapshot",
-        ),
-        (
-            {"status": "changed", "diff_truncated": False, "materiality": True},
-            "notify",
-        ),
-        (
-            {"status": "changed", "diff_truncated": True, "materiality": False},
-            "manual_review",
-        ),
-    ],
-)
-def test_change_action_routes_result(payload: dict[str, object], action: str) -> None:
-    assert change_action(payload) == {"action": action}
-
-
-def test_change_action_rejects_invalid_changed_payload() -> None:
-    with pytest.raises(WorkflowError, match="diff_truncated"):
-        change_action({"status": "changed"})
 
 
 def test_promote_snapshot_creates_baseline(tmp_path: Path) -> None:

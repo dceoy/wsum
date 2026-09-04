@@ -103,11 +103,6 @@ def validate_target(value: object) -> dict[str, object]:
         "watch_focus": _require_string(
             target.get("watch_focus", ""), "watch_focus", allow_empty=True
         ),
-        "notification_group": _require_string(
-            target.get("notification_group", ""),
-            "notification_group",
-            allow_empty=True,
-        ),
         "fetch_mode": fetch_mode,
     }
 
@@ -123,29 +118,6 @@ def validate_targets(payload: Mapping[str, object]) -> dict[str, object]:
     if len(ids) != len(set(ids)):
         raise WorkflowError("duplicate_target_id")
     return {"targets": targets}
-
-
-def change_action(payload: Mapping[str, object]) -> dict[str, object]:
-    """Choose the next action from a monitor result and materiality judgment."""
-    status = _require_string(payload.get("status"), "status")
-    if status == "baseline":
-        return {"action": "promote_snapshot"}
-    if status == "unchanged":
-        return {"action": "discard_candidate"}
-    if status != "changed":
-        raise WorkflowError("status must be baseline, unchanged, or changed")
-
-    diff_truncated = payload.get("diff_truncated")
-    if not isinstance(diff_truncated, bool):
-        raise WorkflowError("diff_truncated must be a boolean")
-    materiality = payload.get("materiality")
-    if materiality is None:
-        return {"action": "assess_materiality"}
-    if not isinstance(materiality, bool):
-        raise WorkflowError("materiality must be a boolean or null")
-    if diff_truncated and not materiality:
-        return {"action": "manual_review"}
-    return {"action": "notify" if materiality else "promote_snapshot"}
 
 
 def promote_snapshot(
@@ -368,7 +340,6 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate-targets")
-    subparsers.add_parser("change-action")
     promote = subparsers.add_parser("promote-snapshot")
     promote.add_argument("--runtime-dir", required=True)
     promote.add_argument("--candidate", required=True)
@@ -378,8 +349,6 @@ def _parser() -> argparse.ArgumentParser:
 def _run_command(args: argparse.Namespace) -> dict[str, object]:
     if args.command == "validate-targets":
         return validate_targets(_read_payload())
-    if args.command == "change-action":
-        return change_action(_read_payload())
     return promote_snapshot(args.runtime_dir, args.candidate, _read_payload())
 
 
