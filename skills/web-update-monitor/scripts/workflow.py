@@ -114,6 +114,9 @@ def validate_target(value: object) -> dict[str, object]:
 
 def validate_targets(payload: Mapping[str, object]) -> dict[str, object]:
     """Validate one local run's target set."""
+    unsupported_fields = set(payload) - {"targets"}
+    if unsupported_fields:
+        raise WorkflowError("validate-targets contains unsupported fields")
     raw_targets = _require_list(payload.get("targets"), "targets")
     targets = [validate_target(target) for target in raw_targets]
     ids = [str(target["target_id"]) for target in targets]

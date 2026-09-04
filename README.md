@@ -8,7 +8,7 @@ The implementation keeps deterministic mechanics in Python and semantic judgment
 - `workflow.py` validates targets, routes monitor results, and atomically promotes local snapshots with an expected-baseline check.
 - the agent judges materiality, writes a concise summary, and sends Slack notifications when a change matters.
 
-Google Sheets/Drive persistence is not used. Runtime state stays under a caller-selected local directory.
+Runtime state stays under a caller-selected local directory.
 
 ## Setup
 
@@ -88,7 +88,7 @@ For a material change, attempt one Slack delivery in the current run and promote
 
 ## Execution model
 
-This local-only design intentionally does not implement a distributed notification ledger, Google Drive coordination, or cross-run leases. Do not run overlapping invocations against the same runtime directory. Use a scheduler or process supervisor that serializes runs.
+This local-only design intentionally does not implement a distributed notification ledger or cross-run leases. Do not run overlapping invocations against the same runtime directory. Use a scheduler or process supervisor that serializes runs.
 
 Browser-rendered targets are supported only when the browser/web tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Do not provide cookies or credentials.
 

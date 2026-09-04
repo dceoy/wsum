@@ -5,7 +5,7 @@ description: Monitor HTTP(S) websites, PDFs, feeds, and browser-rendered pages f
 
 # Web Update Monitor
 
-Use local filesystem state only. Do not use Google Sheets or Google Drive.
+Use local filesystem state only.
 
 `monitor.py` owns fetch/read, normalization, hashing, and bounded diff generation. `workflow.py` owns target validation, deterministic routing, and local snapshot promotion. The agent owns only browser/connector I/O, materiality judgment, summarization, and Slack delivery.
 

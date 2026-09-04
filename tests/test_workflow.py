@@ -51,6 +51,24 @@ def test_validate_targets_defaults_local_target_fields() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("persistence_mode", "google-drive"),
+        ("persistence_mode", "local"),
+        ("unexpected", "value"),
+    ],
+    ids=["removed-backend", "removed-local-mode", "unknown-field"],
+)
+def test_validate_targets_rejects_unsupported_request_fields(
+    field: str, value: str
+) -> None:
+    with pytest.raises(
+        WorkflowError, match="validate-targets contains unsupported fields"
+    ):
+        validate_targets({field: value, "targets": [_target()]})
+
+
 def test_validate_targets_marks_disabled_target_before_fetch() -> None:
     result = validate_targets({"targets": [_target(enabled=False)]})
 
