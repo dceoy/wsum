@@ -5,16 +5,16 @@ A local-first Agent Skill for detecting meaningful updates on websites and docum
 The implementation keeps deterministic mechanics in Python and semantic judgment in the agent:
 
 - `monitor.py` fetches or reads content, normalizes it, hashes it, and emits a bounded diff plus a candidate snapshot.
-- `workflow.py` validates targets, routes monitor results, and atomically promotes local snapshots with an expected-baseline check.
-- the agent judges materiality, writes a concise summary, and sends Slack notifications when a change matters.
+- `workflow.py` validates targets, safely writes local reports, and atomically promotes local snapshots with an expected-baseline check.
+- the agent judges materiality, composes a concise local Markdown report when a change matters, and manages candidates according to the monitor result.
 
-Runtime state stays under a caller-selected local directory.
+Runtime state and reports stay under a caller-selected local directory.
 
 ## Setup
 
 ```bash
 uv sync
-mkdir -p .runtime/candidates .runtime/snapshots
+mkdir -p .runtime/candidates .runtime/snapshots .runtime/reports
 ```
 
 Keep target configuration in a local JSON file, for example:
@@ -64,16 +64,30 @@ uv run python skills/web-update-monitor/scripts/monitor.py \
   --output .runtime/candidates/example.txt
 ```
 
-Pass `status`, `diff_truncated`, and initially `materiality: null` from the monitor result to:
+Handle the monitor result directly:
+
+- `baseline`: promote the candidate.
+- `unchanged`: delete the candidate.
+- `changed`: judge whether the bounded diff matters to `watch_focus`. For a material change, write `.runtime/reports/<target_id>.md` through the safe report helper below; for a non-material change, skip the report. If the diff is truncated and would otherwise be classified non-material, stop for manual review instead of promoting it.
+
+For a material change, put the complete Markdown report in a JSON object and write it before promotion:
+
+```json
+{
+  "target_id": "example",
+  "report": "# Example\n\nA concise summary of the material update.\n"
+}
+```
 
 ```bash
 uv run python skills/web-update-monitor/scripts/workflow.py \
-  change-action < action.json
+  write-report \
+  --runtime-dir .runtime < report.json
 ```
 
-If the helper returns `assess_materiality`, judge only whether the bounded diff matters to `watch_focus`, then call `change-action` again with `materiality: true` or `false`.
+The helper rejects symlinked or non-regular report paths and atomically installs a private file. Promote only after `report_written`; if report writing fails, leave the baseline unchanged and stop that target.
 
-When the returned action is `promote_snapshot`, promote the candidate using the monitor result's `previous_sha256` as `expected_sha256` (`null` for the first baseline) and its `sha256` as `candidate_sha256`:
+Promote the candidate using the monitor result's `previous_sha256` as `expected_sha256` (`null` for the first baseline) and its `sha256` as `candidate_sha256`:
 
 ```bash
 uv run python skills/web-update-monitor/scripts/workflow.py \
@@ -82,13 +96,11 @@ uv run python skills/web-update-monitor/scripts/workflow.py \
   --candidate .runtime/candidates/example.txt < promotion.json
 ```
 
-The helper rejects a stale baseline instead of overwriting it. Remove the candidate after successful promotion or when the result is unchanged.
-
-For a material change, attempt one Slack delivery in the current run and promote the snapshot only after confirmed delivery. Notifications have at-least-once semantics across retries and restarts: if Slack accepts a message but the process crashes before promotion, or delivery is ambiguous, a later run may send the same change again, so duplicates are possible. If delivery fails or is ambiguous, leave the baseline unchanged and stop that target.
+The helper rejects a stale baseline instead of overwriting it. Remove the candidate after successful promotion.
 
 ## Execution model
 
-This local-only design intentionally does not implement a distributed notification ledger or cross-run leases. Do not run overlapping invocations against the same runtime directory. Use a scheduler or process supervisor that serializes runs.
+Do not run overlapping invocations against the same runtime directory. Use a scheduler or process supervisor that serializes runs.
 
 Browser-rendered targets are supported only when the browser/web tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Do not provide cookies or credentials.
 
@@ -102,4 +114,4 @@ See `skills/web-update-monitor/SKILL.md` for the agent procedure.
 
 ## Repository boundary
 
-Do not commit fetched production content, snapshots, runtime state, credentials, webhook URLs, connector identifiers, browser profiles, or other deployment data.
+Do not commit fetched production content, snapshots, reports, runtime state, credentials, browser profiles, or other deployment data.
