@@ -15,7 +15,7 @@ The Cowork workflow is designed so a non-engineer only needs to manage a folder 
 
 ### 1. Install the skill
 
-Download the latest successful `web-update-monitor-cowork-package` artifact from the [main-branch CI workflow runs](https://github.com/dceoy/wsum/actions/workflows/ci.yml?query=branch%3Amain). Extract the downloaded artifact and upload the contained `web-update-monitor.zip` in Claude's custom Skills UI.
+Download the latest successful `wsum-cowork-package` artifact from the [main-branch CI workflow runs](https://github.com/dceoy/wsum/actions/workflows/ci.yml?query=branch%3Amain). Extract the downloaded artifact and upload the contained `wsum.zip` in Claude's custom Skills UI.
 
 Workflow artifacts require GitHub access and expire, so use the newest successful main-branch run.
 
@@ -25,7 +25,7 @@ Developers and maintainers with a repository checkout can build the same archive
 python scripts/package_cowork_skill.py
 ```
 
-Upload `dist/web-update-monitor.zip` from Claude's custom Skills UI after building it locally.
+Upload `dist/wsum.zip` from Claude's custom Skills UI after building it locally.
 
 The repository keeps the portable Agent Skill manifest as `SKILL.md`. The packager emits it as lowercase `skill.md` inside the Cowork ZIP and adds the Python and `pypdf` dependency metadata required by Cowork. This avoids keeping case-colliding `SKILL.md` and `skill.md` files in the source tree.
 
