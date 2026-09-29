@@ -8,9 +8,9 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _SKILL_ROOT = _REPOSITORY_ROOT / "skills" / "web-update-monitor"
-_DEFAULT_OUTPUT = _REPOSITORY_ROOT / "dist" / "web-update-monitor.zip"
+_DEFAULT_OUTPUT = _REPOSITORY_ROOT / "dist" / "wsum.zip"
 _COWORK_DEPENDENCIES = "python>=3.11, pypdf>=6.15,<7"
-_ARCHIVE_ROOT = Path("web-update-monitor")
+_ARCHIVE_ROOT = Path("wsum")
 
 
 def _cowork_manifest(source: str) -> str:
