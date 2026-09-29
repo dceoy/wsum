@@ -15,7 +15,7 @@ The Cowork workflow is designed so a non-engineer only needs to manage a folder 
 
 ### 1. Install the skill
 
-Download the latest successful `wsum-cowork-package` artifact from the [main-branch CI workflow runs](https://github.com/dceoy/wsum/actions/workflows/ci.yml?query=branch%3Amain). Extract the downloaded artifact and upload the contained `wsum.zip` in Claude's custom Skills UI.
+Download the latest successful `wsum.zip` artifact from the [main-branch CI workflow runs](https://github.com/dceoy/wsum/actions/workflows/ci.yml?query=branch%3Amain) and upload it directly in Claude's custom Skills UI. Do not extract the ZIP.
 
 Workflow artifacts require GitHub access and expire, so use the newest successful main-branch run.
 
