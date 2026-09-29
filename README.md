@@ -1,4 +1,4 @@
-# Web Update Monitor
+# wsum
 
 A local-first Agent Skill for detecting meaningful updates on public websites and documents.
 
