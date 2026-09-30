@@ -11,6 +11,8 @@ import pytest
 import workspace
 from workspace import WorkspaceError
 
+_RUN_ID = "20261001T000000Z-deadbeef"
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -45,27 +47,42 @@ def _promote(
     )
 
 
-def test_write_report_creates_private_report(tmp_path: Path) -> None:
-    report = "# Example\n\nA material update.\n"
+def test_write_report_creates_private_run_report(tmp_path: Path) -> None:
+    report = "## Example\n\nA material update.\n"
 
-    destination = workspace._write_report(tmp_path, "example", report)
+    destination = workspace._write_report(tmp_path, _RUN_ID, "example", report)
 
     reports = tmp_path / "reports"
-    assert destination == reports / "example.md"
-    assert destination.read_text() == report
+    content = destination.read_text()
+    assert destination == reports / f"{_RUN_ID}.md"
+    assert f"Run: `{_RUN_ID}`" in content
+    assert report.strip() in content
     assert stat.S_IMODE(reports.stat().st_mode) == 0o700
     assert stat.S_IMODE(destination.stat().st_mode) == 0o600
 
 
-def test_write_report_replaces_existing_regular_report(tmp_path: Path) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    destination = reports / "example.md"
-    destination.write_text("old report\n")
+def test_write_report_aggregates_targets_into_one_run_file(tmp_path: Path) -> None:
+    workspace._write_report(tmp_path, _RUN_ID, "one", "## One\n\nFirst.\n")
+    workspace._write_report(tmp_path, _RUN_ID, "two", "## Two\n\nSecond.\n")
 
-    workspace._write_report(tmp_path, "example", "new report\n")
+    reports = list((tmp_path / "reports").glob("*.md"))
+    assert reports == [tmp_path / "reports" / f"{_RUN_ID}.md"]
+    content = reports[0].read_text()
+    assert "## One" in content
+    assert "## Two" in content
 
-    assert destination.read_text() == "new report\n"
+
+def test_write_report_replaces_existing_target_section(tmp_path: Path) -> None:
+    destination = workspace._write_report(
+        tmp_path, _RUN_ID, "example", "## Example\n\nOld report.\n"
+    )
+
+    workspace._write_report(tmp_path, _RUN_ID, "example", "## Example\n\nNew report.\n")
+
+    content = destination.read_text()
+    assert "Old report." not in content
+    assert content.count("New report.") == 1
+    assert content.count("<!-- wsum:target example:start -->") == 1
 
 
 @pytest.mark.parametrize(
@@ -75,7 +92,23 @@ def test_write_report_replaces_existing_regular_report(tmp_path: Path) -> None:
 )
 def test_write_report_rejects_invalid_target_id(tmp_path: Path, target_id: str) -> None:
     with pytest.raises(WorkspaceError, match="invalid_target_id"):
-        workspace._write_report(tmp_path, target_id, "update\n")
+        workspace._write_report(tmp_path, _RUN_ID, target_id, "update\n")
+
+
+def test_write_report_rejects_invalid_run_id(tmp_path: Path) -> None:
+    with pytest.raises(WorkspaceError, match="invalid_run_id"):
+        workspace._write_report(tmp_path, "../escape", "example", "update\n")
+
+    assert not (tmp_path / "reports").exists()
+
+
+def test_write_report_rejects_reserved_section_markers(tmp_path: Path) -> None:
+    report = "<!-- wsum:target other:start -->\nInjected section\n"
+
+    with pytest.raises(WorkspaceError, match="reserved marker"):
+        workspace._write_report(tmp_path, _RUN_ID, "example", report)
+
+    assert not (tmp_path / "reports" / f"{_RUN_ID}.md").exists()
 
 
 def test_write_report_rejects_symlinked_workspace_root(tmp_path: Path) -> None:
@@ -85,7 +118,7 @@ def test_write_report_rejects_symlinked_workspace_root(tmp_path: Path) -> None:
     workspace_root.symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(WorkspaceError, match="non-symlink directory"):
-        workspace._write_report(workspace_root, "example", "update\n")
+        workspace._write_report(workspace_root, _RUN_ID, "example", "update\n")
 
     assert not (outside / "reports").exists()
 
@@ -96,9 +129,9 @@ def test_write_report_rejects_symlinked_reports_directory(tmp_path: Path) -> Non
     (tmp_path / "reports").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(WorkspaceError, match="non-symlink directory"):
-        workspace._write_report(tmp_path, "example", "update\n")
+        workspace._write_report(tmp_path, _RUN_ID, "example", "update\n")
 
-    assert not (outside / "example.md").exists()
+    assert not (outside / f"{_RUN_ID}.md").exists()
 
 
 def test_write_report_rejects_symlinked_destination(tmp_path: Path) -> None:
@@ -106,11 +139,11 @@ def test_write_report_rejects_symlinked_destination(tmp_path: Path) -> None:
     reports.mkdir()
     outside = tmp_path / "outside.md"
     outside.write_text("original\n")
-    destination = reports / "example.md"
+    destination = reports / f"{_RUN_ID}.md"
     destination.symlink_to(outside)
 
     with pytest.raises(WorkspaceError, match="regular non-symlink"):
-        workspace._write_report(tmp_path, "example", "update\n")
+        workspace._write_report(tmp_path, _RUN_ID, "example", "update\n")
 
     assert destination.is_symlink()
     assert outside.read_text() == "original\n"
@@ -121,7 +154,7 @@ def test_write_report_preserves_destination_when_replace_fails(
 ) -> None:
     reports = tmp_path / "reports"
     reports.mkdir()
-    destination = reports / "example.md"
+    destination = reports / f"{_RUN_ID}.md"
     destination.write_text("old report\n")
 
     def fail_replace(_: Path, __: Path) -> Path:
@@ -129,10 +162,10 @@ def test_write_report_preserves_destination_when_replace_fails(
 
     monkeypatch.setattr(workspace.Path, "replace", fail_replace)
     with pytest.raises(WorkspaceError, match="cannot write report"):
-        workspace._write_report(tmp_path, "example", "new report\n")
+        workspace._write_report(tmp_path, _RUN_ID, "example", "new report\n")
 
     assert destination.read_text() == "old report\n"
-    assert not list(reports.glob(".example.md.*.tmp"))
+    assert not list(reports.glob(f".{_RUN_ID}.md.*.tmp"))
 
 
 def test_write_report_fsyncs_directories(
@@ -141,7 +174,7 @@ def test_write_report_fsyncs_directories(
     fsynced: list[Path] = []
     monkeypatch.setattr(workspace, "_fsync_directory", fsynced.append)
 
-    workspace._write_report(tmp_path, "example", "update\n")
+    workspace._write_report(tmp_path, _RUN_ID, "example", "update\n")
 
     assert fsynced == [tmp_path, tmp_path / "reports"]
 
@@ -158,10 +191,12 @@ def test_write_report_reports_fsync_failure_after_replacement(
 
     monkeypatch.setattr(workspace, "_fsync_directory", fail)
     with pytest.raises(WorkspaceError, match="cannot fsync report directory"):
-        workspace._write_report(tmp_path, "example", "update\n")
+        workspace._write_report(tmp_path, _RUN_ID, "example", "update\n")
 
-    assert (reports / "example.md").read_text() == "update\n"
-    assert not list(reports.glob(".example.md.*.tmp"))
+    content = (reports / f"{_RUN_ID}.md").read_text()
+    assert f"Run: `{_RUN_ID}`" in content
+    assert "update" in content
+    assert not list(reports.glob(f".{_RUN_ID}.md.*.tmp"))
 
 
 def test_promote_snapshot_rejects_symlinked_state_root(tmp_path: Path) -> None:
@@ -274,7 +309,7 @@ def test_state_directories_reject_symlinks(tmp_path: Path, directory_name: str) 
     if directory_name == "reports":
         (tmp_path / "reports").symlink_to(outside, target_is_directory=True)
         with pytest.raises(WorkspaceError, match="non-symlink directory"):
-            workspace._write_report(tmp_path, "example", "update\n")
+            workspace._write_report(tmp_path, _RUN_ID, "example", "update\n")
         return
 
     if directory_name == "candidates":

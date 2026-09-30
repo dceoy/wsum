@@ -2,7 +2,7 @@
 
 A local-first Agent Skill for detecting meaningful updates on public websites and documents.
 
-The canonical skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes reports for material changes.
+The canonical skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
 
 ## Agent Skill
 
@@ -45,7 +45,7 @@ Users may edit `targets.csv`. `.wsum/` is internal state and should not be edite
 
 ## Agent workflow
 
-Read `skills/web-update-monitor/SKILL.md` for the complete procedure. At a high level, the agent edits `targets.csv` when requested, checks enabled targets, reviews bounded diffs for materiality, and writes a Markdown report only for material changes. The helper handles deterministic state transitions and per-target errors.
+Read `skills/web-update-monitor/SKILL.md` for the complete procedure. At a high level, the agent edits `targets.csv` when requested, checks enabled targets, reviews bounded diffs for materiality, and contributes each material target to one run-level Markdown report. The helper handles deterministic state transitions and per-target errors.
 
 ## Deterministic workspace facade
 
@@ -65,7 +65,7 @@ python skills/web-update-monitor/scripts/workspace.py \
   --workspace /path/to/workspace finalize < decision.json
 ```
 
-The facade verifies the review revision, promotes the candidate snapshot, writes a report only after successful promotion, and clears pending state. If report persistence fails after promotion, retain the pending state and retry. A truncated diff cannot be finalized as non-material; it stops for manual review instead.
+The facade verifies the review revision, promotes the candidate snapshot, merges material target sections into `reports/<run-id>.md` only after successful promotion, and clears pending state. Multiple material targets from the same check run therefore produce one report file. If report persistence fails after promotion, retain the pending state and retry. A truncated diff cannot be finalized as non-material; it stops for manual review instead.
 
 ## Development and validation
 

@@ -15,6 +15,7 @@ import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -32,10 +33,12 @@ _PENDING_FIELDS = {
     "diff_truncated",
     "expected_sha256",
     "revision",
+    "run_id",
     "target_id",
 }
 _TARGET_ID_PART_RE = re.compile(r"[^a-z0-9]+")
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{32}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -147,6 +150,12 @@ def _validate_target_id(value: object) -> str:
     return value
 
 
+def _validate_run_id(value: object) -> str:
+    if not isinstance(value, str) or not _RUN_ID_RE.fullmatch(value):
+        raise WorkspaceError("invalid_run_id")
+    return value
+
+
 def _validate_sha256(
     value: object, field: str, *, allow_none: bool = False
 ) -> str | None:
@@ -170,6 +179,11 @@ def _validate_url(value: str) -> str:
     if monitor.url_has_credentials(value):
         raise WorkspaceError("url must not contain credentials")
     return value
+
+
+def _new_run_id() -> str:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"{timestamp}-{secrets.token_hex(4)}"
 
 
 def load_targets(workspace: str | Path) -> list[dict[str, object]]:
@@ -244,8 +258,8 @@ def _candidate_path(state: Path, value: str | Path) -> Path:
     return candidate
 
 
-def _report_path(reports_dir: Path, target_id: str) -> Path:
-    destination = reports_dir / f"{target_id}.md"
+def _report_path(reports_dir: Path, run_id: str) -> Path:
+    destination = reports_dir / f"{run_id}.md"
     try:
         info = destination.lstat()
     except FileNotFoundError:
@@ -255,6 +269,48 @@ def _report_path(reports_dir: Path, target_id: str) -> Path:
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise WorkspaceError("report must be a regular non-symlink file")
     return destination
+
+
+def _read_optional_report(path: Path) -> bytes | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise WorkspaceError("cannot stat report") from exc
+    return _read_text_bytes(path, "report")
+
+
+def _render_run_report(
+    run_id: str,
+    target_id: str,
+    report: str,
+    existing: bytes | None,
+) -> str:
+    marker_prefix = "<!-- wsum:target "
+    if marker_prefix in report:
+        raise WorkspaceError("report contains reserved marker")
+    start_marker = f"{marker_prefix}{target_id}:start -->"
+    end_marker = f"{marker_prefix}{target_id}:end -->"
+    block = f"{start_marker}\n{report.strip()}\n{end_marker}"
+
+    if existing is None:
+        return f"# Web Update Monitor Report\n\nRun: `{run_id}`\n\n{block}\n"
+
+    current = existing.decode("utf-8")
+    start = current.find(start_marker)
+    end = current.find(end_marker)
+    if (start < 0) != (end < 0) or (start >= 0 and end < start):
+        raise WorkspaceError("report contains invalid managed section")
+    if start >= 0:
+        if current.find(start_marker, start + len(start_marker)) >= 0:
+            raise WorkspaceError("report contains duplicate managed section")
+        if current.find(end_marker, end + len(end_marker)) >= 0:
+            raise WorkspaceError("report contains duplicate managed section")
+        end += len(end_marker)
+        return current[:start] + block + current[end:]
+
+    return current.rstrip() + f"\n\n{block}\n"
 
 
 def _read_text_bytes(path: Path, description: str) -> bytes:
@@ -387,9 +443,10 @@ def _promote_snapshot(
     }
 
 
-def _write_report(workspace: Path, target_id: str, report: str) -> Path:
-    """Atomically write one Markdown report under the workspace."""
+def _write_report(workspace: Path, run_id: str, target_id: str, report: str) -> Path:
+    """Atomically merge one target section into its run-level report."""
     workspace = _workspace(workspace)
+    run_id = _validate_run_id(run_id)
     target_id = _validate_target_id(target_id)
     report_data = report.encode("utf-8")
     if not report_data or len(report_data) > _MAX_SNAPSHOT_BYTES:
@@ -398,7 +455,14 @@ def _write_report(workspace: Path, target_id: str, report: str) -> Path:
     reports_dir = _ensure_directory(
         workspace / "reports", "workspace reports directory", sync_parent=True
     )
-    destination = _report_path(reports_dir, target_id)
+    destination = _report_path(reports_dir, run_id)
+    existing = _read_optional_report(destination)
+    report_data = _render_run_report(run_id, target_id, report, existing).encode(
+        "utf-8"
+    )
+    if len(report_data) > _MAX_SNAPSHOT_BYTES:
+        raise WorkspaceError("report size is invalid")
+
     temporary = _write_temporary_file(destination, report_data, "report")
     try:
         temporary.replace(destination)
@@ -418,7 +482,9 @@ def _write_report(workspace: Path, target_id: str, report: str) -> Path:
     return destination
 
 
-def _monitor_target(state: Path, target: Mapping[str, object]) -> dict[str, object]:
+def _monitor_target(
+    state: Path, target: Mapping[str, object], run_id: str
+) -> dict[str, object]:
     target_id = str(target["target_id"])
     candidates = _ensure_directory(state / "candidates", "candidate directory")
     snapshots = _ensure_directory(state / "snapshots", "snapshot directory")
@@ -431,7 +497,7 @@ def _monitor_target(state: Path, target: Mapping[str, object]) -> dict[str, obje
         arguments
     )
     result = monitor.run(namespace)
-    return _handle_monitor_result(state, target, candidate, result)
+    return _handle_monitor_result(state, target, candidate, result, run_id)
 
 
 def _remove_pending(state: Path, target_id: str) -> None:
@@ -477,6 +543,7 @@ def _handle_monitor_result(
     target: Mapping[str, object],
     candidate: Path,
     result: Mapping[str, object],
+    run_id: str,
 ) -> dict[str, object]:
     target_id = str(target["target_id"])
     status = result.get("status")
@@ -506,6 +573,7 @@ def _handle_monitor_result(
 
     pending = {
         "target_id": target_id,
+        "run_id": run_id,
         "revision": secrets.token_hex(16),
         "expected_sha256": result.get("previous_sha256"),
         "candidate_sha256": result.get("sha256"),
@@ -529,6 +597,7 @@ def check(workspace: str | Path) -> dict[str, object]:
     root = _workspace(workspace)
     targets = load_targets(root)
     state = _state_dir(root)
+    run_id = _new_run_id()
     outcomes: list[dict[str, object]] = []
     for target in targets:
         if target["action"] == "skip_disabled":
@@ -539,7 +608,7 @@ def check(workspace: str | Path) -> dict[str, object]:
             })
             continue
         try:
-            outcomes.append(_monitor_target(state, target))
+            outcomes.append(_monitor_target(state, target, run_id))
         except (monitor.MonitorError, OSError, WorkspaceError) as exc:
             outcomes.append({
                 "action": "error",
@@ -547,7 +616,7 @@ def check(workspace: str | Path) -> dict[str, object]:
                 "name": target["name"],
                 "error": str(exc),
             })
-    return {"targets": outcomes}
+    return {"run_id": run_id, "targets": outcomes}
 
 
 def _read_pending(state: Path, target_id: str) -> dict[str, object]:
@@ -566,7 +635,13 @@ def _read_pending(state: Path, target_id: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise WorkspaceError("pending decision is invalid")
     pending = cast("dict[str, object]", value)
-    if set(pending) != _PENDING_FIELDS:
+    if set(pending) == _PENDING_FIELDS - {"run_id"}:
+        pending["run_id"] = _new_run_id()
+        _write_pending(state, pending)
+    elif set(pending) != _PENDING_FIELDS:
+        raise WorkspaceError("pending decision is invalid")
+    run_id = pending.get("run_id")
+    if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
         raise WorkspaceError("pending decision is invalid")
     return pending
 
@@ -624,7 +699,9 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
 
     report_path: str | None = None
     if report is not None:
-        report_path = str(_write_report(root, target_id, report))
+        report_path = str(
+            _write_report(root, str(pending["run_id"]), target_id, report)
+        )
     _cleanup_candidate(candidate)
     _remove_pending(state, target_id)
     result: dict[str, object] = {

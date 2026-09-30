@@ -14,6 +14,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+_RUN_ID = "20261001T000000Z-deadbeef"
+
+
 def _write_targets(path: Path, rows: str) -> None:
     path.write_text(f"name,url,watch_focus,enabled\n{rows}", encoding="utf-8")
 
@@ -123,6 +126,7 @@ def test_handle_monitor_result_promotes_baseline(tmp_path: Path) -> None:
             "status": "baseline",
             "sha256": hashlib.sha256(content.encode()).hexdigest(),
         },
+        _RUN_ID,
     )
 
     assert result["action"] == "baseline_created"
@@ -147,7 +151,7 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
     }
 
     result = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
-        state, target, candidate, _changed_result()
+        state, target, candidate, _changed_result(), _RUN_ID
     )
 
     assert result["action"] == "review"
@@ -155,6 +159,7 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
     assert result["watch_focus"] == "pricing"
     pending = json.loads((state / "pending" / "example.json").read_text())
     assert pending["target_id"] == "example"
+    assert pending["run_id"] == _RUN_ID
     assert pending["revision"] == result["revision"]
     assert candidate.exists()
 
@@ -172,6 +177,7 @@ def test_finalize_material_change_writes_report_and_promotes(tmp_path: Path) -> 
         state,
         {
             "target_id": "example",
+            "run_id": _RUN_ID,
             "revision": "a" * 32,
             "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
             "candidate_sha256": hashlib.sha256(b"new\n").hexdigest(),
@@ -185,15 +191,58 @@ def test_finalize_material_change_writes_report_and_promotes(tmp_path: Path) -> 
             "target_id": "example",
             "revision": "a" * 32,
             "material": True,
-            "report": "# Example\n\nPricing changed.\n",
+            "report": "## Example\n\nPricing changed.\n",
         },
     )
 
     assert result["action"] == "finalized"
-    assert (tmp_path / "reports" / "example.md").exists()
+    report = tmp_path / "reports" / f"{_RUN_ID}.md"
+    assert report.exists()
+    assert "Pricing changed." in report.read_text()
     assert (state / "snapshots" / "example.txt").read_text() == "new\n"
     assert not candidate.exists()
     assert not (state / "pending" / "example.json").exists()
+
+
+def test_finalize_migrates_legacy_pending_review(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    candidate_dir = state / "candidates"
+    snapshot_dir = state / "snapshots"
+    pending_dir = state / "pending"
+    candidate_dir.mkdir(parents=True)
+    snapshot_dir.mkdir()
+    pending_dir.mkdir()
+    candidate = candidate_dir / "example.txt"
+    candidate.write_text("new\n")
+    snapshot = snapshot_dir / "example.txt"
+    snapshot.write_text("old\n")
+    legacy_pending = {
+        "target_id": "example",
+        "revision": "a" * 32,
+        "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
+        "candidate_sha256": hashlib.sha256(b"new\n").hexdigest(),
+        "diff_truncated": False,
+    }
+    (pending_dir / "example.json").write_text(json.dumps(legacy_pending))
+
+    result = finalize(
+        tmp_path,
+        {
+            "target_id": "example",
+            "revision": "a" * 32,
+            "material": True,
+            "report": "## Example\n\nPricing changed.\n",
+        },
+    )
+
+    assert result["action"] == "finalized"
+    report_path = str(result["report_path"])
+    assert report_path.startswith(str(tmp_path / "reports") + "/")
+    report = next((tmp_path / "reports").glob("*.md"))
+    assert "Pricing changed." in report.read_text()
+    assert snapshot.read_text() == "new\n"
+    assert not candidate.exists()
+    assert not (pending_dir / "example.json").exists()
 
 
 def test_finalize_non_material_truncated_diff_stops(tmp_path: Path) -> None:
@@ -204,6 +253,7 @@ def test_finalize_non_material_truncated_diff_stops(tmp_path: Path) -> None:
         state,
         {
             "target_id": "example",
+            "run_id": _RUN_ID,
             "revision": "a" * 32,
             "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
             "candidate_sha256": hashlib.sha256(b"new\n").hexdigest(),
@@ -230,8 +280,11 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
     (snapshot_dir / "example.txt").write_text("old\n")
     reports = tmp_path / "reports"
     reports.mkdir()
-    report = reports / "example.md"
-    report.write_text("current report\n")
+    report = reports / f"{_RUN_ID}.md"
+    original_report = (
+        f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\ncurrent report\n"
+    )
+    report.write_text(original_report)
     target = {
         "target_id": "example",
         "name": "Example",
@@ -241,12 +294,12 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
 
     candidate.write_text("first\n")
     first = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
-        state, target, candidate, _changed_result(current="first\n")
+        state, target, candidate, _changed_result(current="first\n"), _RUN_ID
     )
     first_revision = str(first["revision"])
     candidate.write_text("second\n")
     second = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
-        state, target, candidate, _changed_result(current="second\n")
+        state, target, candidate, _changed_result(current="second\n"), _RUN_ID
     )
     pending = (state / "pending" / "example.json").read_bytes()
 
@@ -262,7 +315,7 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
         )
 
     assert (snapshot_dir / "example.txt").read_text() == "old\n"
-    assert report.read_text() == "current report\n"
+    assert report.read_text() == original_report
     assert candidate.read_text() == "second\n"
     assert (state / "pending" / "example.json").read_bytes() == pending
     assert str(second["revision"]) != first_revision
@@ -282,12 +335,16 @@ def test_finalize_material_snapshot_conflict_does_not_write_report(
     snapshot.write_text("old\n")
     reports = tmp_path / "reports"
     reports.mkdir()
-    report = reports / "example.md"
-    report.write_text("previous report\n")
+    report = reports / f"{_RUN_ID}.md"
+    original_report = (
+        f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\nprevious report\n"
+    )
+    report.write_text(original_report)
     workspace._write_pending(  # pyright: ignore[reportPrivateUsage]
         state,
         {
             "target_id": "example",
+            "run_id": _RUN_ID,
             "revision": "a" * 32,
             "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
             "candidate_sha256": hashlib.sha256(b"new\n").hexdigest(),
@@ -308,7 +365,7 @@ def test_finalize_material_snapshot_conflict_does_not_write_report(
 
     assert result == {"action": "snapshot_conflict", "target_id": "example"}
     assert snapshot.read_text() == "external\n"
-    assert report.read_text() == "previous report\n"
+    assert report.read_text() == original_report
     assert candidate.read_text() == "new\n"
     assert (state / "pending" / "example.json").exists()
 
@@ -323,7 +380,12 @@ def test_check_batches_targets_and_contains_failures(
         "Off,https://example.net/,,false\n",
     )
 
-    def fake_monitor(_state: Path, target: dict[str, object]) -> dict[str, object]:
+    monkeypatch.setattr(workspace, "_new_run_id", lambda: _RUN_ID)
+
+    def fake_monitor(
+        _state: Path, target: dict[str, object], run_id: str
+    ) -> dict[str, object]:
+        assert run_id == _RUN_ID
         if target["name"] == "Bad":
             raise workspace.monitor.MonitorError
         return {
@@ -337,6 +399,7 @@ def test_check_batches_targets_and_contains_failures(
     result = check(tmp_path)
     outcomes = cast("list[dict[str, object]]", result["targets"])
 
+    assert result["run_id"] == _RUN_ID
     assert [item["action"] for item in outcomes] == [
         "unchanged",
         "error",
