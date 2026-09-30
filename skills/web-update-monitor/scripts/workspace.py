@@ -10,6 +10,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import sys
 import tempfile
@@ -236,25 +237,32 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
     return targets
 
 
-def _candidate_path(state: Path, value: str | Path) -> Path:
-    candidates_dir = _ensure_directory(
-        state / "candidates", "workspace state/candidates"
-    )
-    candidate = Path(value)
-    original = Path.cwd() / candidate if not candidate.is_absolute() else candidate
+def _pending_target_dir(
+    state: Path, target_id: str, *, create: bool
+) -> Path:
+    pending = _ensure_directory(state / "pending", "pending directory")
+    target = pending / _validate_target_id(target_id)
     try:
-        info = original.lstat()
+        info = target.lstat()
+    except FileNotFoundError:
+        if not create:
+            raise WorkspaceError("no valid pending decision exists for target")
+        return _ensure_directory(target, "pending target directory")
+    except OSError as exc:
+        raise WorkspaceError("pending target directory is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise WorkspaceError("pending target must be a non-symlink directory")
+    return target
+
+
+def _candidate_path(state: Path, target_id: str) -> Path:
+    candidate = _pending_target_dir(state, target_id, create=False) / "candidate.txt"
+    try:
+        info = candidate.lstat()
     except OSError as exc:
         raise WorkspaceError("cannot stat candidate") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise WorkspaceError("candidate must be a regular non-symlink file")
-    candidate = original.resolve()
-    try:
-        candidate.relative_to(candidates_dir.resolve())
-    except ValueError as exc:
-        raise WorkspaceError(
-            "candidate must be under workspace state/candidates"
-        ) from exc
     return candidate
 
 
@@ -381,7 +389,6 @@ def _fsync_snapshot_directory(path: Path) -> None:
 
 def _promote_snapshot(
     state: Path,
-    candidate_path: str | Path,
     *,
     target_id: str,
     expected_sha256: object,
@@ -392,7 +399,7 @@ def _promote_snapshot(
     target_id = _validate_target_id(target_id)
     expected = _validate_sha256(expected_sha256, "expected_sha256", allow_none=True)
     candidate_digest = _validate_sha256(candidate_sha256, "candidate_sha256")
-    candidate = _candidate_path(state, candidate_path)
+    candidate = _candidate_path(state, target_id)
     candidate_data = _read_text_bytes(candidate, "candidate")
     if hashlib.sha256(candidate_data).hexdigest() != candidate_digest:
         raise WorkspaceError("candidate_sha256 does not match candidate")
@@ -486,9 +493,9 @@ def _monitor_target(
     state: Path, target: Mapping[str, object], run_id: str
 ) -> dict[str, object]:
     target_id = str(target["target_id"])
-    candidates = _ensure_directory(state / "candidates", "candidate directory")
+    pending_target = _pending_target_dir(state, target_id, create=True)
     snapshots = _ensure_directory(state / "snapshots", "snapshot directory")
-    candidate = candidates / f"{target_id}.txt"
+    candidate = pending_target / "candidate.txt"
     previous = snapshots / f"{target_id}.txt"
     arguments = ["--url", str(target["url"]), "--output", str(candidate)]
     if previous.exists():
@@ -501,41 +508,40 @@ def _monitor_target(
 
 
 def _remove_pending(state: Path, target_id: str) -> None:
-    with suppress(OSError):
-        (state / "pending" / f"{target_id}.json").unlink(missing_ok=True)
-
-
-def _cleanup_candidate(candidate: Path) -> None:
+    pending = _ensure_directory(state / "pending", "pending directory")
+    target = pending / _validate_target_id(target_id)
     try:
-        candidate.unlink(missing_ok=True)
+        info = target.lstat()
+    except FileNotFoundError:
+        return
     except OSError as exc:
-        raise WorkspaceError("cannot remove candidate snapshot") from exc
+        raise WorkspaceError("cannot stat pending target") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise WorkspaceError("pending target must be a non-symlink directory")
+    try:
+        shutil.rmtree(target)
+        _fsync_directory(pending)
+    except OSError as exc:
+        raise WorkspaceError("cannot remove pending target") from exc
 
 
 def _write_pending(state: Path, payload: Mapping[str, object]) -> None:
-    pending = _ensure_directory(state / "pending", "pending directory")
     target_id = str(payload["target_id"])
-    destination = pending / f"{target_id}.json"
+    target = _pending_target_dir(state, target_id, create=True)
+    destination = target / "state.json"
     data = (json.dumps(payload, sort_keys=True) + "\n").encode()
-    temporary_path: Path | None = None
+    temporary = _write_temporary_file(destination, data, "pending state")
     try:
-        descriptor, name = tempfile.mkstemp(
-            dir=pending, prefix=f".{target_id}.", suffix=".tmp"
-        )
-        temporary_path = Path(name)
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary_path.replace(destination)
-        temporary_path = None
+        temporary.replace(destination)
     except OSError as exc:
         raise WorkspaceError("cannot persist pending decision state") from exc
     finally:
-        if temporary_path is not None:
-            with suppress(OSError):
-                temporary_path.unlink(missing_ok=True)
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+    try:
+        _fsync_directory(target)
+    except OSError as exc:
+        raise WorkspaceError("cannot fsync pending target directory") from exc
 
 
 def _handle_monitor_result(
@@ -548,20 +554,17 @@ def _handle_monitor_result(
     target_id = str(target["target_id"])
     status = result.get("status")
     if status == "unchanged":
-        _cleanup_candidate(candidate)
         _remove_pending(state, target_id)
         return {"action": "unchanged", "target_id": target_id, "name": target["name"]}
     if status == "baseline":
         promoted = _promote_snapshot(
             state,
-            candidate,
             target_id=target_id,
             expected_sha256=None,
             candidate_sha256=result.get("sha256"),
         )
         if promoted.get("action") != "snapshot_promoted":
             return {"action": "snapshot_conflict", "target_id": target_id}
-        _cleanup_candidate(candidate)
         _remove_pending(state, target_id)
         return {
             "action": "baseline_created",
@@ -620,7 +623,7 @@ def check(workspace: str | Path) -> dict[str, object]:
 
 
 def _read_pending(state: Path, target_id: str) -> dict[str, object]:
-    path = state / "pending" / f"{target_id}.json"
+    path = _pending_target_dir(state, target_id, create=False) / "state.json"
     try:
         info = path.lstat()
     except OSError as exc:
@@ -686,10 +689,8 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
     if pending["diff_truncated"] is True and not material:
         return {"action": "manual_review_required", "target_id": target_id}
 
-    candidate = state / "candidates" / f"{target_id}.txt"
     promoted = _promote_snapshot(
         state,
-        candidate,
         target_id=target_id,
         expected_sha256=pending["expected_sha256"],
         candidate_sha256=pending["candidate_sha256"],
@@ -702,7 +703,6 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
         report_path = str(
             _write_report(root, str(pending["run_id"]), target_id, report)
         )
-    _cleanup_candidate(candidate)
     _remove_pending(state, target_id)
     result: dict[str, object] = {
         "action": "finalized",
