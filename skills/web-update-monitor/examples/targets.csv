@@ -1,2 +1,5 @@
 name,url,watch_focus,enabled
-Example,https://example.com/,Important product or pricing changes,true
+IANA Reserved Domains,https://www.iana.org/domains/reserved,Changes to reserved-domain policy or listings,true
+Cloudflare Changelog,https://developers.cloudflare.com/changelog/,Important Cloudflare product and platform updates,true
+Python Downloads,https://www.python.org/downloads/,New Python releases and supported-version changes,true
+Workers SDK Releases,https://github.com/cloudflare/workers-sdk/releases,New Wrangler and Workers SDK releases,true
