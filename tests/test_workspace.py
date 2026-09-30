@@ -121,7 +121,6 @@ def test_handle_monitor_result_promotes_baseline(tmp_path: Path) -> None:
     result = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
         state,
         target,
-        candidate,
         {
             "status": "baseline",
             "sha256": hashlib.sha256(content.encode()).hexdigest(),
@@ -151,7 +150,7 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
     }
 
     result = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
-        state, target, candidate, _changed_result(), _RUN_ID
+        state, target, _changed_result(), _RUN_ID
     )
 
     assert result["action"] == "review"
@@ -293,12 +292,12 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
 
     candidate.write_text("first\n")
     first = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
-        state, target, candidate, _changed_result(current="first\n"), _RUN_ID
+        state, target, _changed_result(current="first\n"), _RUN_ID
     )
     first_revision = str(first["revision"])
     candidate.write_text("second\n")
     second = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
-        state, target, candidate, _changed_result(current="second\n"), _RUN_ID
+        state, target, _changed_result(current="second\n"), _RUN_ID
     )
     pending = (state / "pending" / "example" / "state.json").read_bytes()
 
