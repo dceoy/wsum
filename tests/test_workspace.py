@@ -211,7 +211,6 @@ def test_finalize_migrates_legacy_pending_review(tmp_path: Path) -> None:
     pending_dir = state / "pending"
     candidate_dir.mkdir(parents=True)
     snapshot_dir.mkdir()
-    pending_dir.mkdir()
     candidate = candidate_dir / "candidate.txt"
     candidate.write_text("new\n")
     snapshot = snapshot_dir / "example.txt"
