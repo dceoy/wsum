@@ -39,7 +39,6 @@ Generated files have these roles:
 
 Candidates and pending records are temporary across the check/finalize boundary; snapshots persist across runs. Hidden temporary files used for atomic replacement are internal and should not be surfaced to the user.
 
-
 The CSV schema is:
 
 ```csv
