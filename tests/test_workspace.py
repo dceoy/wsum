@@ -180,6 +180,47 @@ def test_finalize_material_change_writes_report_and_promotes(tmp_path: Path) -> 
     assert not (state / "pending" / "example.json").exists()
 
 
+def test_finalize_migrates_legacy_pending_review(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    candidate_dir = state / "candidates"
+    snapshot_dir = state / "snapshots"
+    pending_dir = state / "pending"
+    candidate_dir.mkdir(parents=True)
+    snapshot_dir.mkdir()
+    pending_dir.mkdir()
+    candidate = candidate_dir / "example.txt"
+    candidate.write_text("new\\n")
+    snapshot = snapshot_dir / "example.txt"
+    snapshot.write_text("old\\n")
+    legacy_pending = {
+        "target_id": "example",
+        "revision": "a" * 32,
+        "expected_sha256": hashlib.sha256(b"old\\n").hexdigest(),
+        "candidate_sha256": hashlib.sha256(b"new\\n").hexdigest(),
+        "diff_truncated": False,
+    }
+    (pending_dir / "example.json").write_text(json.dumps(legacy_pending))
+
+    result = finalize(
+        tmp_path,
+        {
+            "target_id": "example",
+            "revision": "a" * 32,
+            "material": True,
+            "report": "## Example\\n\\nPricing changed.\\n",
+        },
+    )
+
+    assert result["action"] == "finalized"
+    report_path = str(result["report_path"])
+    assert report_path.startswith(str(tmp_path / "reports") + "/")
+    report = next((tmp_path / "reports").glob("*.md"))
+    assert "Pricing changed." in report.read_text()
+    assert snapshot.read_text() == "new\\n"
+    assert not candidate.exists()
+    assert not (pending_dir / "example.json").exists()
+
+
 def test_finalize_non_material_truncated_diff_stops(tmp_path: Path) -> None:
     state = tmp_path / ".wsum"
     (state / "candidates").mkdir(parents=True)
