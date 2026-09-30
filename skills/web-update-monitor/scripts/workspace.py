@@ -246,7 +246,7 @@ def _pending_target_dir(
         info = target.lstat()
     except FileNotFoundError:
         if not create:
-            raise WorkspaceError("no valid pending decision exists for target")
+            raise WorkspaceError("no valid pending decision exists for target") from None
         return _ensure_directory(target, "pending target directory")
     except OSError as exc:
         raise WorkspaceError("pending target directory is unavailable") from exc
@@ -504,7 +504,7 @@ def _monitor_target(
         arguments
     )
     result = monitor.run(namespace)
-    return _handle_monitor_result(state, target, candidate, result, run_id)
+    return _handle_monitor_result(state, target, result, run_id)
 
 
 def _remove_pending(state: Path, target_id: str) -> None:
@@ -547,7 +547,6 @@ def _write_pending(state: Path, payload: Mapping[str, object]) -> None:
 def _handle_monitor_result(
     state: Path,
     target: Mapping[str, object],
-    candidate: Path,
     result: Mapping[str, object],
     run_id: str,
 ) -> dict[str, object]:
