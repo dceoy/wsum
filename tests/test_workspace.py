@@ -258,8 +258,7 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
     reports.mkdir()
     report = reports / f"{_RUN_ID}.md"
     original_report = (
-        f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\n"
-        "current report\n"
+        f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\ncurrent report\n"
     )
     report.write_text(original_report)
     target = {
@@ -314,8 +313,7 @@ def test_finalize_material_snapshot_conflict_does_not_write_report(
     reports.mkdir()
     report = reports / f"{_RUN_ID}.md"
     original_report = (
-        f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\n"
-        "previous report\n"
+        f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\nprevious report\n"
     )
     report.write_text(original_report)
     workspace._write_pending(  # pyright: ignore[reportPrivateUsage]
