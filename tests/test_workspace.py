@@ -14,6 +14,7 @@ import workspace
 from workspace import WorkspaceError, check, finalize, load_targets
 
 if TYPE_CHECKING:
+    import argparse
     from collections.abc import Callable
 
 
@@ -822,6 +823,50 @@ def test_check_batches_targets_and_contains_failures(
         "error",
         "skipped",
     ]
+
+
+def test_check_failure_preserves_legacy_pending_for_finalize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_targets(
+        tmp_path / "targets.csv", "Example,https://example.com/,pricing,true\n"
+    )
+    target_id = str(load_targets(tmp_path)[0]["target_id"])
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, candidate, snapshot = _write_review_transaction(
+        state, "legacy", target_id=target_id
+    )
+
+    def fail_monitor(_args: argparse.Namespace) -> dict[str, object]:
+        raise workspace.monitor.MonitorError
+
+    monkeypatch.setattr(workspace.monitor, "run", fail_monitor)
+
+    result = check(tmp_path)
+    outcomes = cast("list[dict[str, object]]", result["targets"])
+
+    assert outcomes[0]["action"] == "error"
+    assert "error" in outcomes[0]
+    assert metadata.exists()
+    assert candidate.read_text(encoding="utf-8") == "new\n"
+    assert not (state / "pending" / target_id).exists()
+
+    pending = json.loads(metadata.read_text(encoding="utf-8"))
+    finalized = finalize(
+        tmp_path,
+        {
+            "target_id": target_id,
+            "revision": pending["revision"],
+            "material": True,
+            "report": "## Example\n\nReviewed.\n",
+        },
+    )
+
+    assert finalized["action"] == "finalized"
+    assert snapshot.read_text(encoding="utf-8") == "new\n"
+    assert not metadata.exists()
+    assert not candidate.exists()
 
 
 def test_main_reports_invalid_workspace(capsys: pytest.CaptureFixture[str]) -> None:

@@ -247,9 +247,7 @@ def _pending_paths(
     try:
         info = target.lstat()
     except FileNotFoundError:
-        if create:
-            target = _ensure_directory(target, "pending target directory")
-            return target / "state.json", target / "candidate.txt"
+        pass
     except OSError as exc:
         raise WorkspaceError("pending target directory is unavailable") from exc
     else:
@@ -261,6 +259,9 @@ def _pending_paths(
     try:
         info = legacy_state.lstat()
     except FileNotFoundError:
+        if create:
+            target = _ensure_directory(target, "pending target directory")
+            return target / "state.json", target / "candidate.txt"
         raise WorkspaceError("no valid pending decision exists for target") from None
     except OSError as exc:
         raise WorkspaceError("cannot stat pending decision") from exc
