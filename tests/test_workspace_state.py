@@ -72,11 +72,21 @@ def test_write_report_replaces_existing_regular_report(tmp_path: Path) -> None:
     ["../escape", "/absolute", "nested/path"],
     ids=["traversal", "absolute", "separator"],
 )
-def test_write_report_rejects_invalid_target_id(
-    tmp_path: Path, target_id: str
-) -> None:
+def test_write_report_rejects_invalid_target_id(tmp_path: Path, target_id: str) -> None:
     with pytest.raises(WorkspaceError, match="invalid_target_id"):
         workspace._write_report(tmp_path, target_id, "update\n")
+
+
+def test_write_report_rejects_symlinked_workspace_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside-workspace"
+    outside.mkdir()
+    workspace_root = tmp_path / "workspace-link"
+    workspace_root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(WorkspaceError, match="non-symlink directory"):
+        workspace._write_report(workspace_root, "example", "update\\n")
+
+    assert not (outside / "reports").exists()
 
 
 def test_write_report_rejects_symlinked_reports_directory(tmp_path: Path) -> None:
@@ -151,6 +161,22 @@ def test_write_report_reports_fsync_failure_after_replacement(
 
     assert (reports / "example.md").read_text() == "update\n"
     assert not list(reports.glob(".example.md.*.tmp"))
+
+
+def test_promote_snapshot_rejects_symlinked_state_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside-state"
+    outside.mkdir()
+    state = tmp_path / ".wsum"
+    state.symlink_to(outside, target_is_directory=True)
+    candidate = tmp_path / "candidate.txt"
+    candidate.write_text("next\\n")
+    digest = hashlib.sha256(b"next\\n").hexdigest()
+
+    with pytest.raises(WorkspaceError, match="non-symlink directory"):
+        _promote(state, candidate, digest)
+
+    assert not (outside / "candidates").exists()
+    assert not (outside / "snapshots").exists()
 
 
 def test_promote_snapshot_creates_baseline(tmp_path: Path) -> None:
@@ -239,9 +265,7 @@ def test_promote_snapshot_rejects_symlink_candidate(tmp_path: Path) -> None:
     "directory_name",
     ["candidates", "snapshots", "reports"],
 )
-def test_state_directories_reject_symlinks(
-    tmp_path: Path, directory_name: str
-) -> None:
+def test_state_directories_reject_symlinks(tmp_path: Path, directory_name: str) -> None:
     state = _state(tmp_path)
     outside = tmp_path / f"outside-{directory_name}"
     outside.mkdir()
