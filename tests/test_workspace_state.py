@@ -24,23 +24,21 @@ def _state(tmp_path: Path) -> Path:
 
 
 def _candidate(state: Path, content: str = "next\n") -> tuple[Path, str]:
-    directory = state / "candidates"
-    directory.mkdir()
-    path = directory / "example.txt"
+    directory = state / "pending" / "example"
+    directory.mkdir(parents=True)
+    path = directory / "candidate.txt"
     path.write_text(content)
     return path, hashlib.sha256(content.encode()).hexdigest()
 
 
 def _promote(
     state: Path,
-    candidate: Path,
     digest: str,
     *,
     expected: str | None = None,
 ) -> dict[str, object]:
     return workspace._promote_snapshot(
         state,
-        candidate,
         target_id="example",
         expected_sha256=expected,
         candidate_sha256=digest,
@@ -209,7 +207,7 @@ def test_promote_snapshot_rejects_symlinked_state_root(tmp_path: Path) -> None:
     digest = hashlib.sha256(b"next\n").hexdigest()
 
     with pytest.raises(WorkspaceError, match="non-symlink directory"):
-        _promote(state, candidate, digest)
+        _promote(state, digest)
 
     assert not (outside / "candidates").exists()
     assert not (outside / "snapshots").exists()
@@ -219,7 +217,7 @@ def test_promote_snapshot_creates_baseline(tmp_path: Path) -> None:
     state = _state(tmp_path)
     candidate, digest = _candidate(state)
 
-    result = _promote(state, candidate, digest)
+    result = _promote(state, digest)
 
     snapshot = state / "snapshots" / "example.txt"
     assert result["action"] == "snapshot_promoted"
@@ -254,7 +252,7 @@ def test_promote_snapshot_reports_stale_baseline(tmp_path: Path) -> None:
     (snapshots / "example.txt").write_bytes(current)
     candidate, digest = _candidate(state)
 
-    result = _promote(state, candidate, digest, expected="0" * 64)
+    result = _promote(state, digest, expected="0" * 64)
 
     assert result == {
         "action": "snapshot_conflict",
@@ -269,7 +267,7 @@ def test_promote_snapshot_rejects_candidate_hash_mismatch(tmp_path: Path) -> Non
     candidate, _ = _candidate(state)
 
     with pytest.raises(WorkspaceError, match="does not match"):
-        _promote(state, candidate, "0" * 64)
+        _promote(state, "0" * 64)
 
 
 def test_promote_snapshot_rejects_candidate_outside_state(tmp_path: Path) -> None:
@@ -280,7 +278,7 @@ def test_promote_snapshot_rejects_candidate_outside_state(tmp_path: Path) -> Non
     digest = hashlib.sha256(b"next\n").hexdigest()
 
     with pytest.raises(WorkspaceError, match="state/candidates"):
-        _promote(state, candidate, digest)
+        _promote(state, digest)
 
 
 def test_promote_snapshot_rejects_symlink_candidate(tmp_path: Path) -> None:
@@ -294,7 +292,7 @@ def test_promote_snapshot_rejects_symlink_candidate(tmp_path: Path) -> None:
     digest = hashlib.sha256(b"next\n").hexdigest()
 
     with pytest.raises(WorkspaceError, match="regular non-symlink"):
-        _promote(state, candidate, digest)
+        _promote(state, digest)
 
 
 @pytest.mark.parametrize(
@@ -322,7 +320,7 @@ def test_state_directories_reject_symlinks(tmp_path: Path, directory_name: str) 
         (state / "snapshots").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(WorkspaceError, match="non-symlink directory"):
-        _promote(state, candidate, digest)
+        _promote(state, digest)
     assert not (outside / "example.txt").exists() or directory_name == "candidates"
 
 
@@ -335,7 +333,7 @@ def test_promote_snapshot_fsyncs_snapshot_directory(
     fsynced: list[Path] = []
     monkeypatch.setattr(workspace, "_fsync_directory", fsynced.append)
 
-    result = _promote(state, candidate, digest)
+    result = _promote(state, digest)
 
     assert result["action"] == "snapshot_promoted"
     assert fsynced == [state / "snapshots"]
@@ -349,7 +347,7 @@ def test_promote_snapshot_fsyncs_state_when_creating_snapshots(
     fsynced: list[Path] = []
     monkeypatch.setattr(workspace, "_fsync_directory", fsynced.append)
 
-    result = _promote(state, candidate, digest)
+    result = _promote(state, digest)
 
     assert result["action"] == "snapshot_promoted"
     assert fsynced == [state, state / "snapshots"]
@@ -367,7 +365,7 @@ def test_promote_snapshot_reports_fsync_failure(
 
     monkeypatch.setattr(workspace, "_fsync_directory", fail)
     with pytest.raises(WorkspaceError, match="cannot fsync snapshot directory"):
-        _promote(state, candidate, digest)
+        _promote(state, digest)
     assert (state / "snapshots" / "example.txt").read_text() == "next\n"
 
 
@@ -375,8 +373,8 @@ def test_promote_snapshot_retries_idempotently(tmp_path: Path) -> None:
     state = _state(tmp_path)
     candidate, digest = _candidate(state)
 
-    _promote(state, candidate, digest)
-    result = _promote(state, candidate, digest)
+    _promote(state, digest)
+    result = _promote(state, digest)
 
     assert result == {
         "action": "snapshot_promoted",
