@@ -246,7 +246,9 @@ def _pending_target_dir(
         info = target.lstat()
     except FileNotFoundError:
         if not create:
-            raise WorkspaceError("no valid pending decision exists for target") from None
+            raise WorkspaceError(
+                "no valid pending decision exists for target"
+            ) from None
         return _ensure_directory(target, "pending target directory")
     except OSError as exc:
         raise WorkspaceError("pending target directory is unavailable") from exc
