@@ -146,7 +146,9 @@ def test_write_report_replaces_existing_target_section(tmp_path: Path) -> None:
     assert content.count("<!-- wsum:target example:start -->") == 1
 
 
-def test_main_writes_run_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_writes_run_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(
         workflow.sys,
         "stdin",
