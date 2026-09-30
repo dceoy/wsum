@@ -29,6 +29,17 @@ Use one user-selected workspace folder with this layout:
 
 `reports/` and `.wsum/` are created as needed. Users may edit `targets.csv`; `.wsum/` is internal state and should not be edited manually.
 
+Generated files have these roles:
+
+- `targets.csv`: user-facing monitoring configuration and the source of truth for targets.
+- `reports/<run-id>.md`: user-facing run report. Create it only when at least one material change from that `check` run is finalized. All material targets from the run share this file.
+- `.wsum/snapshots/<target-id>.txt`: accepted normalized baseline for the target.
+- `.wsum/candidates/<target-id>.txt`: normalized changed candidate awaiting semantic review.
+- `.wsum/pending/<target-id>.json`: internal review transaction containing the run ID, revision, baseline/candidate hashes, and diff-truncation state.
+
+Candidates and pending records are temporary across the check/finalize boundary; snapshots persist across runs. Hidden temporary files used for atomic replacement are internal and should not be surfaced to the user.
+
+
 The CSV schema is:
 
 ```csv
