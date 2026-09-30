@@ -315,7 +315,10 @@ def _read_pending(state: Path, target_id: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise WorkspaceError("pending decision is invalid")
     pending = cast("dict[str, object]", value)
-    if set(pending) != _PENDING_FIELDS:
+    if set(pending) == _PENDING_FIELDS - {"run_id"}:
+        pending["run_id"] = _new_run_id()
+        _write_pending(state, pending)
+    elif set(pending) != _PENDING_FIELDS:
         raise WorkspaceError("pending decision is invalid")
     run_id = pending.get("run_id")
     if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
