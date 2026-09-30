@@ -153,7 +153,9 @@ def write_report(
     )
     destination = _report_path(reports_dir, run_id)
     existing = _read_optional_report(destination)
-    report_data = _render_run_report(run_id, target_id, report, existing).encode("utf-8")
+    report_data = _render_run_report(
+        run_id, target_id, report, existing
+    ).encode("utf-8")
     if len(report_data) > _MAX_SNAPSHOT_BYTES:
         raise WorkflowError("report size is invalid")
 
