@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Tests for workspace-local snapshot and report persistence."""
 
 from __future__ import annotations
@@ -84,7 +85,7 @@ def test_write_report_rejects_symlinked_workspace_root(tmp_path: Path) -> None:
     workspace_root.symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(WorkspaceError, match="non-symlink directory"):
-        workspace._write_report(workspace_root, "example", "update\\n")
+        workspace._write_report(workspace_root, "example", "update\n")
 
     assert not (outside / "reports").exists()
 
@@ -169,8 +170,8 @@ def test_promote_snapshot_rejects_symlinked_state_root(tmp_path: Path) -> None:
     state = tmp_path / ".wsum"
     state.symlink_to(outside, target_is_directory=True)
     candidate = tmp_path / "candidate.txt"
-    candidate.write_text("next\\n")
-    digest = hashlib.sha256(b"next\\n").hexdigest()
+    candidate.write_text("next\n")
+    digest = hashlib.sha256(b"next\n").hexdigest()
 
     with pytest.raises(WorkspaceError, match="non-symlink directory"):
         _promote(state, candidate, digest)
