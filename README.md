@@ -55,7 +55,6 @@ The workspace contains one user-facing input, user-facing reports, and internal 
 
 The helper may briefly create hidden `*.tmp` files while atomically replacing reports, snapshots, or pending state. These are implementation details and are cleaned up during normal operation.
 
-
 ## Agent workflow
 
 Read `skills/web-update-monitor/SKILL.md` for the complete procedure. At a high level, the agent edits `targets.csv` when requested, checks enabled targets, reviews bounded diffs for materiality, and contributes each material target to one run-level Markdown report. The helper handles deterministic state transitions and per-target errors.
