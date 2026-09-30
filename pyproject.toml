@@ -95,14 +95,6 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/package_skill.py" = [
-  "docstring-missing-returns",  # concise packaging helper docstrings are sufficient
-  "docstring-missing-exception",  # packaging failures are direct RuntimeError messages
-  "implicit-namespace-package",  # repository scripts are executable helpers
-  "print",  # CLI prints the generated package path
-  "raise-vanilla-args",  # packaging errors are defined at the decision site
-  "raw-string-in-exception",  # CLI errors are intentionally direct literal messages
-]
 "skills/web-update-monitor/scripts/workspace.py" = [
   "docstring-missing-returns",  # concise helper docstrings are sufficient here
   "docstring-missing-exception",  # errors are represented by WorkspaceError messages
