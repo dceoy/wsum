@@ -2,7 +2,7 @@
 
 A local-first Agent Skill for detecting meaningful updates on public websites and documents.
 
-The canonical skill lives in `skills/web-update-monitor/`. Its bundled Python helpers handle deterministic fetching, normalization, hashing, diffing, report persistence, and snapshot promotion. The agent edits the target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
+The canonical skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
 
 ## Agent Skill
 
@@ -43,6 +43,18 @@ workspace/
 
 Users may edit `targets.csv`. `.wsum/` is internal state and should not be edited manually.
 
+### Generated files
+
+The workspace contains one user-facing input, user-facing reports, and internal state:
+
+- `targets.csv`: the user-facing source of truth for monitored targets. The agent may create or edit it when the user changes monitoring configuration.
+- `reports/<run-id>.md`: the user-facing output. One report is created per `check` run only when at least one material change is finalized. The run ID has the form `YYYYMMDDTHHMMSSZ-xxxxxxxx`. Material targets from the same run are merged into this file.
+- `.wsum/snapshots/<target-id>.txt`: the accepted normalized baseline for each target. A first observation creates it; later finalized observations replace it atomically, including non-material changes.
+- `.wsum/candidates/<target-id>.txt`: the normalized candidate produced by the latest changed observation. It is retained while the agent reviews the diff and removed after successful finalization.
+- `.wsum/pending/<target-id>.json`: internal review state linking a candidate to its run, revision, expected baseline hash, candidate hash, and diff-truncation status. It prevents stale decisions from being applied and is removed after successful finalization.
+
+The helper may briefly create hidden `*.tmp` files while atomically replacing reports, snapshots, or pending state. These are implementation details and are cleaned up during normal operation.
+
 ## Agent workflow
 
 Read `skills/web-update-monitor/SKILL.md` for the complete procedure. At a high level, the agent edits `targets.csv` when requested, checks enabled targets, reviews bounded diffs for materiality, and contributes each material target to one run-level Markdown report. The helper handles deterministic state transitions and per-target errors.
@@ -82,7 +94,7 @@ uv run pytest
 skills-ref validate skills/web-update-monitor
 ```
 
-`monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workflow.py` provides target validation, safe report writing, and atomic snapshot promotion.
+`monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workspace.py` validates targets and owns candidate/pending state, safe report writing, and atomic snapshot promotion.
 
 Browser-rendered targets are outside the CSV workspace workflow. Do not auto-escalate a static failure to browser rendering. Use browser input only when the browser tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Never provide cookies or credentials.
 
