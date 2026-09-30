@@ -237,26 +237,52 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
     return targets
 
 
-def _pending_target_dir(state: Path, target_id: str, *, create: bool) -> Path:
+def _pending_paths(
+    state: Path, target_id: str, *, create: bool = False
+) -> tuple[Path, Path]:
+    """Resolve pending metadata and candidate paths from one layout."""
+    target_id = _validate_target_id(target_id)
     pending = _ensure_directory(state / "pending", "pending directory")
-    target = pending / _validate_target_id(target_id)
+    target = pending / target_id
     try:
         info = target.lstat()
     except FileNotFoundError:
-        if not create:
-            raise WorkspaceError(
-                "no valid pending decision exists for target"
-            ) from None
-        return _ensure_directory(target, "pending target directory")
+        if create:
+            target = _ensure_directory(target, "pending target directory")
+            return target / "state.json", target / "candidate.txt"
     except OSError as exc:
         raise WorkspaceError("pending target directory is unavailable") from exc
+    else:
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise WorkspaceError("pending target must be a non-symlink directory")
+        return target / "state.json", target / "candidate.txt"
+
+    legacy_state = pending / f"{target_id}.json"
+    try:
+        info = legacy_state.lstat()
+    except FileNotFoundError:
+        raise WorkspaceError("no valid pending decision exists for target") from None
+    except OSError as exc:
+        raise WorkspaceError("cannot stat pending decision") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise WorkspaceError("pending decision must be a regular non-symlink file")
+
+    candidates = state / "candidates"
+    try:
+        info = candidates.lstat()
+    except FileNotFoundError:
+        raise WorkspaceError("legacy candidate directory is unavailable") from None
+    except OSError as exc:
+        raise WorkspaceError("legacy candidate directory is unavailable") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise WorkspaceError("pending target must be a non-symlink directory")
-    return target
+        raise WorkspaceError(
+            "workspace state/candidates must be a non-symlink directory"
+        )
+    return legacy_state, candidates / f"{target_id}.txt"
 
 
 def _candidate_path(state: Path, target_id: str) -> Path:
-    candidate = _pending_target_dir(state, target_id, create=False) / "candidate.txt"
+    _, candidate = _pending_paths(state, target_id)
     try:
         info = candidate.lstat()
     except OSError as exc:
@@ -493,9 +519,8 @@ def _monitor_target(
     state: Path, target: Mapping[str, object], run_id: str
 ) -> dict[str, object]:
     target_id = str(target["target_id"])
-    pending_target = _pending_target_dir(state, target_id, create=True)
+    _, candidate = _pending_paths(state, target_id, create=True)
     snapshots = _ensure_directory(state / "snapshots", "snapshot directory")
-    candidate = pending_target / "candidate.txt"
     previous = snapshots / f"{target_id}.txt"
     arguments = ["--url", str(target["url"]), "--output", str(candidate)]
     if previous.exists():
@@ -507,28 +532,94 @@ def _monitor_target(
     return _handle_monitor_result(state, target, result, run_id)
 
 
+def _optional_lstat(path: Path, description: str) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise WorkspaceError(f"cannot stat {description}") from exc
+
+
+def _pending_cleanup_paths(
+    state: Path, pending: Path, target_id: str
+) -> tuple[Path | None, Path | None, Path | None]:
+    target = pending / target_id
+    target_info = _optional_lstat(target, "pending target")
+    if target_info is not None and (
+        stat.S_ISLNK(target_info.st_mode) or not stat.S_ISDIR(target_info.st_mode)
+    ):
+        raise WorkspaceError("pending target must be a non-symlink directory")
+
+    legacy_state = pending / f"{target_id}.json"
+    state_info = _optional_lstat(legacy_state, "pending decision")
+    if state_info is not None and (
+        stat.S_ISLNK(state_info.st_mode) or not stat.S_ISREG(state_info.st_mode)
+    ):
+        raise WorkspaceError("pending decision must be a regular non-symlink file")
+
+    candidates = state / "candidates"
+    candidates_info = _optional_lstat(candidates, "legacy candidate directory")
+    if candidates_info is not None and (
+        stat.S_ISLNK(candidates_info.st_mode)
+        or not stat.S_ISDIR(candidates_info.st_mode)
+    ):
+        raise WorkspaceError(
+            "workspace state/candidates must be a non-symlink directory"
+        )
+    legacy_candidate = candidates / f"{target_id}.txt"
+    candidate_info = _optional_lstat(legacy_candidate, "candidate")
+    if candidate_info is not None and (
+        stat.S_ISLNK(candidate_info.st_mode) or not stat.S_ISREG(candidate_info.st_mode)
+    ):
+        raise WorkspaceError("candidate must be a regular non-symlink file")
+
+    return (
+        target if target_info is not None else None,
+        legacy_candidate if candidate_info is not None else None,
+        legacy_state if state_info is not None else None,
+    )
+
+
 def _remove_pending(state: Path, target_id: str) -> None:
     pending = _ensure_directory(state / "pending", "pending directory")
-    target = pending / _validate_target_id(target_id)
+    target_id = _validate_target_id(target_id)
+    grouped_target, legacy_candidate, legacy_state = _pending_cleanup_paths(
+        state, pending, target_id
+    )
+
     try:
-        info = target.lstat()
-    except FileNotFoundError:
-        return
+        if legacy_candidate is not None:
+            legacy_candidate.unlink()
+        if legacy_state is not None:
+            legacy_state.unlink()
     except OSError as exc:
-        raise WorkspaceError("cannot stat pending target") from exc
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise WorkspaceError("pending target must be a non-symlink directory")
+        raise WorkspaceError("cannot remove pending transaction") from exc
+
     try:
-        shutil.rmtree(target)
-        _fsync_directory(pending)
+        if legacy_candidate is not None:
+            _fsync_directory(legacy_candidate.parent)
+        if legacy_state is not None:
+            _fsync_directory(pending)
     except OSError as exc:
-        raise WorkspaceError("cannot remove pending target") from exc
+        raise WorkspaceError("cannot fsync pending transaction directories") from exc
+
+    try:
+        if grouped_target is not None:
+            shutil.rmtree(grouped_target)
+    except OSError as exc:
+        raise WorkspaceError("cannot remove pending transaction") from exc
+
+    if grouped_target is not None:
+        try:
+            _fsync_directory(pending)
+        except OSError as exc:
+            raise WorkspaceError(
+                "cannot fsync pending transaction directories"
+            ) from exc
 
 
-def _write_pending(state: Path, payload: Mapping[str, object]) -> None:
-    target_id = str(payload["target_id"])
-    target = _pending_target_dir(state, target_id, create=True)
-    destination = target / "state.json"
+def _write_pending_file(destination: Path, payload: Mapping[str, object]) -> None:
     data = (json.dumps(payload, sort_keys=True) + "\n").encode()
     temporary = _write_temporary_file(destination, data, "pending state")
     try:
@@ -539,9 +630,15 @@ def _write_pending(state: Path, payload: Mapping[str, object]) -> None:
         with suppress(OSError):
             temporary.unlink(missing_ok=True)
     try:
-        _fsync_directory(target)
+        _fsync_directory(destination.parent)
     except OSError as exc:
-        raise WorkspaceError("cannot fsync pending target directory") from exc
+        raise WorkspaceError("cannot fsync pending directory") from exc
+
+
+def _write_pending(state: Path, payload: Mapping[str, object]) -> None:
+    target_id = str(payload["target_id"])
+    destination, _ = _pending_paths(state, target_id, create=True)
+    _write_pending_file(destination, payload)
 
 
 def _handle_monitor_result(
@@ -622,7 +719,7 @@ def check(workspace: str | Path) -> dict[str, object]:
 
 
 def _read_pending(state: Path, target_id: str) -> dict[str, object]:
-    path = _pending_target_dir(state, target_id, create=False) / "state.json"
+    path, _ = _pending_paths(state, target_id)
     try:
         info = path.lstat()
     except OSError as exc:
@@ -639,7 +736,7 @@ def _read_pending(state: Path, target_id: str) -> dict[str, object]:
     pending = cast("dict[str, object]", value)
     if set(pending) == _PENDING_FIELDS - {"run_id"}:
         pending["run_id"] = _new_run_id()
-        _write_pending(state, pending)
+        _write_pending_file(path, pending)
     elif set(pending) != _PENDING_FIELDS:
         raise WorkspaceError("pending decision is invalid")
     run_id = pending.get("run_id")
