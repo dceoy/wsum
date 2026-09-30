@@ -1,17 +1,19 @@
 ---
 name: web-update-monitor
 description: Monitor public HTTP(S) websites, PDFs, and feeds for meaningful changes using local state, CSV target lists, and concise Markdown reports.
+license: MIT
+compatibility: Requires Python 3.11+ with pypdf >=6.15,<7 and outbound HTTP(S) access to monitored public targets.
 ---
 
 # Web Update Monitor
 
 Use this skill when the user wants to monitor one or more public websites or documents and identify meaningful changes over time.
 
-For Claude Cowork, make `targets.csv` the user-facing source of truth. Keep deterministic fetching, normalization, hashing, diffing, report persistence, and snapshot promotion in the bundled Python helpers. The agent owns only target-list editing, materiality judgment, and report composition.
+Use `targets.csv` as the user-facing source of truth. Keep deterministic fetching, normalization, hashing, diffing, report persistence, and snapshot promotion in the bundled Python helpers. The agent owns target-list editing, materiality judgment, and report composition.
 
 Never ask the user to provide target IDs, hashes, JSON payloads, runtime paths, or shell commands.
 
-## Cowork workspace
+## Workspace
 
 Use one user-selected workspace folder with this layout:
 
@@ -45,12 +47,18 @@ Rules:
 
 If the user asks to add, remove, enable, disable, or change monitoring targets, edit `targets.csv` directly. If the file does not exist and the user supplied enough target information, create it with the header above instead of asking them to author CSV manually.
 
-## Check all targets
-
-Run the Cowork facade from this skill directory:
+The scripts require Python 3.11 or newer and `pypdf`. Install the bundled requirements when they are not already available:
 
 ```bash
-python scripts/cowork.py --workspace "$WORKSPACE" check
+python -m pip install -r requirements.txt
+```
+
+## Check all targets
+
+Run the workspace facade from this skill directory:
+
+```bash
+python scripts/workspace.py --workspace "$WORKSPACE" check
 ```
 
 The helper validates the complete CSV before fetching any target. Handle each returned action:
@@ -91,7 +99,7 @@ For a non-material change, omit `report` and set `material` to `false`.
 Run:
 
 ```bash
-python scripts/cowork.py --workspace "$WORKSPACE" finalize < decision.json
+python scripts/workspace.py --workspace "$WORKSPACE" finalize < decision.json
 ```
 
 Do not expose the internal decision JSON to the user. The facade checks the revision, promotes the candidate snapshot, writes a material report only after successful promotion, and removes pending state. If report persistence fails after promotion, leave the pending state for a safe retry.
@@ -111,4 +119,4 @@ If finalization returns `snapshot_conflict`, leave the pending state intact and 
 
 ## Advanced browser-rendered targets
 
-The Cowork CSV workflow intentionally uses deterministic static HTTP(S) fetching only. If a separate agent workflow explicitly requires browser-rendered content, use the existing `monitor.py --input --source-url` path only when the browser tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Do not provide cookies or credentials, and fail closed when those controls are unavailable.
+The CSV workspace workflow intentionally uses deterministic static HTTP(S) fetching only. If a separate agent workflow explicitly requires browser-rendered content, use the existing `monitor.py --input --source-url` path only when the browser tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Do not provide cookies or credentials, and fail closed when those controls are unavailable.

@@ -1,4 +1,4 @@
-"""Tests for the Cowork-facing CSV workflow."""
+"""Tests for the agent-facing CSV workflow."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import hashlib
 import json
 from typing import TYPE_CHECKING, cast
 
-import cowork
 import pytest
-from cowork import CoworkError, check, finalize, load_targets
+import workspace
+from workspace import WorkspaceError, check, finalize, load_targets
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -68,7 +68,7 @@ def test_load_targets_rejects_invalid_csv(
 ) -> None:
     (tmp_path / "targets.csv").write_text(header + row, encoding="utf-8")
 
-    with pytest.raises(CoworkError, match=message):
+    with pytest.raises(WorkspaceError, match=message):
         load_targets(tmp_path)
 
 
@@ -78,7 +78,7 @@ def test_load_targets_rejects_duplicate_urls(tmp_path: Path) -> None:
         "One,https://example.com/,,true\nTwo,https://example.com/,,true\n",
     )
 
-    with pytest.raises(cowork.workflow.WorkflowError, match="duplicate_target_id"):
+    with pytest.raises(workspace.workflow.WorkflowError, match="duplicate_target_id"):
         load_targets(tmp_path)
 
 
@@ -91,7 +91,7 @@ def test_handle_monitor_result_promotes_baseline(tmp_path: Path) -> None:
     candidate.write_text(content)
     target = {"target_id": "example", "name": "Example"}
 
-    result = cowork._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
+    result = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
         state,
         target,
         candidate,
@@ -122,7 +122,7 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
         "watch_focus": "pricing",
     }
 
-    result = cowork._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
+    result = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
         state, target, candidate, _changed_result()
     )
 
@@ -144,7 +144,7 @@ def test_finalize_material_change_writes_report_and_promotes(tmp_path: Path) -> 
     candidate = candidate_dir / "example.txt"
     candidate.write_text("new\n")
     (snapshot_dir / "example.txt").write_text("old\n")
-    cowork._write_pending(  # pyright: ignore[reportPrivateUsage]
+    workspace._write_pending(  # pyright: ignore[reportPrivateUsage]
         state,
         {
             "target_id": "example",
@@ -176,7 +176,7 @@ def test_finalize_non_material_truncated_diff_stops(tmp_path: Path) -> None:
     state = tmp_path / ".wsum"
     (state / "candidates").mkdir(parents=True)
     (state / "candidates" / "example.txt").write_text("new\n")
-    cowork._write_pending(  # pyright: ignore[reportPrivateUsage]
+    workspace._write_pending(  # pyright: ignore[reportPrivateUsage]
         state,
         {
             "target_id": "example",
@@ -216,17 +216,17 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
     }
 
     candidate.write_text("first\n")
-    first = cowork._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
+    first = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
         state, target, candidate, _changed_result(current="first\n")
     )
     first_revision = str(first["revision"])
     candidate.write_text("second\n")
-    second = cowork._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
+    second = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
         state, target, candidate, _changed_result(current="second\n")
     )
     pending = (state / "pending" / "example.json").read_bytes()
 
-    with pytest.raises(CoworkError, match="revision"):
+    with pytest.raises(WorkspaceError, match="revision"):
         finalize(
             tmp_path,
             {
@@ -260,7 +260,7 @@ def test_finalize_material_snapshot_conflict_does_not_write_report(
     reports.mkdir()
     report = reports / "example.md"
     report.write_text("previous report\n")
-    cowork._write_pending(  # pyright: ignore[reportPrivateUsage]
+    workspace._write_pending(  # pyright: ignore[reportPrivateUsage]
         state,
         {
             "target_id": "example",
@@ -301,14 +301,14 @@ def test_check_batches_targets_and_contains_failures(
 
     def fake_monitor(_state: Path, target: dict[str, object]) -> dict[str, object]:
         if target["name"] == "Bad":
-            raise cowork.monitor.MonitorError
+            raise workspace.monitor.MonitorError
         return {
             "action": "unchanged",
             "target_id": target["target_id"],
             "name": target["name"],
         }
 
-    monkeypatch.setattr(cowork, "_monitor_target", fake_monitor)
+    monkeypatch.setattr(workspace, "_monitor_target", fake_monitor)
 
     result = check(tmp_path)
     outcomes = cast("list[dict[str, object]]", result["targets"])
@@ -321,5 +321,5 @@ def test_check_batches_targets_and_contains_failures(
 
 
 def test_main_reports_invalid_workspace(capsys: pytest.CaptureFixture[str]) -> None:
-    assert cowork.main(["--workspace", "/missing", "check"]) == 2
+    assert workspace.main(["--workspace", "/missing", "check"]) == 2
     assert "workspace must be an existing directory" in capsys.readouterr().err
