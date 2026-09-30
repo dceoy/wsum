@@ -1145,7 +1145,25 @@ def _complete_cleanup_record(state: Path, record: Mapping[str, object]) -> None:
 def _replacement_matches_commit(
     state: Path, target_id: str, commit: Mapping[str, object]
 ) -> bool:
+    target_id = _validate_target_id(target_id)
+    state_info = _optional_lstat(state, "workspace state directory")
+    if (
+        state_info is None
+        or stat.S_ISLNK(state_info.st_mode)
+        or not stat.S_ISDIR(state_info.st_mode)
+    ):
+        raise WorkspaceError("workspace state must be a non-symlink directory")
+    pending_dir = state / "pending"
     target_dir = state / "pending" / target_id
+    for directory, description in (
+        (pending_dir, "pending directory"),
+        (target_dir, "pending target directory"),
+    ):
+        info = _optional_lstat(directory, description)
+        if info is None:
+            return False
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise WorkspaceError(f"{description} must be a non-symlink directory")
     state_path = target_dir / "state.json"
     candidate_path = target_dir / "candidate.txt"
     state_info = _optional_lstat(state_path, "pending decision")
@@ -1187,6 +1205,22 @@ def _replacement_matches_commit(
     return hashlib.sha256(candidate_data).hexdigest() == candidate_sha256
 
 
+def _replacement_previous_revision(record: Mapping[str, object]) -> str | None:
+    old_state = _decode_recovery_backup(record.get("old_state"))
+    if old_state is None:
+        return None
+    try:
+        value = json.loads(old_state.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkspaceError("pending recovery record is invalid") from exc
+    if not isinstance(value, dict):
+        raise WorkspaceError("pending recovery record is invalid")
+    previous = cast("dict[str, object]", value).get("revision")
+    if not isinstance(previous, str) or not _REVISION_RE.fullmatch(previous):
+        raise WorkspaceError("pending recovery record is invalid")
+    return previous
+
+
 def _recover_pending(
     state: Path, target_id: str, *, revision: str | None = None
 ) -> dict[str, object] | None:
@@ -1204,12 +1238,14 @@ def _recover_pending(
             raise WorkspaceError(
                 "pending replacement recovery requires a decision revision"
             )
-        if revision == commit.get("revision") and _replacement_matches_commit(
-            state, target_id, commit
-        ):
+        if revision == commit.get("revision"):
+            if not _replacement_matches_commit(state, target_id, commit):
+                raise WorkspaceError("pending committed replacement is incomplete")
             _retire_recovery_record(state, target_id)
             _retire_commit_record(state, target_id)
             return None
+        if revision != _replacement_previous_revision(record):
+            raise WorkspaceError("decision revision does not match pending replacement")
         # Remove the commit marker durably before restoring the prior review. If
         # this fails, leave both records intact so finalize can choose by revision.
         _retire_commit_record(state, target_id)

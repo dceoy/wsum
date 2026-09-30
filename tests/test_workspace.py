@@ -1149,6 +1149,26 @@ def test_failed_commit_marker_keeps_undo_available_for_recovery(
     assert result["action"] == "finalized"
 
 
+def _leave_ambiguous_replacement(state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "target_id": "example",
+        "run_id": _RUN_ID,
+        "revision": "b" * 32,
+        "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
+        "candidate_sha256": hashlib.sha256(b"third\n").hexdigest(),
+        "diff_truncated": False,
+    }
+    retirement_error = "injected undo retirement failure"
+
+    def fail_undo_retirement(_state: Path, _target_id: str) -> None:
+        raise WorkspaceError(retirement_error)
+
+    monkeypatch.setattr(workspace, "_retire_recovery_record", fail_undo_retirement)
+    workspace._write_pending_transaction(  # pyright: ignore[reportPrivateUsage]
+        state, payload, b"third\n"
+    )
+
+
 @pytest.mark.parametrize(
     ("revision", "expected_snapshot"),
     [("a" * 32, "new\n"), ("b" * 32, "third\n")],
@@ -1163,24 +1183,7 @@ def test_finalize_resolves_ambiguous_commit_by_requested_revision(
     state = tmp_path / ".wsum"
     state.mkdir()
     _, _, snapshot = _write_review_transaction(state, "grouped")
-    payload = {
-        "target_id": "example",
-        "run_id": _RUN_ID,
-        "revision": "b" * 32,
-        "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
-        "candidate_sha256": hashlib.sha256(b"third\n").hexdigest(),
-        "diff_truncated": False,
-    }
-
-    undo_retirement_error = "injected undo retirement failure"
-
-    def fail_undo_retirement(_state: Path, _target_id: str) -> None:
-        raise WorkspaceError(undo_retirement_error)
-
-    monkeypatch.setattr(workspace, "_retire_recovery_record", fail_undo_retirement)
-    workspace._write_pending_transaction(  # pyright: ignore[reportPrivateUsage]
-        state, payload, b"third\n"
-    )
+    _leave_ambiguous_replacement(state, monkeypatch)
     assert (state / ".pending-recovery" / "example.json").exists()
     assert (state / ".pending-recovery" / "example.json.commit").exists()
     with pytest.raises(WorkspaceError, match="requires a decision revision"):
@@ -1196,6 +1199,70 @@ def test_finalize_resolves_ambiguous_commit_by_requested_revision(
 
     assert result["action"] == "finalized"
     assert snapshot.read_text(encoding="utf-8") == expected_snapshot
+
+
+def test_finalize_unrelated_revision_preserves_ambiguous_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
+    _leave_ambiguous_replacement(state, monkeypatch)
+    monkeypatch.undo()
+    original_metadata = metadata.read_bytes()
+    original_candidate = candidate.read_bytes()
+    recovery_dir = state / ".pending-recovery"
+
+    with pytest.raises(WorkspaceError, match="does not match pending replacement"):
+        finalize(
+            tmp_path,
+            {"target_id": "example", "revision": "c" * 32, "material": False},
+        )
+
+    assert snapshot.read_text(encoding="utf-8") == "old\n"
+    assert metadata.read_bytes() == original_metadata
+    assert candidate.read_bytes() == original_candidate
+    assert (recovery_dir / "example.json").exists()
+    assert (recovery_dir / "example.json.commit").exists()
+
+    result = finalize(
+        tmp_path,
+        {"target_id": "example", "revision": "b" * 32, "material": False},
+    )
+    assert result["action"] == "finalized"
+    assert snapshot.read_text(encoding="utf-8") == "third\n"
+
+
+def test_finalize_rejects_symlinked_pending_ancestor_with_ambiguous_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_review_transaction(state, "grouped")
+    _leave_ambiguous_replacement(state, monkeypatch)
+    monkeypatch.undo()
+
+    target_dir = state / "pending" / "example"
+    moved_target = state / "pending" / "example-moved"
+    target_dir.replace(moved_target)
+    target_dir.symlink_to(moved_target, target_is_directory=True)
+    recovery_dir = state / ".pending-recovery"
+
+    with pytest.raises(WorkspaceError, match="non-symlink directory"):
+        finalize(
+            tmp_path,
+            {"target_id": "example", "revision": "b" * 32, "material": False},
+        )
+
+    assert (recovery_dir / "example.json").exists()
+    assert (recovery_dir / "example.json.commit").exists()
+    target_dir.unlink()
+    moved_target.replace(target_dir)
+    result = finalize(
+        tmp_path,
+        {"target_id": "example", "revision": "a" * 32, "material": False},
+    )
+    assert result["action"] == "finalized"
 
 
 def test_finalize_recovers_interrupted_pending_replacement(tmp_path: Path) -> None:
