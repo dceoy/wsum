@@ -1029,6 +1029,175 @@ def test_monitor_update_failure_keeps_previous_review_finalizable(
     assert not candidate.exists()
 
 
+def test_staging_cleanup_failure_does_not_commit_monitor_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
+    original_metadata = metadata.read_bytes()
+    cleanup_error = "injected staging cleanup failure"
+    target = {
+        "target_id": "example",
+        "name": "Example",
+        "url": "https://example.com/",
+        "watch_focus": "pricing",
+    }
+
+    class FailingTemporaryDirectory:
+        def __init__(self, *, prefix: str, **kwargs: str | Path) -> None:
+            self.path = Path(kwargs["dir"]) / f"{prefix}cleanup-failure"
+            self.path.mkdir(mode=0o700)
+
+        def __enter__(self) -> str:
+            return str(self.path)
+
+        def __exit__(
+            self, _exc_type: object, _exc_value: object, _traceback: object
+        ) -> None:
+            workspace.shutil.rmtree(self.path)
+            raise OSError(cleanup_error)
+
+    def fake_monitor(args: argparse.Namespace) -> dict[str, object]:
+        Path(args.output).write_text("third\n", encoding="utf-8")
+        return _changed_result(current="third\n")
+
+    monkeypatch.setattr(
+        workspace.tempfile, "TemporaryDirectory", FailingTemporaryDirectory
+    )
+    monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
+
+    with pytest.raises(OSError, match=cleanup_error):
+        workspace._monitor_target(state, target, _RUN_ID)  # pyright: ignore[reportPrivateUsage]
+
+    assert metadata.read_bytes() == original_metadata
+    assert candidate.read_text(encoding="utf-8") == "new\n"
+    result = finalize(
+        tmp_path,
+        {"target_id": "example", "revision": "a" * 32, "material": False},
+    )
+    assert result["action"] == "finalized"
+    assert snapshot.read_text(encoding="utf-8") == "new\n"
+
+
+def test_failed_commit_marker_keeps_undo_available_for_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, candidate, _ = _write_review_transaction(state, "grouped")
+    recovery_dir = state / ".pending-recovery"
+    commit_marker = recovery_dir / "example.json.commit"
+    original_fsync = workspace._fsync_directory  # pyright: ignore[reportPrivateUsage]
+    original_write = workspace._write_temporary_file  # pyright: ignore[reportPrivateUsage]
+    commit_sync_failed = False
+    rollback_write_failed = False
+    commit_sync_error = "injected commit marker fsync failure"
+    rollback_write_error = "injected rollback file creation failure"
+
+    def fail_commit_sync(path: Path) -> None:
+        nonlocal commit_sync_failed
+        if path == recovery_dir and commit_marker.exists() and not commit_sync_failed:
+            commit_sync_failed = True
+            raise OSError(commit_sync_error)
+        original_fsync(path)
+
+    def fail_rollback_write(destination: Path, data: bytes, description: str) -> Path:
+        nonlocal rollback_write_failed
+        if (
+            commit_sync_failed
+            and destination == candidate
+            and data == b"new\n"
+            and not rollback_write_failed
+        ):
+            rollback_write_failed = True
+            raise OSError(rollback_write_error)
+        return original_write(destination, data, description)
+
+    monkeypatch.setattr(workspace, "_fsync_directory", fail_commit_sync)
+    monkeypatch.setattr(workspace, "_write_temporary_file", fail_rollback_write)
+
+    payload = {
+        "target_id": "example",
+        "run_id": _RUN_ID,
+        "revision": "b" * 32,
+        "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
+        "candidate_sha256": hashlib.sha256(b"third\n").hexdigest(),
+        "diff_truncated": False,
+    }
+    with pytest.raises(WorkspaceError, match="rollback could not be completed"):
+        workspace._write_pending_transaction(  # pyright: ignore[reportPrivateUsage]
+            state, payload, b"third\n"
+        )
+
+    assert commit_sync_failed
+    assert rollback_write_failed
+    assert metadata.exists()
+    assert commit_marker.exists() is False
+    assert (recovery_dir / "example.json").exists()
+
+    monkeypatch.undo()
+    workspace._recover_pending(  # pyright: ignore[reportPrivateUsage]
+        state, "example"
+    )
+    assert json.loads(metadata.read_text(encoding="utf-8"))["revision"] == "a" * 32
+    assert candidate.read_text(encoding="utf-8") == "new\n"
+    result = finalize(
+        tmp_path,
+        {"target_id": "example", "revision": "a" * 32, "material": False},
+    )
+    assert result["action"] == "finalized"
+
+
+@pytest.mark.parametrize(
+    ("revision", "expected_snapshot"),
+    [("a" * 32, "new\n"), ("b" * 32, "third\n")],
+    ids=["retain-previous-review", "accept-committed-review"],
+)
+def test_finalize_resolves_ambiguous_commit_by_requested_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    revision: str,
+    expected_snapshot: str,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _, _, snapshot = _write_review_transaction(state, "grouped")
+    payload = {
+        "target_id": "example",
+        "run_id": _RUN_ID,
+        "revision": "b" * 32,
+        "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
+        "candidate_sha256": hashlib.sha256(b"third\n").hexdigest(),
+        "diff_truncated": False,
+    }
+
+    undo_retirement_error = "injected undo retirement failure"
+
+    def fail_undo_retirement(_state: Path, _target_id: str) -> None:
+        raise WorkspaceError(undo_retirement_error)
+
+    monkeypatch.setattr(workspace, "_retire_recovery_record", fail_undo_retirement)
+    workspace._write_pending_transaction(  # pyright: ignore[reportPrivateUsage]
+        state, payload, b"third\n"
+    )
+    assert (state / ".pending-recovery" / "example.json").exists()
+    assert (state / ".pending-recovery" / "example.json.commit").exists()
+    with pytest.raises(WorkspaceError, match="requires a decision revision"):
+        workspace._recover_pending(  # pyright: ignore[reportPrivateUsage]
+            state, "example"
+        )
+
+    monkeypatch.undo()
+    result = finalize(
+        tmp_path,
+        {"target_id": "example", "revision": revision, "material": False},
+    )
+
+    assert result["action"] == "finalized"
+    assert snapshot.read_text(encoding="utf-8") == expected_snapshot
+
+
 def test_finalize_recovers_interrupted_pending_replacement(tmp_path: Path) -> None:
     state = tmp_path / ".wsum"
     state.mkdir()
@@ -1185,6 +1354,44 @@ def test_check_syncs_new_state_and_grouped_pending_directories(
     assert pending / target_id in fsynced
     assert state / ".pending-recovery" in fsynced
     assert (pending / target_id / "state.json").exists()
+
+
+def test_recovery_directory_parent_fsync_retries_after_creation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_review_transaction(state, "grouped")
+    record = workspace._capture_pending_replacement(  # pyright: ignore[reportPrivateUsage]
+        state, "example"
+    )
+    original_fsync = workspace._fsync_directory  # pyright: ignore[reportPrivateUsage]
+    state_fsyncs = 0
+    parent_fsync_error = "injected recovery parent fsync failure"
+
+    def fail_once(path: Path) -> None:
+        nonlocal state_fsyncs
+        if path == state:
+            state_fsyncs += 1
+            if state_fsyncs == 1:
+                raise OSError(parent_fsync_error)
+        original_fsync(path)
+
+    monkeypatch.setattr(workspace, "_fsync_directory", fail_once)
+    with pytest.raises(WorkspaceError, match="fsync parent directory"):
+        workspace._write_recovery_record(  # pyright: ignore[reportPrivateUsage]
+            state, record
+        )
+
+    recovery_dir = state / ".pending-recovery"
+    assert recovery_dir.is_dir()
+    assert not (recovery_dir / "example.json").exists()
+    workspace._write_recovery_record(  # pyright: ignore[reportPrivateUsage]
+        state, record
+    )
+
+    assert state_fsyncs == 2
+    assert (recovery_dir / "example.json").is_file()
 
 
 def test_check_migrates_legacy_pending_on_successful_changed_result(
@@ -1558,9 +1765,7 @@ def test_promote_snapshot_fsyncs_snapshot_directories(
     result = _promote(state, digest)
 
     assert result["action"] == "snapshot_promoted"
-    expected = [state / "snapshots"]
-    if not snapshot_directory_exists:
-        expected.insert(0, state)
+    expected = [state, state, state / "snapshots"]
     assert fsynced == expected
 
 
@@ -1569,10 +1774,14 @@ def test_promote_snapshot_reports_fsync_failure(
 ) -> None:
     state = _state(tmp_path)
     _, digest = _candidate(state)
-    (state / "snapshots").mkdir()
+    snapshots = state / "snapshots"
+    snapshots.mkdir()
+    original_fsync = workspace._fsync_directory  # pyright: ignore[reportPrivateUsage]
 
-    def fail(_: Path) -> None:
-        raise OSError
+    def fail(path: Path) -> None:
+        if path == snapshots:
+            raise OSError
+        original_fsync(path)
 
     monkeypatch.setattr(workspace, "_fsync_directory", fail)
     with pytest.raises(WorkspaceError, match="cannot fsync snapshot directory"):

@@ -81,7 +81,6 @@ def _fsync_directory(path: Path) -> None:
 def _ensure_directory(
     path: Path, description: str, *, sync_parent: bool = False
 ) -> Path:
-    created = False
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -91,8 +90,6 @@ def _ensure_directory(
             pass
         except OSError as exc:
             raise WorkspaceError(f"{description} is unavailable") from exc
-        else:
-            created = True
         try:
             info = path.lstat()
         except OSError as exc:
@@ -101,7 +98,7 @@ def _ensure_directory(
         raise WorkspaceError(f"{description} is unavailable") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         raise WorkspaceError(f"{description} must be a non-symlink directory")
-    if created and sync_parent:
+    if sync_parent:
         try:
             _fsync_directory(path.parent)
         except OSError as exc:
@@ -446,18 +443,20 @@ def _promote_snapshot(
     expected_sha256: object,
     candidate_sha256: object,
     candidate_source: Path | None = None,
+    candidate_data: bytes | None = None,
 ) -> dict[str, object]:
     """Atomically promote a candidate when its expected baseline matches."""
     state = _workspace(state)
     target_id = _validate_target_id(target_id)
     expected = _validate_sha256(expected_sha256, "expected_sha256", allow_none=True)
     candidate_digest = _validate_sha256(candidate_sha256, "candidate_sha256")
-    candidate = (
-        _candidate_path(state, target_id)
-        if candidate_source is None
-        else candidate_source
-    )
-    candidate_data = _read_text_bytes(candidate, "candidate")
+    if candidate_data is None:
+        candidate = (
+            _candidate_path(state, target_id)
+            if candidate_source is None
+            else candidate_source
+        )
+        candidate_data = _read_text_bytes(candidate, "candidate")
     if hashlib.sha256(candidate_data).hexdigest() != candidate_digest:
         raise WorkspaceError("candidate_sha256 does not match candidate")
 
@@ -555,6 +554,7 @@ def _monitor_target(
         state / "snapshots", "snapshot directory", sync_parent=True
     )
     previous = snapshots / f"{target_id}.txt"
+    candidate_data: bytes | None = None
     with tempfile.TemporaryDirectory(prefix=".monitor-", dir=state) as staging:
         candidate = Path(staging) / "candidate.txt"
         arguments = ["--url", str(target["url"]), "--output", str(candidate)]
@@ -564,9 +564,11 @@ def _monitor_target(
             arguments
         )
         result = monitor.run(namespace)
-        return _handle_monitor_result(
-            state, target, result, run_id, candidate_source=candidate
-        )
+        if result.get("status") in {"baseline", "changed"}:
+            candidate_data = _read_text_bytes(candidate, "candidate")
+    return _handle_monitor_result(
+        state, target, result, run_id, candidate_data=candidate_data
+    )
 
 
 def _optional_lstat(path: Path, description: str) -> os.stat_result | None:
@@ -799,69 +801,117 @@ def _validate_recovery_record(value: object, target_id: str) -> dict[str, object
     return record
 
 
-def _read_recovery_record(state: Path, target_id: str) -> dict[str, object] | None:
-    target_id = _validate_target_id(target_id)
-    directory = _recovery_directory(state, create=False)
-    if directory is None:
-        return None
-    path = directory / f"{target_id}.json"
-    info = _optional_lstat(path, "pending recovery record")
+def _read_recovery_file(
+    path: Path, target_id: str, description: str
+) -> dict[str, object] | None:
+    info = _optional_lstat(path, description)
     if info is None:
         return None
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise WorkspaceError(
-            "pending recovery record must be a regular non-symlink file"
-        )
+        raise WorkspaceError(f"{description} must be a regular non-symlink file")
     if stat.S_IMODE(info.st_mode) & 0o077:
-        raise WorkspaceError("pending recovery record must be private")
+        raise WorkspaceError(f"{description} must be private")
     if info.st_size <= 0 or info.st_size > _MAX_RECOVERY_RECORD_BYTES:
-        raise WorkspaceError("pending recovery record size is invalid")
+        raise WorkspaceError(f"{description} size is invalid")
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise WorkspaceError("pending recovery record is invalid") from exc
+        raise WorkspaceError(f"{description} is invalid") from exc
     return _validate_recovery_record(value, target_id)
 
 
-def _write_recovery_record(state: Path, record: Mapping[str, object]) -> None:
+def _recovery_record_path(state: Path, target_id: str) -> Path | None:
+    directory = _recovery_directory(state, create=False)
+    if directory is None:
+        return None
+    return directory / f"{_validate_target_id(target_id)}.json"
+
+
+def _commit_record_path(state: Path, target_id: str) -> Path | None:
+    directory = _recovery_directory(state, create=False)
+    if directory is None:
+        return None
+    # Appending the suffix avoids collisions with another target ID containing dots.
+    return directory / f"{_validate_target_id(target_id)}.json.commit"
+
+
+def _read_recovery_record(state: Path, target_id: str) -> dict[str, object] | None:
+    target_id = _validate_target_id(target_id)
+    path = _recovery_record_path(state, target_id)
+    if path is None:
+        return None
+    return _read_recovery_file(path, target_id, "pending recovery record")
+
+
+def _read_commit_record(state: Path, target_id: str) -> dict[str, object] | None:
+    target_id = _validate_target_id(target_id)
+    path = _commit_record_path(state, target_id)
+    if path is None:
+        return None
+    record = _read_recovery_file(path, target_id, "pending commit record")
+    if record is not None and record.get("kind") != "commit":
+        raise WorkspaceError("pending commit record is invalid")
+    return record
+
+
+def _write_recovery_record_at(
+    state: Path, record: Mapping[str, object], *, commit: bool
+) -> None:
     target_id = _validate_target_id(record.get("target_id"))
     normalized = _validate_recovery_record(dict(record), target_id)
+    if commit and normalized.get("kind") != "commit":
+        raise WorkspaceError("pending commit record is invalid")
     data = (json.dumps(normalized, sort_keys=True) + "\n").encode()
     if not data or len(data) > _MAX_RECOVERY_RECORD_BYTES:
         raise WorkspaceError("pending recovery record size is invalid")
     directory = _recovery_directory(state, create=True)
     if directory is None:
         raise WorkspaceError("pending recovery directory is unavailable")
-    path = directory / f"{target_id}.json"
-    current = _optional_lstat(path, "pending recovery record")
+    path = directory / (f"{target_id}.json.commit" if commit else f"{target_id}.json")
+    description = "pending commit record" if commit else "pending recovery record"
+    current = _optional_lstat(path, description)
     if current is not None and (
         stat.S_ISLNK(current.st_mode)
         or not stat.S_ISREG(current.st_mode)
         or stat.S_IMODE(current.st_mode) & 0o077
     ):
-        raise WorkspaceError("pending recovery record is unsafe")
-    temporary = _write_temporary_file(path, data, "pending recovery record")
+        raise WorkspaceError(f"{description} is unsafe")
+    temporary = _write_temporary_file(path, data, description)
     try:
         temporary.replace(path)
     except OSError as exc:
-        raise WorkspaceError("cannot persist pending recovery record") from exc
+        raise WorkspaceError(f"cannot persist {description}") from exc
     finally:
         with suppress(OSError):
             temporary.unlink(missing_ok=True)
     try:
         _fsync_directory(directory)
     except OSError as exc:
-        raise WorkspaceError("cannot fsync pending recovery directory") from exc
+        raise WorkspaceError(f"cannot fsync {description} directory") from exc
 
 
-def _retire_recovery_record(
-    state: Path, target_id: str, *, ignore_errors: bool = False
+def _write_recovery_record(state: Path, record: Mapping[str, object]) -> None:
+    _write_recovery_record_at(state, record, commit=False)
+
+
+def _write_commit_record(state: Path, record: Mapping[str, object]) -> None:
+    _write_recovery_record_at(state, record, commit=True)
+
+
+def _retire_recovery_file(
+    state: Path,
+    target_id: str,
+    *,
+    commit: bool,
+    ignore_errors: bool,
 ) -> None:
     directory = _recovery_directory(state, create=False)
     if directory is None:
         return
-    path = directory / f"{_validate_target_id(target_id)}.json"
-    info = _optional_lstat(path, "pending recovery record")
+    target_id = _validate_target_id(target_id)
+    path = directory / (f"{target_id}.json.commit" if commit else f"{target_id}.json")
+    description = "pending commit record" if commit else "pending recovery record"
+    info = _optional_lstat(path, description)
     if info is None:
         return
     if (
@@ -869,13 +919,25 @@ def _retire_recovery_record(
         or not stat.S_ISREG(info.st_mode)
         or stat.S_IMODE(info.st_mode) & 0o077
     ):
-        raise WorkspaceError("pending recovery record is unsafe")
+        raise WorkspaceError(f"{description} is unsafe")
     try:
         path.unlink()
         _fsync_directory(directory)
     except OSError as exc:
         if not ignore_errors:
-            raise WorkspaceError("cannot retire pending recovery record") from exc
+            raise WorkspaceError(f"cannot retire {description}") from exc
+
+
+def _retire_recovery_record(
+    state: Path, target_id: str, *, ignore_errors: bool = False
+) -> None:
+    _retire_recovery_file(state, target_id, commit=False, ignore_errors=ignore_errors)
+
+
+def _retire_commit_record(
+    state: Path, target_id: str, *, ignore_errors: bool = False
+) -> None:
+    _retire_recovery_file(state, target_id, commit=True, ignore_errors=ignore_errors)
 
 
 def _read_transaction_backup(path: Path, description: str) -> bytes | None:
@@ -1080,9 +1142,80 @@ def _complete_cleanup_record(state: Path, record: Mapping[str, object]) -> None:
     _retire_recovery_record(state, target_id, ignore_errors=True)
 
 
-def _recover_pending(state: Path, target_id: str) -> dict[str, object] | None:
+def _replacement_matches_commit(
+    state: Path, target_id: str, commit: Mapping[str, object]
+) -> bool:
+    target_dir = state / "pending" / target_id
+    state_path = target_dir / "state.json"
+    candidate_path = target_dir / "candidate.txt"
+    state_info = _optional_lstat(state_path, "pending decision")
+    candidate_info = _optional_lstat(candidate_path, "candidate")
+    if state_info is None or candidate_info is None:
+        return False
+    if stat.S_ISLNK(state_info.st_mode) or not stat.S_ISREG(state_info.st_mode):
+        raise WorkspaceError("pending decision must be a regular non-symlink file")
+    if stat.S_ISLNK(candidate_info.st_mode) or not stat.S_ISREG(candidate_info.st_mode):
+        raise WorkspaceError("candidate must be a regular non-symlink file")
+    try:
+        pending = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(pending, dict):
+        return False
+    pending = cast("dict[str, object]", pending)
+    if set(pending) != _PENDING_FIELDS:
+        return False
+    if pending.get("target_id") != target_id or pending.get("revision") != commit.get(
+        "revision"
+    ):
+        return False
+    run_id = pending.get("run_id")
+    if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
+        return False
+    if type(pending.get("diff_truncated")) is not bool:
+        return False
+    candidate_data = _read_text_bytes(candidate_path, "candidate")
+    try:
+        candidate_sha256 = _validate_sha256(
+            pending.get("candidate_sha256"), "candidate_sha256"
+        )
+        _validate_sha256(
+            pending.get("expected_sha256"), "expected_sha256", allow_none=True
+        )
+    except WorkspaceError:
+        return False
+    return hashlib.sha256(candidate_data).hexdigest() == candidate_sha256
+
+
+def _recover_pending(
+    state: Path, target_id: str, *, revision: str | None = None
+) -> dict[str, object] | None:
     target_id = _validate_target_id(target_id)
     record = _read_recovery_record(state, target_id)
+    commit = _read_commit_record(state, target_id)
+    if commit is not None:
+        if record is None:
+            # The undo record is retired only after the commit marker is durable.
+            _retire_commit_record(state, target_id)
+            return None
+        if record.get("kind") != "replace":
+            raise WorkspaceError("pending recovery records conflict")
+        if revision is None:
+            raise WorkspaceError(
+                "pending replacement recovery requires a decision revision"
+            )
+        if revision == commit.get("revision") and _replacement_matches_commit(
+            state, target_id, commit
+        ):
+            _retire_recovery_record(state, target_id)
+            _retire_commit_record(state, target_id)
+            return None
+        # Remove the commit marker durably before restoring the prior review. If
+        # this fails, leave both records intact so finalize can choose by revision.
+        _retire_commit_record(state, target_id)
+        _restore_pending_replacement(state, record)
+        _retire_recovery_record(state, target_id)
+        return None
     if record is None:
         return None
     kind = record["kind"]
@@ -1091,6 +1224,7 @@ def _recover_pending(state: Path, target_id: str) -> dict[str, object] | None:
         _retire_recovery_record(state, target_id)
         return None
     if kind == "commit":
+        # Compatibility with v1 records written by earlier workspace versions.
         _retire_recovery_record(state, target_id, ignore_errors=True)
         return None
     _complete_cleanup_record(state, record)
@@ -1139,7 +1273,7 @@ def _install_pending_replacement(
     if durable_state != dict(payload):
         raise WorkspaceError("pending decision read-back mismatch")
 
-    _write_recovery_record(
+    _write_commit_record(
         state,
         {
             "kind": "commit",
@@ -1161,9 +1295,9 @@ def _write_pending_transaction(
         _install_pending_replacement(state, payload, candidate_data, undo)
     except (OSError, WorkspaceError):
         try:
-            # The commit marker may have been renamed even if its directory fsync
-            # failed, so put the durable undo record back before restoring files.
-            _write_recovery_record(state, undo)
+            # Keep the undo record untouched until the separate commit marker is
+            # durably removed. A failed rollback can then replay this backup.
+            _retire_commit_record(state, target_id)
             _restore_pending_replacement(state, undo)
             _retire_recovery_record(state, target_id)
         except (OSError, WorkspaceError) as recovery_exc:
@@ -1171,7 +1305,13 @@ def _write_pending_transaction(
                 "pending update failed and rollback could not be completed"
             ) from recovery_exc
         raise
-    _retire_recovery_record(state, target_id, ignore_errors=True)
+    try:
+        _retire_recovery_record(state, target_id)
+    except WorkspaceError:
+        # The durable commit marker keeps a returned replacement recoverable if
+        # undo retirement cannot be confirmed.
+        return
+    _retire_commit_record(state, target_id, ignore_errors=True)
 
 
 def _discard_pending(state: Path, target_id: str) -> None:
@@ -1198,6 +1338,7 @@ def _handle_monitor_result(
     run_id: str,
     *,
     candidate_source: Path | None = None,
+    candidate_data: bytes | None = None,
 ) -> dict[str, object]:
     target_id = str(target["target_id"])
     status = result.get("status")
@@ -1211,6 +1352,7 @@ def _handle_monitor_result(
             expected_sha256=None,
             candidate_sha256=result.get("sha256"),
             candidate_source=candidate_source,
+            candidate_data=candidate_data,
         )
         if promoted.get("action") != "snapshot_promoted":
             return {"action": "snapshot_conflict", "target_id": target_id}
@@ -1231,12 +1373,13 @@ def _handle_monitor_result(
         "candidate_sha256": result.get("sha256"),
         "diff_truncated": result.get("diff_truncated") is True,
     }
-    candidate = (
-        _candidate_path(state, target_id)
-        if candidate_source is None
-        else candidate_source
-    )
-    candidate_data = _read_text_bytes(candidate, "candidate")
+    if candidate_data is None:
+        candidate = (
+            _candidate_path(state, target_id)
+            if candidate_source is None
+            else candidate_source
+        )
+        candidate_data = _read_text_bytes(candidate, "candidate")
     candidate_digest = _validate_sha256(pending["candidate_sha256"], "candidate_sha256")
     if hashlib.sha256(candidate_data).hexdigest() != candidate_digest:
         raise WorkspaceError("candidate_sha256 does not match candidate")
@@ -1371,7 +1514,11 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
 
     root = _workspace(workspace)
     state = _state_dir(root)
+    commit = _read_commit_record(state, target_id)
     recovery = _read_recovery_record(state, target_id)
+    if commit is not None:
+        _recover_pending(state, target_id, revision=revision)
+        recovery = _read_recovery_record(state, target_id)
     if recovery is not None and recovery.get("kind") == "cleanup":
         if recovery.get("purpose") == "finalize":
             if not _finalize_record_matches(recovery, revision, material, report):
