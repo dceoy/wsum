@@ -2,7 +2,7 @@
 
 A local-first Agent Skill for detecting meaningful updates on public websites and documents.
 
-The canonical skill lives in `skills/web-update-monitor/`. Its bundled Python helpers handle deterministic fetching, normalization, hashing, diffing, report persistence, and snapshot promotion. The agent edits the target list, judges whether a detected change matters, and composes reports for material changes.
+The canonical skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes reports for material changes.
 
 ## Agent Skill
 
@@ -82,7 +82,7 @@ uv run pytest
 skills-ref validate skills/web-update-monitor
 ```
 
-`monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workflow.py` provides target validation, safe report writing, and atomic snapshot promotion.
+`monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workspace.py` validates targets and owns candidate/pending state, safe report writing, and atomic snapshot promotion.
 
 Browser-rendered targets are outside the CSV workspace workflow. Do not auto-escalate a static failure to browser rendering. Use browser input only when the browser tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Never provide cookies or credentials.
 
