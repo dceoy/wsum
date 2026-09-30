@@ -43,6 +43,19 @@ workspace/
 
 Users may edit `targets.csv`. `.wsum/` is internal state and should not be edited manually.
 
+### Generated files
+
+The workspace contains one user-facing input, user-facing reports, and internal state:
+
+- `targets.csv`: the user-facing source of truth for monitored targets. The agent may create or edit it when the user changes monitoring configuration.
+- `reports/<run-id>.md`: the user-facing output. One report is created per `check` run only when at least one material change is finalized. The run ID has the form `YYYYMMDDTHHMMSSZ-xxxxxxxx`. Material targets from the same run are merged into this file.
+- `.wsum/snapshots/<target-id>.txt`: the accepted normalized baseline for each target. A first observation creates it; later finalized observations replace it atomically, including non-material changes.
+- `.wsum/candidates/<target-id>.txt`: the normalized candidate produced by the latest changed observation. It is retained while the agent reviews the diff and removed after successful finalization.
+- `.wsum/pending/<target-id>.json`: internal review state linking a candidate to its run, revision, expected baseline hash, candidate hash, and diff-truncation status. It prevents stale decisions from being applied and is removed after successful finalization.
+
+The helper may briefly create hidden `*.tmp` files while atomically replacing reports, snapshots, or pending state. These are implementation details and are cleaned up during normal operation.
+
+
 ## Agent workflow
 
 Read `skills/web-update-monitor/SKILL.md` for the complete procedure. At a high level, the agent edits `targets.csv` when requested, checks enabled targets, reviews bounded diffs for materiality, and contributes each material target to one run-level Markdown report. The helper handles deterministic state transitions and per-target errors.
