@@ -9,7 +9,7 @@ compatibility: Requires Python 3.11+ with pypdf >=6.15,<7 and outbound HTTP(S) a
 
 Use this skill when the user wants to monitor one or more public websites or documents and identify meaningful changes over time.
 
-Use `targets.csv` as the user-facing source of truth. Keep deterministic fetching, normalization, hashing, diffing, report persistence, and snapshot promotion in the bundled Python helpers. The agent owns target-list editing, materiality judgment, and report composition.
+Use `targets.csv` as the user-facing source of truth. Use `workspace.py` as the single workspace interface; it delegates document fetch/normalize/diff work to `monitor.py` and owns local candidate, pending, snapshot, and report state. The agent owns target-list editing, materiality judgment, and report composition.
 
 Never ask the user to provide target IDs, hashes, JSON payloads, runtime paths, or shell commands.
 
