@@ -8,13 +8,7 @@ The canonical skill lives in `skills/web-update-monitor/`. Its bundled Python he
 
 The repository's canonical distribution is the `skills/web-update-monitor/` directory, with its standard `SKILL.md` manifest and bundled scripts, requirements, and example CSV.
 
-To install it in an Agent Skills-compatible runtime, download `web-update-monitor.zip` from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain), extract it, and place the `web-update-monitor/` directory in the runtime's skill discovery directory. Developers can build an equivalent archive from a checkout:
-
-```bash
-python scripts/package_skill.py
-```
-
-This creates `dist/web-update-monitor.zip`. The archive contains the complete skill directory, and its `SKILL.md` is byte-identical to the canonical manifest in this repository.
+To install it in an Agent Skills-compatible runtime, download `web-update-monitor.zip` from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain), extract it, and place the `web-update-monitor/` directory in the runtime's skill discovery directory.
 
 ## Workspace
 
@@ -81,11 +75,10 @@ Set up the repository with:
 uv sync
 ```
 
-Then run tests, build the skill archive, and validate the canonical skill with the [Agent Skills reference validator](https://github.com/agentskills/agentskills/tree/main/skills-ref):
+Then run tests and validate the canonical skill with the [Agent Skills reference validator](https://github.com/agentskills/agentskills/tree/main/skills-ref):
 
 ```bash
 uv run pytest
-python scripts/package_skill.py
 skills-ref validate skills/web-update-monitor
 ```
 
