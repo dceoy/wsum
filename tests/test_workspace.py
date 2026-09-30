@@ -41,6 +41,7 @@ def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) ->
 
     assert [target["action"] for target in targets] == ["monitor", "skip_disabled"]
     assert targets[0]["watch_focus"] == "pricing"
+    assert "fetch_mode" not in targets[0]
     assert str(targets[0]["target_id"]).startswith("example-com-")
     first_id = targets[0]["target_id"]
 
@@ -78,7 +79,7 @@ def test_load_targets_rejects_duplicate_urls(tmp_path: Path) -> None:
         "One,https://example.com/,,true\nTwo,https://example.com/,,true\n",
     )
 
-    with pytest.raises(workspace.workflow.WorkflowError, match="duplicate_target_id"):
+    with pytest.raises(WorkspaceError, match="duplicate_target_id"):
         load_targets(tmp_path)
 
 
