@@ -8,7 +8,7 @@ The canonical skill lives in `skills/web-update-monitor/`. Its bundled Python he
 
 The repository's canonical distribution is the `skills/web-update-monitor/` directory, with its standard `SKILL.md` manifest and bundled scripts, requirements, and example CSV.
 
-To install it in an Agent Skills-compatible runtime, download the latest successful `web-update-monitor.zip` artifact from the [main-branch CI workflow runs](https://github.com/dceoy/wsum/actions/workflows/ci.yml?query=branch%3Amain), extract it, and place the `web-update-monitor/` directory in the runtime's skill discovery directory. Developers can build the same archive from a checkout:
+To install it in an Agent Skills-compatible runtime, download `web-update-monitor.zip` from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain), extract it, and place the `web-update-monitor/` directory in the runtime's skill discovery directory. Developers can build an equivalent archive from a checkout:
 
 ```bash
 python scripts/package_skill.py
