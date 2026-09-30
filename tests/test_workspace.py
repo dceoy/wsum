@@ -73,6 +73,29 @@ def test_load_targets_rejects_invalid_csv(
         load_targets(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///tmp/a",
+        "https://user:pass@example.com/",
+        "https://example.com/?token=secret",
+        "https://example.com/#fragment",
+    ],
+)
+def test_load_targets_rejects_unsafe_urls(tmp_path: Path, url: str) -> None:
+    _write_targets(tmp_path / "targets.csv", f"Example,{url},,true\n")
+
+    with pytest.raises(WorkspaceError):
+        load_targets(tmp_path)
+
+
+def test_load_targets_rejects_empty_name(tmp_path: Path) -> None:
+    _write_targets(tmp_path / "targets.csv", ",https://example.com/,,true\n")
+
+    with pytest.raises(WorkspaceError, match="name must be non-empty"):
+        load_targets(tmp_path)
+
+
 def test_load_targets_rejects_duplicate_urls(tmp_path: Path) -> None:
     _write_targets(
         tmp_path / "targets.csv",
