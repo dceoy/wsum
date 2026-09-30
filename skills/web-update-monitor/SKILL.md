@@ -22,9 +22,11 @@ Use one user-selected workspace folder with this layout:
 ├── targets.csv
 ├── reports/
 └── .wsum/
-    ├── candidates/
-    ├── pending/
-    └── snapshots/
+    ├── snapshots/
+    └── pending/
+        └── <target-id>/
+            ├── state.json
+            └── candidate.txt
 ```
 
 `reports/` and `.wsum/` are created as needed. Users may edit `targets.csv`; `.wsum/` is internal state and should not be edited manually.
@@ -34,10 +36,10 @@ Generated files have these roles:
 - `targets.csv`: user-facing monitoring configuration and the source of truth for targets.
 - `reports/<run-id>.md`: user-facing run report. Create it only when at least one material change from that `check` run is finalized. All material targets from the run share this file.
 - `.wsum/snapshots/<target-id>.txt`: accepted normalized baseline for the target.
-- `.wsum/candidates/<target-id>.txt`: normalized changed candidate awaiting semantic review.
-- `.wsum/pending/<target-id>.json`: internal review transaction containing the run ID, revision, baseline/candidate hashes, and diff-truncation state.
+- `.wsum/pending/<target-id>/candidate.txt`: normalized changed candidate awaiting semantic review.
+- `.wsum/pending/<target-id>/state.json`: internal review transaction metadata containing the run ID, revision, baseline/candidate hashes, and diff-truncation state.
 
-Candidates and pending records are temporary across the check/finalize boundary; snapshots persist across runs. Hidden temporary files used for atomic replacement are internal and should not be surfaced to the user.
+Treat each `.wsum/pending/<target-id>/` directory as one uncommitted review transaction. It must survive across the check/finalize boundary and is removed as a directory after successful finalization. Snapshots persist across completed runs. Hidden temporary files used for atomic replacement stay next to their destination file rather than under a shared temp directory.
 
 The CSV schema is:
 
