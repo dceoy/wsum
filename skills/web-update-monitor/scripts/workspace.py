@@ -20,11 +20,11 @@ from typing import cast
 from urllib.parse import urlsplit
 
 import monitor
-import workflow
 
 _TARGETS_FILE = "targets.csv"
 _STATE_DIR = ".wsum"
 _MAX_CSV_BYTES = 1024 * 1024
+_MAX_SNAPSHOT_BYTES = 40 * 1024 * 1024
 _REQUIRED_FIELDS = {"name", "url"}
 _ALLOWED_FIELDS = _REQUIRED_FIELDS | {"enabled", "watch_focus"}
 _PENDING_FIELDS = {
@@ -37,10 +37,11 @@ _PENDING_FIELDS = {
 _TARGET_ID_PART_RE = re.compile(r"[^a-z0-9]+")
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{32}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class WorkspaceError(RuntimeError):
-    """Expected workspace or decision error."""
+    """Expected workspace, target, state, or decision error."""
 
 
 def _workspace(value: str | Path) -> Path:
@@ -54,12 +55,37 @@ def _workspace(value: str | Path) -> Path:
     return path.resolve()
 
 
-def _ensure_directory(path: Path, description: str) -> Path:
+def _fsync_directory(path: Path) -> None:
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    directory_fd = os.open(path, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _ensure_directory(
+    path: Path, description: str, *, sync_parent: bool = False
+) -> Path:
+    created = False
     try:
         info = path.lstat()
     except FileNotFoundError:
         try:
             path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise WorkspaceError(f"{description} is unavailable") from exc
+        else:
+            created = True
+        try:
             info = path.lstat()
         except OSError as exc:
             raise WorkspaceError(f"{description} is unavailable") from exc
@@ -67,6 +93,13 @@ def _ensure_directory(path: Path, description: str) -> Path:
         raise WorkspaceError(f"{description} is unavailable") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         raise WorkspaceError(f"{description} must be a non-symlink directory")
+    if created and sync_parent:
+        try:
+            _fsync_directory(path.parent)
+        except OSError as exc:
+            raise WorkspaceError(
+                f"cannot fsync parent directory for {description}"
+            ) from exc
     return path
 
 
@@ -108,6 +141,37 @@ def _target_id(url: str) -> str:
     return f"{prefix[:48]}-{digest}"
 
 
+def _validate_target_id(value: object) -> str:
+    if not isinstance(value, str) or not _TARGET_ID_RE.fullmatch(value):
+        raise WorkspaceError("invalid_target_id")
+    return value
+
+
+def _validate_sha256(
+    value: object, field: str, *, allow_none: bool = False
+) -> str | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+        raise WorkspaceError(f"{field} must be a lowercase hexadecimal SHA-256")
+    return value
+
+
+def _validate_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname
+    except ValueError as exc:
+        raise WorkspaceError("url is invalid") from exc
+    if parsed.scheme.lower() not in {"http", "https"} or not host:
+        raise WorkspaceError("url must be an absolute HTTP(S) URL")
+    if parsed.fragment:
+        raise WorkspaceError("url must not contain a fragment")
+    if monitor.url_has_credentials(value):
+        raise WorkspaceError("url must not contain credentials")
+    return value
+
+
 def load_targets(workspace: str | Path) -> list[dict[str, object]]:
     """Load, validate, and normalize all targets from ``targets.csv``."""
     root = _workspace(workspace)
@@ -121,7 +185,8 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
     if fields - _ALLOWED_FIELDS:
         raise WorkspaceError(f"{_TARGETS_FILE} contains unsupported columns")
 
-    raw_targets: list[dict[str, object]] = []
+    targets: list[dict[str, object]] = []
+    target_ids: set[str] = set()
     for row_number, row in enumerate(reader, start=2):
         if None in row:
             raise WorkspaceError(f"row {row_number}: too many columns")
@@ -133,20 +198,224 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
             values[key] = (value or "").strip()
         if not any(values.values()):
             continue
-        url = values.get("url", "")
-        raw_targets.append({
-            "target_id": _target_id(url),
-            "name": values.get("name", ""),
-            "url": url,
-            "enabled": _parse_enabled(values.get("enabled", ""), row_number),
-            "watch_focus": values.get("watch_focus", ""),
-            "fetch_mode": "static",
-        })
-    if not raw_targets:
-        raise WorkspaceError(f"{_TARGETS_FILE} contains no targets")
 
-    normalized = workflow.validate_targets({"targets": raw_targets})["targets"]
-    return cast("list[dict[str, object]]", normalized)
+        name = values.get("name", "")
+        if not name:
+            raise WorkspaceError(f"row {row_number}: name must be non-empty")
+        url = _validate_url(values.get("url", ""))
+        target_id = _target_id(url)
+        if target_id in target_ids:
+            raise WorkspaceError("duplicate_target_id")
+        target_ids.add(target_id)
+        enabled = _parse_enabled(values.get("enabled", ""), row_number)
+        targets.append({
+            "target_id": target_id,
+            "name": name,
+            "url": url,
+            "enabled": enabled,
+            "action": "monitor" if enabled else "skip_disabled",
+            "watch_focus": values.get("watch_focus", ""),
+        })
+
+    if not targets:
+        raise WorkspaceError(f"{_TARGETS_FILE} contains no targets")
+    return targets
+
+
+def _candidate_path(state: Path, value: str | Path) -> Path:
+    candidates_dir = _ensure_directory(
+        state / "candidates", "workspace state/candidates"
+    )
+    candidate = Path(value)
+    original = Path.cwd() / candidate if not candidate.is_absolute() else candidate
+    try:
+        info = original.lstat()
+    except OSError as exc:
+        raise WorkspaceError("cannot stat candidate") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise WorkspaceError("candidate must be a regular non-symlink file")
+    candidate = original.resolve()
+    try:
+        candidate.relative_to(candidates_dir.resolve())
+    except ValueError as exc:
+        raise WorkspaceError(
+            "candidate must be under workspace state/candidates"
+        ) from exc
+    return candidate
+
+
+def _report_path(reports_dir: Path, target_id: str) -> Path:
+    destination = reports_dir / f"{target_id}.md"
+    try:
+        info = destination.lstat()
+    except FileNotFoundError:
+        return destination
+    except OSError as exc:
+        raise WorkspaceError("cannot stat report") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise WorkspaceError("report must be a regular non-symlink file")
+    return destination
+
+
+def _read_text_bytes(path: Path, description: str) -> bytes:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise WorkspaceError(f"cannot stat {description}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise WorkspaceError(f"{description} must be a regular non-symlink file")
+    if info.st_size <= 0 or info.st_size > _MAX_SNAPSHOT_BYTES:
+        raise WorkspaceError(f"{description} size is invalid")
+    try:
+        data = path.read_bytes()
+        data.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise WorkspaceError(f"cannot read {description} as UTF-8") from exc
+    return data
+
+
+def _read_snapshot(path: Path) -> bytes | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise WorkspaceError("cannot stat snapshot") from exc
+    return _read_text_bytes(path, "snapshot")
+
+
+def _write_file_data(descriptor: int, data: bytes) -> None:
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "wb", closefd=False) as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _write_temporary_file(destination: Path, data: bytes, description: str) -> Path:
+    try:
+        descriptor, name = tempfile.mkstemp(
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+        )
+    except OSError as exc:
+        raise WorkspaceError(f"cannot create temporary {description}") from exc
+    path = Path(name)
+    completed = False
+    try:
+        _write_file_data(descriptor, data)
+        completed = True
+    except OSError as exc:
+        raise WorkspaceError(f"cannot write temporary {description}") from exc
+    finally:
+        os.close(descriptor)
+        if not completed:
+            with suppress(OSError):
+                path.unlink(missing_ok=True)
+    return path
+
+
+def _fsync_snapshot_directory(path: Path) -> None:
+    try:
+        _fsync_directory(path)
+    except OSError as exc:
+        raise WorkspaceError("cannot fsync snapshot directory") from exc
+
+
+def _promote_snapshot(
+    state: Path,
+    candidate_path: str | Path,
+    *,
+    target_id: str,
+    expected_sha256: object,
+    candidate_sha256: object,
+) -> dict[str, object]:
+    """Atomically promote a candidate when its expected baseline matches."""
+    target_id = _validate_target_id(target_id)
+    expected = _validate_sha256(
+        expected_sha256, "expected_sha256", allow_none=True
+    )
+    candidate_digest = _validate_sha256(candidate_sha256, "candidate_sha256")
+    candidate = _candidate_path(state, candidate_path)
+    candidate_data = _read_text_bytes(candidate, "candidate")
+    if hashlib.sha256(candidate_data).hexdigest() != candidate_digest:
+        raise WorkspaceError("candidate_sha256 does not match candidate")
+
+    snapshots_dir = _ensure_directory(
+        state / "snapshots",
+        "workspace state/snapshots",
+        sync_parent=True,
+    )
+    destination = snapshots_dir / f"{target_id}.txt"
+    current = _read_snapshot(destination)
+    current_sha256 = None if current is None else hashlib.sha256(current).hexdigest()
+    if current_sha256 == candidate_digest:
+        _fsync_snapshot_directory(snapshots_dir)
+        return {
+            "action": "snapshot_promoted",
+            "applied": True,
+            "already": True,
+            "path": str(destination),
+            "sha256": candidate_digest,
+        }
+    if current_sha256 != expected:
+        return {
+            "action": "snapshot_conflict",
+            "applied": False,
+            "current_sha256": current_sha256,
+        }
+
+    temporary = _write_temporary_file(destination, candidate_data, "snapshot")
+    try:
+        temporary.replace(destination)
+    except OSError as exc:
+        raise WorkspaceError("cannot promote snapshot") from exc
+    finally:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+
+    _fsync_snapshot_directory(snapshots_dir)
+    durable = _read_snapshot(destination)
+    durable_sha256 = None if durable is None else hashlib.sha256(durable).hexdigest()
+    if durable_sha256 != candidate_digest:
+        raise WorkspaceError("snapshot read-back mismatch")
+    return {
+        "action": "snapshot_promoted",
+        "applied": True,
+        "path": str(destination),
+        "sha256": candidate_digest,
+    }
+
+
+def _write_report(workspace: Path, target_id: str, report: str) -> Path:
+    """Atomically write one Markdown report under the workspace."""
+    target_id = _validate_target_id(target_id)
+    report_data = report.encode("utf-8")
+    if not report_data or len(report_data) > _MAX_SNAPSHOT_BYTES:
+        raise WorkspaceError("report size is invalid")
+
+    reports_dir = _ensure_directory(
+        workspace / "reports", "workspace reports directory", sync_parent=True
+    )
+    destination = _report_path(reports_dir, target_id)
+    temporary = _write_temporary_file(destination, report_data, "report")
+    try:
+        temporary.replace(destination)
+    except OSError as exc:
+        raise WorkspaceError("cannot write report") from exc
+    finally:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+
+    try:
+        _fsync_directory(reports_dir)
+    except OSError as exc:
+        raise WorkspaceError("cannot fsync report directory") from exc
+    durable = _read_text_bytes(destination, "report")
+    if durable != report_data:
+        raise WorkspaceError("report read-back mismatch")
+    return destination
 
 
 def _monitor_target(state: Path, target: Mapping[str, object]) -> dict[str, object]:
@@ -158,7 +427,9 @@ def _monitor_target(state: Path, target: Mapping[str, object]) -> dict[str, obje
     arguments = ["--url", str(target["url"]), "--output", str(candidate)]
     if previous.exists():
         arguments.extend(["--previous", str(previous)])
-    namespace = monitor._parser().parse_args(arguments)  # pyright: ignore[reportPrivateUsage]
+    namespace = monitor._parser().parse_args(  # pyright: ignore[reportPrivateUsage]
+        arguments
+    )
     result = monitor.run(namespace)
     return _handle_monitor_result(state, target, candidate, result)
 
@@ -214,14 +485,12 @@ def _handle_monitor_result(
         _remove_pending(state, target_id)
         return {"action": "unchanged", "target_id": target_id, "name": target["name"]}
     if status == "baseline":
-        promoted = workflow.promote_snapshot(
+        promoted = _promote_snapshot(
             state,
             candidate,
-            {
-                "target_id": target_id,
-                "expected_sha256": None,
-                "candidate_sha256": result.get("sha256"),
-            },
+            target_id=target_id,
+            expected_sha256=None,
+            candidate_sha256=result.get("sha256"),
         )
         if promoted.get("action") != "snapshot_promoted":
             return {"action": "snapshot_conflict", "target_id": target_id}
@@ -271,12 +540,7 @@ def check(workspace: str | Path) -> dict[str, object]:
             continue
         try:
             outcomes.append(_monitor_target(state, target))
-        except (
-            monitor.MonitorError,
-            OSError,
-            WorkspaceError,
-            workflow.WorkflowError,
-        ) as exc:
+        except (monitor.MonitorError, OSError, WorkspaceError) as exc:
             outcomes.append({
                 "action": "error",
                 "target_id": target["target_id"],
@@ -348,23 +612,19 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
         return {"action": "manual_review_required", "target_id": target_id}
 
     candidate = state / "candidates" / f"{target_id}.txt"
-    promoted = workflow.promote_snapshot(
+    promoted = _promote_snapshot(
         state,
         candidate,
-        {
-            "target_id": target_id,
-            "expected_sha256": pending["expected_sha256"],
-            "candidate_sha256": pending["candidate_sha256"],
-        },
+        target_id=target_id,
+        expected_sha256=pending["expected_sha256"],
+        candidate_sha256=pending["candidate_sha256"],
     )
     if promoted.get("action") == "snapshot_conflict":
         return {"action": "snapshot_conflict", "target_id": target_id}
+
     report_path: str | None = None
     if report is not None:
-        report_result = workflow.write_report(
-            root, {"target_id": target_id, "report": report}
-        )
-        report_path = str(report_result["path"])
+        report_path = str(_write_report(root, target_id, report))
     _cleanup_candidate(candidate)
     _remove_pending(state, target_id)
     result: dict[str, object] = {
@@ -397,7 +657,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the Workspace-facing checker or finalizer."""
+    """Run the workspace-facing checker or finalizer."""
     args = _parser().parse_args(argv)
     try:
         result = (
@@ -405,7 +665,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command == "check"
             else finalize(args.workspace, _read_decision())
         )
-    except (WorkspaceError, workflow.WorkflowError) as exc:
+    except WorkspaceError as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
