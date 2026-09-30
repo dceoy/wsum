@@ -36,9 +36,11 @@ workspace/
 ├── targets.csv
 ├── reports/
 └── .wsum/
-    ├── candidates/
-    ├── pending/
-    └── snapshots/
+    ├── snapshots/
+    └── pending/
+        └── <target-id>/
+            ├── state.json
+            └── candidate.txt
 ```
 
 Users may edit `targets.csv`. `.wsum/` is internal state and should not be edited manually.
@@ -50,10 +52,12 @@ The workspace contains one user-facing input, user-facing reports, and internal 
 - `targets.csv`: the user-facing source of truth for monitored targets. The agent may create or edit it when the user changes monitoring configuration.
 - `reports/<run-id>.md`: the user-facing output. One report is created per `check` run only when at least one material change is finalized. The run ID has the form `YYYYMMDDTHHMMSSZ-xxxxxxxx`. Material targets from the same run are merged into this file.
 - `.wsum/snapshots/<target-id>.txt`: the accepted normalized baseline for each target. A first observation creates it; later finalized observations replace it atomically, including non-material changes.
-- `.wsum/candidates/<target-id>.txt`: the normalized candidate produced by the latest changed observation. It is retained while the agent reviews the diff and removed after successful finalization.
-- `.wsum/pending/<target-id>.json`: internal review state linking a candidate to its run, revision, expected baseline hash, candidate hash, and diff-truncation status. It prevents stale decisions from being applied and is removed after successful finalization.
+- `.wsum/pending/<target-id>/candidate.txt`: the normalized changed candidate awaiting semantic review.
+- `.wsum/pending/<target-id>/state.json`: review transaction state linking the candidate to its run, revision, expected baseline hash, candidate hash, and diff-truncation status.
 
-The helper may briefly create hidden `*.tmp` files while atomically replacing reports, snapshots, or pending state. These are implementation details and are cleaned up during normal operation.
+Each `.wsum/pending/<target-id>/` directory is one uncommitted review transaction. It survives the `check` → review → `finalize` boundary and is removed as a directory after successful finalization. `.wsum/snapshots/` is the only internal state that persists across completed transactions.
+
+The helper may briefly create hidden `*.tmp` files next to the report, snapshot, or pending-state file being replaced. Keeping these temporary files in the destination directory preserves same-filesystem atomic replacement; they are not collected under a shared `.wsum/tmp/`.
 
 ## Agent workflow
 
@@ -94,7 +98,7 @@ uv run pytest
 skills-ref validate skills/web-update-monitor
 ```
 
-`monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workspace.py` validates targets and owns candidate/pending state, safe report writing, and atomic snapshot promotion.
+`monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workspace.py` validates targets and owns pending review transactions, safe report writing, and atomic snapshot promotion.
 
 Browser-rendered targets are outside the CSV workspace workflow. Do not auto-escalate a static failure to browser rendering. Use browser input only when the browser tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Never provide cookies or credentials.
 
