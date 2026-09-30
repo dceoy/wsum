@@ -332,10 +332,9 @@ def _promote_snapshot(
     candidate_sha256: object,
 ) -> dict[str, object]:
     """Atomically promote a candidate when its expected baseline matches."""
+    state = _workspace(state)
     target_id = _validate_target_id(target_id)
-    expected = _validate_sha256(
-        expected_sha256, "expected_sha256", allow_none=True
-    )
+    expected = _validate_sha256(expected_sha256, "expected_sha256", allow_none=True)
     candidate_digest = _validate_sha256(candidate_sha256, "candidate_sha256")
     candidate = _candidate_path(state, candidate_path)
     candidate_data = _read_text_bytes(candidate, "candidate")
@@ -390,6 +389,7 @@ def _promote_snapshot(
 
 def _write_report(workspace: Path, target_id: str, report: str) -> Path:
     """Atomically write one Markdown report under the workspace."""
+    workspace = _workspace(workspace)
     target_id = _validate_target_id(target_id)
     report_data = report.encode("utf-8")
     if not report_data or len(report_data) > _MAX_SNAPSHOT_BYTES:
