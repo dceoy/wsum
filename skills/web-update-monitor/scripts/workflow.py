@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 import monitor
 
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _FETCH_MODES = {"static", "browser"}
 _TARGET_FIELDS = {
@@ -29,7 +30,7 @@ _TARGET_FIELDS = {
     "url",
     "watch_focus",
 }
-_REPORT_FIELDS = {"report", "target_id"}
+_REPORT_FIELDS = {"report", "run_id", "target_id"}
 _MAX_SNAPSHOT_BYTES = 40 * 1024 * 1024
 
 
@@ -134,21 +135,30 @@ def write_report(
     runtime_dir: str | Path,
     payload: Mapping[str, object],
 ) -> dict[str, object]:
-    """Atomically write one local Markdown report under the runtime directory."""
+    """Atomically merge one target section into a run-level Markdown report."""
     runtime = _runtime_dir(runtime_dir)
     unsupported_fields = set(payload) - _REPORT_FIELDS
     if unsupported_fields:
         raise WorkflowError("write-report contains unsupported fields")
+    run_id = _require_string(payload.get("run_id"), "run_id")
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise WorkflowError("invalid_run_id")
     target_id = _validate_target_id(payload.get("target_id"))
     report = _require_string(payload.get("report"), "report")
-    report_data = report.encode("utf-8")
-    if len(report_data) > _MAX_SNAPSHOT_BYTES:
+    if len(report.encode("utf-8")) > _MAX_SNAPSHOT_BYTES:
         raise WorkflowError("report size is invalid")
 
     reports_dir = _ensure_directory(
         runtime / "reports", "runtime_dir/reports", sync_parent=True
     )
-    destination = _report_path(reports_dir, target_id)
+    destination = _report_path(reports_dir, run_id)
+    existing = _read_optional_report(destination)
+    report_data = _render_run_report(run_id, target_id, report, existing).encode(
+        "utf-8"
+    )
+    if len(report_data) > _MAX_SNAPSHOT_BYTES:
+        raise WorkflowError("report size is invalid")
+
     temporary = _write_temporary_report(destination, report_data)
     try:
         temporary.replace(destination)
@@ -295,8 +305,8 @@ def _candidate_path(runtime_dir: Path, value: str | Path) -> Path:
     return candidate
 
 
-def _report_path(reports_dir: Path, target_id: str) -> Path:
-    destination = reports_dir / f"{target_id}.md"
+def _report_path(reports_dir: Path, run_id: str) -> Path:
+    destination = reports_dir / f"{run_id}.md"
     try:
         info = destination.lstat()
     except FileNotFoundError:
@@ -306,6 +316,48 @@ def _report_path(reports_dir: Path, target_id: str) -> Path:
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise WorkflowError("report must be a regular non-symlink file")
     return destination
+
+
+def _read_optional_report(path: Path) -> bytes | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise WorkflowError("cannot stat report") from exc
+    return _read_text_bytes(path, "report")
+
+
+def _render_run_report(
+    run_id: str,
+    target_id: str,
+    report: str,
+    existing: bytes | None,
+) -> str:
+    marker_prefix = "<!-- wsum:target "
+    if marker_prefix in report:
+        raise WorkflowError("report contains reserved marker")
+    start_marker = f"{marker_prefix}{target_id}:start -->"
+    end_marker = f"{marker_prefix}{target_id}:end -->"
+    block = f"{start_marker}\n{report.strip()}\n{end_marker}"
+
+    if existing is None:
+        return f"# Web Update Monitor Report\n\nRun: `{run_id}`\n\n{block}\n"
+
+    current = existing.decode("utf-8")
+    start = current.find(start_marker)
+    end = current.find(end_marker)
+    if (start < 0) != (end < 0) or (start >= 0 and end < start):
+        raise WorkflowError("report contains invalid managed section")
+    if start >= 0:
+        if current.find(start_marker, start + len(start_marker)) >= 0:
+            raise WorkflowError("report contains duplicate managed section")
+        if current.find(end_marker, end + len(end_marker)) >= 0:
+            raise WorkflowError("report contains duplicate managed section")
+        end += len(end_marker)
+        return current[:start] + block + current[end:]
+
+    return current.rstrip() + f"\n\n{block}\n"
 
 
 def _fsync_directory(path: Path) -> None:

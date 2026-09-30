@@ -16,6 +16,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+_RUN_ID = "20261001T000000Z-deadbeef"
+
+
 def _target(**overrides: object) -> dict[str, object]:
     target: dict[str, object] = {
         "target_id": "example",
@@ -32,6 +35,10 @@ def _candidate(runtime_dir: Path, content: str = "next\n") -> tuple[Path, str]:
     path = directory / "example.txt"
     path.write_text(content)
     return path, hashlib.sha256(content.encode()).hexdigest()
+
+
+def _report_request(report: str, target_id: str = "example") -> dict[str, object]:
+    return {"run_id": _RUN_ID, "target_id": target_id, "report": report}
 
 
 def test_validate_targets_defaults_local_target_fields() -> None:
@@ -101,38 +108,51 @@ def test_validate_targets_rejects_duplicate_ids() -> None:
         validate_targets({"targets": [_target(), _target(name="Second")]})
 
 
-def test_write_report_creates_private_report(tmp_path: Path) -> None:
-    report = "# Example\n\nA material update.\n"
+def test_write_report_creates_private_run_report(tmp_path: Path) -> None:
+    report = "## Example\n\nA material update.\n"
 
-    result = write_report(
-        tmp_path,
-        {"target_id": "example", "report": report},
-    )
+    result = write_report(tmp_path, _report_request(report))
 
     reports = tmp_path / "reports"
-    destination = reports / "example.md"
+    destination = reports / f"{_RUN_ID}.md"
+    content = destination.read_text()
     assert result == {"action": "report_written", "path": str(destination)}
-    assert destination.read_text() == report
+    assert "# Web Update Monitor Report" in content
+    assert f"Run: `{_RUN_ID}`" in content
+    assert report.strip() in content
     assert stat.S_IMODE(reports.stat().st_mode) == 0o700
     assert stat.S_IMODE(destination.stat().st_mode) == 0o600
 
 
-def test_write_report_replaces_existing_regular_report(tmp_path: Path) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    destination = reports / "example.md"
-    destination.write_text("old report\n")
+def test_write_report_aggregates_targets_into_single_file(tmp_path: Path) -> None:
+    write_report(tmp_path, _report_request("## One\n\nFirst.\n", "one"))
+    write_report(tmp_path, _report_request("## Two\n\nSecond.\n", "two"))
 
-    write_report(tmp_path, {"target_id": "example", "report": "new report\n"})
+    reports = list((tmp_path / "reports").glob("*.md"))
+    assert reports == [tmp_path / "reports" / f"{_RUN_ID}.md"]
+    content = reports[0].read_text()
+    assert "## One" in content
+    assert "## Two" in content
 
-    assert destination.read_text() == "new report\n"
+
+def test_write_report_replaces_existing_target_section(tmp_path: Path) -> None:
+    destination = tmp_path / "reports" / f"{_RUN_ID}.md"
+    write_report(tmp_path, _report_request("## Example\n\nOld report.\n"))
+    write_report(tmp_path, _report_request("## Example\n\nNew report.\n"))
+
+    content = destination.read_text()
+    assert "Old report." not in content
+    assert content.count("New report.") == 1
+    assert content.count("<!-- wsum:target example:start -->") == 1
 
 
-def test_main_writes_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_writes_run_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(
         workflow.sys,
         "stdin",
-        io.StringIO(json.dumps({"target_id": "example", "report": "update\n"})),
+        io.StringIO(json.dumps(_report_request("## Example\n\nUpdate.\n"))),
     )
     monkeypatch.setattr(
         workflow.sys,
@@ -141,15 +161,14 @@ def test_main_writes_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     assert workflow.main() == 0
-    assert (tmp_path / "reports" / "example.md").read_text() == "update\n"
+    assert (tmp_path / "reports" / f"{_RUN_ID}.md").exists()
 
 
 def test_write_report_rejects_unsupported_fields(tmp_path: Path) -> None:
+    request = _report_request("update\n")
+    request["unexpected"] = True
     with pytest.raises(WorkflowError, match="write-report contains unsupported"):
-        write_report(
-            tmp_path,
-            {"target_id": "example", "report": "update\n", "unexpected": True},
-        )
+        write_report(tmp_path, request)
 
 
 @pytest.mark.parametrize(
@@ -159,7 +178,14 @@ def test_write_report_rejects_unsupported_fields(tmp_path: Path) -> None:
 )
 def test_write_report_rejects_invalid_target_id(tmp_path: Path, target_id: str) -> None:
     with pytest.raises(WorkflowError, match="invalid_target_id"):
-        write_report(tmp_path, {"target_id": target_id, "report": "update\n"})
+        write_report(tmp_path, _report_request("update\n", target_id))
+
+
+def test_write_report_rejects_invalid_run_id(tmp_path: Path) -> None:
+    request = _report_request("update\n")
+    request["run_id"] = "../escape"
+    with pytest.raises(WorkflowError, match="invalid_run_id"):
+        write_report(tmp_path, request)
 
 
 def test_write_report_rejects_symlinked_reports_directory(tmp_path: Path) -> None:
@@ -168,9 +194,9 @@ def test_write_report_rejects_symlinked_reports_directory(tmp_path: Path) -> Non
     (tmp_path / "reports").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(WorkflowError, match="runtime_dir/reports"):
-        write_report(tmp_path, {"target_id": "example", "report": "update\n"})
+        write_report(tmp_path, _report_request("update\n"))
 
-    assert not (outside / "example.md").exists()
+    assert not (outside / f"{_RUN_ID}.md").exists()
 
 
 def test_write_report_rejects_symlinked_destination(tmp_path: Path) -> None:
@@ -178,11 +204,11 @@ def test_write_report_rejects_symlinked_destination(tmp_path: Path) -> None:
     reports.mkdir()
     outside = tmp_path / "outside.md"
     outside.write_text("original\n")
-    destination = reports / "example.md"
+    destination = reports / f"{_RUN_ID}.md"
     destination.symlink_to(outside)
 
     with pytest.raises(WorkflowError, match="regular non-symlink"):
-        write_report(tmp_path, {"target_id": "example", "report": "update\n"})
+        write_report(tmp_path, _report_request("update\n"))
 
     assert destination.is_symlink()
     assert outside.read_text() == "original\n"
@@ -191,20 +217,19 @@ def test_write_report_rejects_symlinked_destination(tmp_path: Path) -> None:
 def test_write_report_preserves_destination_when_replace_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    destination = reports / "example.md"
-    destination.write_text("old report\n")
+    destination = tmp_path / "reports" / f"{_RUN_ID}.md"
+    write_report(tmp_path, _report_request("## Example\n\nOld report.\n"))
+    original = destination.read_text()
 
     def fail_replace(_: Path, __: Path) -> Path:
         raise OSError
 
     monkeypatch.setattr(workflow.Path, "replace", fail_replace)
     with pytest.raises(WorkflowError, match="cannot write report"):
-        write_report(tmp_path, {"target_id": "example", "report": "new report\n"})
+        write_report(tmp_path, _report_request("## Example\n\nNew report.\n"))
 
-    assert destination.read_text() == "old report\n"
-    assert not list(reports.glob(".example.md.*.tmp"))
+    assert destination.read_text() == original
+    assert not list(destination.parent.glob(f".{_RUN_ID}.md.*.tmp"))
 
 
 def test_write_report_fsyncs_directories(
@@ -213,7 +238,7 @@ def test_write_report_fsyncs_directories(
     fsynced: list[Path] = []
     monkeypatch.setattr(workflow, "_fsync_directory", fsynced.append)
 
-    write_report(tmp_path, {"target_id": "example", "report": "update\n"})
+    write_report(tmp_path, _report_request("update\n"))
 
     assert fsynced == [tmp_path, tmp_path / "reports"]
 
@@ -230,10 +255,10 @@ def test_write_report_reports_fsync_failure_after_replacement(
 
     monkeypatch.setattr(workflow, "_fsync_directory", fail)
     with pytest.raises(WorkflowError, match="cannot fsync report directory"):
-        write_report(tmp_path, {"target_id": "example", "report": "update\n"})
+        write_report(tmp_path, _report_request("update\n"))
 
-    assert (reports / "example.md").read_text() == "update\n"
-    assert not list(reports.glob(".example.md.*.tmp"))
+    assert (reports / f"{_RUN_ID}.md").exists()
+    assert not list(reports.glob(f".{_RUN_ID}.md.*.tmp"))
 
 
 def test_promote_snapshot_creates_baseline(tmp_path: Path) -> None:

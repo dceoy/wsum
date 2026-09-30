@@ -15,6 +15,7 @@ import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -32,10 +33,12 @@ _PENDING_FIELDS = {
     "diff_truncated",
     "expected_sha256",
     "revision",
+    "run_id",
     "target_id",
 }
 _TARGET_ID_PART_RE = re.compile(r"[^a-z0-9]+")
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -108,6 +111,11 @@ def _target_id(url: str) -> str:
     return f"{prefix[:48]}-{digest}"
 
 
+def _new_run_id() -> str:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"{timestamp}-{secrets.token_hex(4)}"
+
+
 def load_targets(workspace: str | Path) -> list[dict[str, object]]:
     """Load, validate, and normalize all targets from ``targets.csv``."""
     root = _workspace(workspace)
@@ -149,7 +157,9 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
     return cast("list[dict[str, object]]", normalized)
 
 
-def _monitor_target(state: Path, target: Mapping[str, object]) -> dict[str, object]:
+def _monitor_target(
+    state: Path, target: Mapping[str, object], run_id: str
+) -> dict[str, object]:
     target_id = str(target["target_id"])
     candidates = _ensure_directory(state / "candidates", "candidate directory")
     snapshots = _ensure_directory(state / "snapshots", "snapshot directory")
@@ -160,7 +170,7 @@ def _monitor_target(state: Path, target: Mapping[str, object]) -> dict[str, obje
         arguments.extend(["--previous", str(previous)])
     namespace = monitor._parser().parse_args(arguments)  # pyright: ignore[reportPrivateUsage]
     result = monitor.run(namespace)
-    return _handle_monitor_result(state, target, candidate, result)
+    return _handle_monitor_result(state, target, candidate, result, run_id)
 
 
 def _remove_pending(state: Path, target_id: str) -> None:
@@ -206,6 +216,7 @@ def _handle_monitor_result(
     target: Mapping[str, object],
     candidate: Path,
     result: Mapping[str, object],
+    run_id: str,
 ) -> dict[str, object]:
     target_id = str(target["target_id"])
     status = result.get("status")
@@ -237,6 +248,7 @@ def _handle_monitor_result(
 
     pending = {
         "target_id": target_id,
+        "run_id": run_id,
         "revision": secrets.token_hex(16),
         "expected_sha256": result.get("previous_sha256"),
         "candidate_sha256": result.get("sha256"),
@@ -260,6 +272,7 @@ def check(workspace: str | Path) -> dict[str, object]:
     root = _workspace(workspace)
     targets = load_targets(root)
     state = _state_dir(root)
+    run_id = _new_run_id()
     outcomes: list[dict[str, object]] = []
     for target in targets:
         if target["action"] == "skip_disabled":
@@ -270,7 +283,7 @@ def check(workspace: str | Path) -> dict[str, object]:
             })
             continue
         try:
-            outcomes.append(_monitor_target(state, target))
+            outcomes.append(_monitor_target(state, target, run_id))
         except (
             monitor.MonitorError,
             OSError,
@@ -283,7 +296,7 @@ def check(workspace: str | Path) -> dict[str, object]:
                 "name": target["name"],
                 "error": str(exc),
             })
-    return {"targets": outcomes}
+    return {"run_id": run_id, "targets": outcomes}
 
 
 def _read_pending(state: Path, target_id: str) -> dict[str, object]:
@@ -302,7 +315,13 @@ def _read_pending(state: Path, target_id: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise WorkspaceError("pending decision is invalid")
     pending = cast("dict[str, object]", value)
-    if set(pending) != _PENDING_FIELDS:
+    if set(pending) == _PENDING_FIELDS - {"run_id"}:
+        pending["run_id"] = _new_run_id()
+        _write_pending(state, pending)
+    elif set(pending) != _PENDING_FIELDS:
+        raise WorkspaceError("pending decision is invalid")
+    run_id = pending.get("run_id")
+    if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
         raise WorkspaceError("pending decision is invalid")
     return pending
 
@@ -362,7 +381,12 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
     report_path: str | None = None
     if report is not None:
         report_result = workflow.write_report(
-            root, {"target_id": target_id, "report": report}
+            root,
+            {
+                "run_id": str(pending["run_id"]),
+                "target_id": target_id,
+                "report": report,
+            },
         )
         report_path = str(report_result["path"])
     _cleanup_candidate(candidate)
