@@ -202,20 +202,18 @@ def test_promote_snapshot_rejects_symlinked_state_root(tmp_path: Path) -> None:
     outside.mkdir()
     state = tmp_path / ".wsum"
     state.symlink_to(outside, target_is_directory=True)
-    candidate = tmp_path / "candidate.txt"
-    candidate.write_text("next\n")
     digest = hashlib.sha256(b"next\n").hexdigest()
 
     with pytest.raises(WorkspaceError, match="non-symlink directory"):
         _promote(state, digest)
 
-    assert not (outside / "candidates").exists()
+    assert not (outside / "pending").exists()
     assert not (outside / "snapshots").exists()
 
 
 def test_promote_snapshot_creates_baseline(tmp_path: Path) -> None:
     state = _state(tmp_path)
-    candidate, digest = _candidate(state)
+    _, digest = _candidate(state)
 
     result = _promote(state, digest)
 
@@ -231,11 +229,10 @@ def test_promote_snapshot_replaces_expected_baseline(tmp_path: Path) -> None:
     snapshots.mkdir()
     old = b"old\n"
     (snapshots / "example.txt").write_bytes(old)
-    candidate, digest = _candidate(state)
+    _, digest = _candidate(state)
 
     result = _promote(
         state,
-        candidate,
         digest,
         expected=hashlib.sha256(old).hexdigest(),
     )
@@ -250,7 +247,7 @@ def test_promote_snapshot_reports_stale_baseline(tmp_path: Path) -> None:
     snapshots.mkdir()
     current = b"current\n"
     (snapshots / "example.txt").write_bytes(current)
-    candidate, digest = _candidate(state)
+    _, digest = _candidate(state)
 
     result = _promote(state, digest, expected="0" * 64)
 
@@ -264,31 +261,27 @@ def test_promote_snapshot_reports_stale_baseline(tmp_path: Path) -> None:
 
 def test_promote_snapshot_rejects_candidate_hash_mismatch(tmp_path: Path) -> None:
     state = _state(tmp_path)
-    candidate, _ = _candidate(state)
+    _candidate(state)
 
     with pytest.raises(WorkspaceError, match="does not match"):
         _promote(state, "0" * 64)
 
 
-def test_promote_snapshot_rejects_candidate_outside_state(tmp_path: Path) -> None:
+def test_promote_snapshot_requires_pending_candidate(tmp_path: Path) -> None:
     state = _state(tmp_path)
-    (state / "candidates").mkdir()
-    candidate = tmp_path / "outside.txt"
-    candidate.write_text("next\n")
     digest = hashlib.sha256(b"next\n").hexdigest()
 
-    with pytest.raises(WorkspaceError, match="state/candidates"):
+    with pytest.raises(WorkspaceError, match="pending decision"):
         _promote(state, digest)
 
 
 def test_promote_snapshot_rejects_symlink_candidate(tmp_path: Path) -> None:
     state = _state(tmp_path)
-    candidates = state / "candidates"
-    candidates.mkdir()
-    target = candidates / "target.txt"
+    pending = state / "pending" / "example"
+    pending.mkdir(parents=True)
+    target = tmp_path / "outside-candidate.txt"
     target.write_text("next\n")
-    candidate = candidates / "link.txt"
-    candidate.symlink_to(target)
+    (pending / "candidate.txt").symlink_to(target)
     digest = hashlib.sha256(b"next\n").hexdigest()
 
     with pytest.raises(WorkspaceError, match="regular non-symlink"):
@@ -297,7 +290,7 @@ def test_promote_snapshot_rejects_symlink_candidate(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "directory_name",
-    ["candidates", "snapshots", "reports"],
+    ["pending", "snapshots", "reports"],
 )
 def test_state_directories_reject_symlinks(tmp_path: Path, directory_name: str) -> None:
     state = _state(tmp_path)
@@ -310,25 +303,23 @@ def test_state_directories_reject_symlinks(tmp_path: Path, directory_name: str) 
             workspace._write_report(tmp_path, _RUN_ID, "example", "update\n")
         return
 
-    if directory_name == "candidates":
-        candidate = outside / "example.txt"
-        candidate.write_text("next\n")
-        (state / "candidates").symlink_to(outside, target_is_directory=True)
-        digest = hashlib.sha256(b"next\n").hexdigest()
+    digest = hashlib.sha256(b"next\n").hexdigest()
+    if directory_name == "pending":
+        (state / "pending").symlink_to(outside, target_is_directory=True)
     else:
-        candidate, digest = _candidate(state)
+        _candidate(state)
         (state / "snapshots").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(WorkspaceError, match="non-symlink directory"):
         _promote(state, digest)
-    assert not (outside / "example.txt").exists() or directory_name == "candidates"
+    assert not (outside / "example.txt").exists()
 
 
 def test_promote_snapshot_fsyncs_snapshot_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = _state(tmp_path)
-    candidate, digest = _candidate(state)
+    _, digest = _candidate(state)
     (state / "snapshots").mkdir()
     fsynced: list[Path] = []
     monkeypatch.setattr(workspace, "_fsync_directory", fsynced.append)
@@ -343,7 +334,7 @@ def test_promote_snapshot_fsyncs_state_when_creating_snapshots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = _state(tmp_path)
-    candidate, digest = _candidate(state)
+    _, digest = _candidate(state)
     fsynced: list[Path] = []
     monkeypatch.setattr(workspace, "_fsync_directory", fsynced.append)
 
@@ -357,7 +348,7 @@ def test_promote_snapshot_reports_fsync_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = _state(tmp_path)
-    candidate, digest = _candidate(state)
+    _, digest = _candidate(state)
     (state / "snapshots").mkdir()
 
     def fail(_: Path) -> None:
@@ -371,7 +362,7 @@ def test_promote_snapshot_reports_fsync_failure(
 
 def test_promote_snapshot_retries_idempotently(tmp_path: Path) -> None:
     state = _state(tmp_path)
-    candidate, digest = _candidate(state)
+    _, digest = _candidate(state)
 
     _promote(state, digest)
     result = _promote(state, digest)
