@@ -111,9 +111,9 @@ def test_load_targets_rejects_duplicate_urls(tmp_path: Path) -> None:
 
 def test_handle_monitor_result_promotes_baseline(tmp_path: Path) -> None:
     state = tmp_path / ".wsum"
-    candidate_dir = state / "candidates"
+    candidate_dir = state / "pending" / "example"
     candidate_dir.mkdir(parents=True)
-    candidate = candidate_dir / "example.txt"
+    candidate = candidate_dir / "candidate.txt"
     content = "baseline\n"
     candidate.write_text(content)
     target = {"target_id": "example", "name": "Example"}
@@ -136,11 +136,11 @@ def test_handle_monitor_result_promotes_baseline(tmp_path: Path) -> None:
 
 def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None:
     state = tmp_path / ".wsum"
-    candidate_dir = state / "candidates"
+    candidate_dir = state / "pending" / "example"
     snapshot_dir = state / "snapshots"
     candidate_dir.mkdir(parents=True)
     snapshot_dir.mkdir()
-    candidate = candidate_dir / "example.txt"
+    candidate = candidate_dir / "candidate.txt"
     candidate.write_text("new\n")
     (snapshot_dir / "example.txt").write_text("old\n")
     target = {
@@ -157,7 +157,7 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
     assert result["action"] == "review"
     assert len(str(result["revision"])) == 32
     assert result["watch_focus"] == "pricing"
-    pending = json.loads((state / "pending" / "example.json").read_text())
+    pending = json.loads((state / "pending" / "example" / "state.json").read_text())
     assert pending["target_id"] == "example"
     assert pending["run_id"] == _RUN_ID
     assert pending["revision"] == result["revision"]
@@ -166,11 +166,11 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
 
 def test_finalize_material_change_writes_report_and_promotes(tmp_path: Path) -> None:
     state = tmp_path / ".wsum"
-    candidate_dir = state / "candidates"
+    candidate_dir = state / "pending" / "example"
     snapshot_dir = state / "snapshots"
     candidate_dir.mkdir(parents=True)
     snapshot_dir.mkdir()
-    candidate = candidate_dir / "example.txt"
+    candidate = candidate_dir / "candidate.txt"
     candidate.write_text("new\n")
     (snapshot_dir / "example.txt").write_text("old\n")
     workspace._write_pending(  # pyright: ignore[reportPrivateUsage]
@@ -201,18 +201,18 @@ def test_finalize_material_change_writes_report_and_promotes(tmp_path: Path) -> 
     assert "Pricing changed." in report.read_text()
     assert (state / "snapshots" / "example.txt").read_text() == "new\n"
     assert not candidate.exists()
-    assert not (state / "pending" / "example.json").exists()
+    assert not (state / "pending" / "example" / "state.json").exists()
 
 
 def test_finalize_migrates_legacy_pending_review(tmp_path: Path) -> None:
     state = tmp_path / ".wsum"
-    candidate_dir = state / "candidates"
+    candidate_dir = state / "pending" / "example"
     snapshot_dir = state / "snapshots"
     pending_dir = state / "pending"
     candidate_dir.mkdir(parents=True)
     snapshot_dir.mkdir()
     pending_dir.mkdir()
-    candidate = candidate_dir / "example.txt"
+    candidate = candidate_dir / "candidate.txt"
     candidate.write_text("new\n")
     snapshot = snapshot_dir / "example.txt"
     snapshot.write_text("old\n")
@@ -223,7 +223,7 @@ def test_finalize_migrates_legacy_pending_review(tmp_path: Path) -> None:
         "candidate_sha256": hashlib.sha256(b"new\n").hexdigest(),
         "diff_truncated": False,
     }
-    (pending_dir / "example.json").write_text(json.dumps(legacy_pending))
+    (pending_dir / "example" / "state.json").write_text(json.dumps(legacy_pending))
 
     result = finalize(
         tmp_path,
@@ -242,13 +242,13 @@ def test_finalize_migrates_legacy_pending_review(tmp_path: Path) -> None:
     assert "Pricing changed." in report.read_text()
     assert snapshot.read_text() == "new\n"
     assert not candidate.exists()
-    assert not (pending_dir / "example.json").exists()
+    assert not (pending_dir / "example" / "state.json").exists()
 
 
 def test_finalize_non_material_truncated_diff_stops(tmp_path: Path) -> None:
     state = tmp_path / ".wsum"
-    (state / "candidates").mkdir(parents=True)
-    (state / "candidates" / "example.txt").write_text("new\n")
+    (state / "pending" / "example").mkdir(parents=True)
+    (state / "pending" / "example" / "candidate.txt").write_text("new\n")
     workspace._write_pending(  # pyright: ignore[reportPrivateUsage]
         state,
         {
@@ -267,16 +267,16 @@ def test_finalize_non_material_truncated_diff_stops(tmp_path: Path) -> None:
     )
 
     assert result == {"action": "manual_review_required", "target_id": "example"}
-    assert (state / "pending" / "example.json").exists()
+    assert (state / "pending" / "example" / "state.json").exists()
 
 
 def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
     state = tmp_path / ".wsum"
-    candidate_dir = state / "candidates"
+    candidate_dir = state / "pending" / "example"
     snapshot_dir = state / "snapshots"
     candidate_dir.mkdir(parents=True)
     snapshot_dir.mkdir()
-    candidate = candidate_dir / "example.txt"
+    candidate = candidate_dir / "candidate.txt"
     (snapshot_dir / "example.txt").write_text("old\n")
     reports = tmp_path / "reports"
     reports.mkdir()
@@ -301,7 +301,7 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
     second = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
         state, target, candidate, _changed_result(current="second\n"), _RUN_ID
     )
-    pending = (state / "pending" / "example.json").read_bytes()
+    pending = (state / "pending" / "example" / "state.json").read_bytes()
 
     with pytest.raises(WorkspaceError, match="revision"):
         finalize(
@@ -317,7 +317,7 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
     assert (snapshot_dir / "example.txt").read_text() == "old\n"
     assert report.read_text() == original_report
     assert candidate.read_text() == "second\n"
-    assert (state / "pending" / "example.json").read_bytes() == pending
+    assert (state / "pending" / "example" / "state.json").read_bytes() == pending
     assert str(second["revision"]) != first_revision
 
 
@@ -325,11 +325,11 @@ def test_finalize_material_snapshot_conflict_does_not_write_report(
     tmp_path: Path,
 ) -> None:
     state = tmp_path / ".wsum"
-    candidate_dir = state / "candidates"
+    candidate_dir = state / "pending" / "example"
     snapshot_dir = state / "snapshots"
     candidate_dir.mkdir(parents=True)
     snapshot_dir.mkdir()
-    candidate = candidate_dir / "example.txt"
+    candidate = candidate_dir / "candidate.txt"
     candidate.write_text("new\n")
     snapshot = snapshot_dir / "example.txt"
     snapshot.write_text("old\n")
@@ -367,7 +367,7 @@ def test_finalize_material_snapshot_conflict_does_not_write_report(
     assert snapshot.read_text() == "external\n"
     assert report.read_text() == original_report
     assert candidate.read_text() == "new\n"
-    assert (state / "pending" / "example.json").exists()
+    assert (state / "pending" / "example" / "state.json").exists()
 
 
 def test_check_batches_targets_and_contains_failures(
