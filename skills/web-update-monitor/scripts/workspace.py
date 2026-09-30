@@ -15,7 +15,7 @@ import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -112,7 +112,7 @@ def _target_id(url: str) -> str:
 
 
 def _new_run_id() -> str:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"{timestamp}-{secrets.token_hex(4)}"
 
 
