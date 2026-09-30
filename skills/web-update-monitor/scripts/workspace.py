@@ -1,4 +1,4 @@
-"""Cowork-facing orchestration for CSV-based web update monitoring."""
+"""Workspace-facing orchestration for CSV-based web update monitoring."""
 
 from __future__ import annotations
 
@@ -39,8 +39,8 @@ _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
-class CoworkError(RuntimeError):
-    """Expected Cowork workspace or decision error."""
+class WorkspaceError(RuntimeError):
+    """Expected workspace or decision error."""
 
 
 def _workspace(value: str | Path) -> Path:
@@ -48,9 +48,9 @@ def _workspace(value: str | Path) -> Path:
     try:
         info = path.lstat()
     except OSError as exc:
-        raise CoworkError("workspace must be an existing directory") from exc
+        raise WorkspaceError("workspace must be an existing directory") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise CoworkError("workspace must be a non-symlink directory")
+        raise WorkspaceError("workspace must be a non-symlink directory")
     return path.resolve()
 
 
@@ -62,11 +62,11 @@ def _ensure_directory(path: Path, description: str) -> Path:
             path.mkdir(mode=0o700)
             info = path.lstat()
         except OSError as exc:
-            raise CoworkError(f"{description} is unavailable") from exc
+            raise WorkspaceError(f"{description} is unavailable") from exc
     except OSError as exc:
-        raise CoworkError(f"{description} is unavailable") from exc
+        raise WorkspaceError(f"{description} is unavailable") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise CoworkError(f"{description} must be a non-symlink directory")
+        raise WorkspaceError(f"{description} must be a non-symlink directory")
     return path
 
 
@@ -78,15 +78,15 @@ def _read_csv(path: Path) -> str:
     try:
         info = path.lstat()
     except OSError as exc:
-        raise CoworkError(f"{_TARGETS_FILE} is missing") from exc
+        raise WorkspaceError(f"{_TARGETS_FILE} is missing") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise CoworkError(f"{_TARGETS_FILE} must be a regular non-symlink file")
+        raise WorkspaceError(f"{_TARGETS_FILE} must be a regular non-symlink file")
     if info.st_size <= 0 or info.st_size > _MAX_CSV_BYTES:
-        raise CoworkError(f"{_TARGETS_FILE} size is invalid")
+        raise WorkspaceError(f"{_TARGETS_FILE} size is invalid")
     try:
         return path.read_bytes().decode("utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
-        raise CoworkError(f"{_TARGETS_FILE} must be UTF-8 CSV") from exc
+        raise WorkspaceError(f"{_TARGETS_FILE} must be UTF-8 CSV") from exc
 
 
 def _parse_enabled(value: str, row_number: int) -> bool:
@@ -95,7 +95,7 @@ def _parse_enabled(value: str, row_number: int) -> bool:
         return True
     if normalized == "false":
         return False
-    raise CoworkError(f"row {row_number}: enabled must be true or false")
+    raise WorkspaceError(f"row {row_number}: enabled must be true or false")
 
 
 def _target_id(url: str) -> str:
@@ -114,22 +114,22 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
     reader = csv.DictReader(io.StringIO(_read_csv(root / _TARGETS_FILE)))
     fieldnames = reader.fieldnames
     if fieldnames is None or len(fieldnames) != len(set(fieldnames)):
-        raise CoworkError(f"{_TARGETS_FILE} must have a unique header row")
+        raise WorkspaceError(f"{_TARGETS_FILE} must have a unique header row")
     fields = set(fieldnames)
     if not _REQUIRED_FIELDS.issubset(fields):
-        raise CoworkError(f"{_TARGETS_FILE} requires name and url columns")
+        raise WorkspaceError(f"{_TARGETS_FILE} requires name and url columns")
     if fields - _ALLOWED_FIELDS:
-        raise CoworkError(f"{_TARGETS_FILE} contains unsupported columns")
+        raise WorkspaceError(f"{_TARGETS_FILE} contains unsupported columns")
 
     raw_targets: list[dict[str, object]] = []
     for row_number, row in enumerate(reader, start=2):
         if None in row:
-            raise CoworkError(f"row {row_number}: too many columns")
+            raise WorkspaceError(f"row {row_number}: too many columns")
         values: dict[str, str] = {}
         for key in fieldnames:
             value = row.get(key)
             if value is not None and not isinstance(value, str):
-                raise CoworkError(f"row {row_number}: invalid CSV value")
+                raise WorkspaceError(f"row {row_number}: invalid CSV value")
             values[key] = (value or "").strip()
         if not any(values.values()):
             continue
@@ -143,7 +143,7 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
             "fetch_mode": "static",
         })
     if not raw_targets:
-        raise CoworkError(f"{_TARGETS_FILE} contains no targets")
+        raise WorkspaceError(f"{_TARGETS_FILE} contains no targets")
 
     normalized = workflow.validate_targets({"targets": raw_targets})["targets"]
     return cast("list[dict[str, object]]", normalized)
@@ -172,7 +172,7 @@ def _cleanup_candidate(candidate: Path) -> None:
     try:
         candidate.unlink(missing_ok=True)
     except OSError as exc:
-        raise CoworkError("cannot remove candidate snapshot") from exc
+        raise WorkspaceError("cannot remove candidate snapshot") from exc
 
 
 def _write_pending(state: Path, payload: Mapping[str, object]) -> None:
@@ -194,7 +194,7 @@ def _write_pending(state: Path, payload: Mapping[str, object]) -> None:
         temporary_path.replace(destination)
         temporary_path = None
     except OSError as exc:
-        raise CoworkError("cannot persist pending decision state") from exc
+        raise WorkspaceError("cannot persist pending decision state") from exc
     finally:
         if temporary_path is not None:
             with suppress(OSError):
@@ -233,7 +233,7 @@ def _handle_monitor_result(
             "name": target["name"],
         }
     if status != "changed":
-        raise CoworkError("monitor returned an unsupported status")
+        raise WorkspaceError("monitor returned an unsupported status")
 
     pending = {
         "target_id": target_id,
@@ -274,7 +274,7 @@ def check(workspace: str | Path) -> dict[str, object]:
         except (
             monitor.MonitorError,
             OSError,
-            CoworkError,
+            WorkspaceError,
             workflow.WorkflowError,
         ) as exc:
             outcomes.append({
@@ -291,19 +291,19 @@ def _read_pending(state: Path, target_id: str) -> dict[str, object]:
     try:
         info = path.lstat()
     except OSError as exc:
-        raise CoworkError("no valid pending decision exists for target") from exc
+        raise WorkspaceError("no valid pending decision exists for target") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise CoworkError("pending decision must be a regular non-symlink file")
+        raise WorkspaceError("pending decision must be a regular non-symlink file")
     try:
         data = path.read_text(encoding="utf-8")
         value = json.loads(data)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CoworkError("no valid pending decision exists for target") from exc
+        raise WorkspaceError("no valid pending decision exists for target") from exc
     if not isinstance(value, dict):
-        raise CoworkError("pending decision is invalid")
+        raise WorkspaceError("pending decision is invalid")
     pending = cast("dict[str, object]", value)
     if set(pending) != _PENDING_FIELDS:
-        raise CoworkError("pending decision is invalid")
+        raise WorkspaceError("pending decision is invalid")
     return pending
 
 
@@ -313,22 +313,22 @@ def _validate_decision(
     """Validate a decision and return its target, revision, materiality, and report."""
     unsupported = set(payload) - {"material", "report", "revision", "target_id"}
     if unsupported:
-        raise CoworkError("decision contains unsupported fields")
+        raise WorkspaceError("decision contains unsupported fields")
     target_id = payload.get("target_id")
     revision = payload.get("revision")
     material = payload.get("material")
     if not isinstance(target_id, str) or not _TARGET_ID_RE.fullmatch(target_id):
-        raise CoworkError("target_id is invalid")
+        raise WorkspaceError("target_id is invalid")
     if not isinstance(revision, str) or not _REVISION_RE.fullmatch(revision):
-        raise CoworkError("revision is invalid")
+        raise WorkspaceError("revision is invalid")
     if not isinstance(material, bool):
-        raise CoworkError("material must be a boolean")
+        raise WorkspaceError("material must be a boolean")
 
     report: str | None = None
     if material:
         report_value = payload.get("report")
         if not isinstance(report_value, str) or not report_value:
-            raise CoworkError("material decisions require a non-empty report")
+            raise WorkspaceError("material decisions require a non-empty report")
         report = report_value
     return target_id, revision, material, report
 
@@ -341,9 +341,9 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
     state = _state_dir(root)
     pending = _read_pending(state, target_id)
     if pending["target_id"] != target_id:
-        raise CoworkError("pending decision target does not match")
+        raise WorkspaceError("pending decision target does not match")
     if pending["revision"] != revision:
-        raise CoworkError("decision revision does not match pending review")
+        raise WorkspaceError("decision revision does not match pending review")
     if pending["diff_truncated"] is True and not material:
         return {"action": "manual_review_required", "target_id": target_id}
 
@@ -381,9 +381,9 @@ def _read_decision() -> Mapping[str, object]:
     try:
         value = json.load(sys.stdin)
     except json.JSONDecodeError as exc:
-        raise CoworkError("stdin must contain a valid decision object") from exc
+        raise WorkspaceError("stdin must contain a valid decision object") from exc
     if not isinstance(value, Mapping):
-        raise CoworkError("decision must be an object")
+        raise WorkspaceError("decision must be an object")
     return cast("Mapping[str, object]", value)
 
 
@@ -397,7 +397,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the Cowork-facing checker or finalizer."""
+    """Run the Workspace-facing checker or finalizer."""
     args = _parser().parse_args(argv)
     try:
         result = (
@@ -405,7 +405,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command == "check"
             else finalize(args.workspace, _read_decision())
         )
-    except (CoworkError, workflow.WorkflowError) as exc:
+    except (WorkspaceError, workflow.WorkflowError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))

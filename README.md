@@ -2,34 +2,21 @@
 
 A local-first Agent Skill for detecting meaningful updates on public websites and documents.
 
-The implementation keeps deterministic mechanics in Python and semantic judgment in the agent:
+The canonical skill lives in `skills/web-update-monitor/`. Its bundled Python helpers handle deterministic fetching, normalization, hashing, diffing, report persistence, and snapshot promotion. The agent edits the target list, judges whether a detected change matters, and composes reports for material changes.
 
-- `monitor.py` fetches or reads content, normalizes it, hashes it, and emits a bounded diff plus a candidate snapshot.
-- `workflow.py` safely validates targets, writes reports, and promotes snapshots.
-- `cowork.py` turns a simple CSV workspace into a multi-target Cowork workflow and hides internal IDs, hashes, and promotion details from the user.
-- the agent judges whether a bounded diff matters and composes a concise Markdown report only for material changes.
+## Agent Skill
 
-## Claude Cowork
+The repository's canonical distribution is the `skills/web-update-monitor/` directory, with its standard `SKILL.md` manifest and bundled scripts, requirements, and example CSV.
 
-The Cowork workflow is designed so a non-engineer only needs to manage a folder and describe what to monitor.
-
-### 1. Install the skill
-
-Download the latest successful `wsum.zip` artifact from the [main-branch CI workflow runs](https://github.com/dceoy/wsum/actions/workflows/ci.yml?query=branch%3Amain) and upload it directly in Claude's custom Skills UI. Do not extract the ZIP.
-
-Workflow artifacts require GitHub access and expire, so use the newest successful main-branch run.
-
-Developers and maintainers with a repository checkout can build the same archive locally:
+To install it in an Agent Skills-compatible runtime, download the latest successful `web-update-monitor.zip` artifact from the [main-branch CI workflow runs](https://github.com/dceoy/wsum/actions/workflows/ci.yml?query=branch%3Amain), extract it, and place the `web-update-monitor/` directory in the runtime's skill discovery directory. Developers can build the same archive from a checkout:
 
 ```bash
-python scripts/package_cowork_skill.py
+python scripts/package_skill.py
 ```
 
-Upload `dist/wsum.zip` from Claude's custom Skills UI after building it locally.
+This creates `dist/web-update-monitor.zip`. The archive contains the complete skill directory, and its `SKILL.md` is byte-identical to the canonical manifest in this repository.
 
-The repository keeps the portable Agent Skill manifest as `SKILL.md`. The packager emits it as lowercase `skill.md` inside the Cowork ZIP and adds the Python and `pypdf` dependency metadata required by Cowork. This avoids keeping case-colliding `SKILL.md` and `skill.md` files in the source tree.
-
-### 2. Connect a workspace folder
+## Workspace
 
 Use a local folder with a `targets.csv` file. A template is available at `skills/web-update-monitor/examples/targets.csv`.
 
@@ -62,30 +49,16 @@ workspace/
 
 Users may edit `targets.csv`. `.wsum/` is internal state and should not be edited manually.
 
-### 3. Ask Cowork in natural language
+## Agent workflow
 
-Examples:
+Read `skills/web-update-monitor/SKILL.md` for the complete procedure. At a high level, the agent edits `targets.csv` when requested, checks enabled targets, reviews bounded diffs for materiality, and writes a Markdown report only for material changes. The helper handles deterministic state transitions and per-target errors.
 
-```text
-Check every target in targets.csv and summarize meaningful updates.
-```
-
-```text
-Add https://example.com/pricing to the monitor and watch for pricing changes.
-```
-
-```text
-Disable the Anthropic News target.
-```
-
-Cowork edits the CSV when needed, checks all enabled rows, and writes Markdown files under `reports/` only when a change is material.
-
-## Deterministic Cowork facade
+## Deterministic workspace facade
 
 For development or direct invocation, run:
 
 ```bash
-python skills/web-update-monitor/scripts/cowork.py \
+python skills/web-update-monitor/scripts/workspace.py \
   --workspace /path/to/workspace check
 ```
 
@@ -94,15 +67,13 @@ The facade validates the complete CSV before fetching any target. It automatical
 After the agent decides whether a change is material, it passes an internal decision to:
 
 ```bash
-python skills/web-update-monitor/scripts/cowork.py \
+python skills/web-update-monitor/scripts/workspace.py \
   --workspace /path/to/workspace finalize < decision.json
 ```
 
 The facade verifies the review revision, promotes the candidate snapshot, writes a report only after successful promotion, and clears pending state. If report persistence fails after promotion, retain the pending state and retry. A truncated diff cannot be finalized as non-material; it stops for manual review instead.
 
-## Direct low-level workflow
-
-The existing deterministic helpers remain available for development and non-Cowork integrations.
+## Development and validation
 
 Set up the repository with:
 
@@ -110,18 +81,17 @@ Set up the repository with:
 uv sync
 ```
 
-`monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workflow.py` provides target validation, safe report writing, and atomic snapshot promotion. See `skills/web-update-monitor/SKILL.md` for the canonical agent procedure.
-
-Browser-rendered targets are intentionally outside the Cowork CSV facade. Do not auto-escalate a static failure to browser rendering. Use browser input only when the browser tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Never provide cookies or credentials.
-
-## Validation
+Then run tests, build the skill archive, and validate the canonical skill with the [Agent Skills reference validator](https://github.com/agentskills/agentskills/tree/main/skills-ref):
 
 ```bash
 uv run pytest
-python scripts/package_cowork_skill.py
+python scripts/package_skill.py
+skills-ref validate skills/web-update-monitor
 ```
 
-The local QA skill also runs Ruff, Pyright, Markdown formatting, and GitHub Actions checks.
+`monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workflow.py` provides target validation, safe report writing, and atomic snapshot promotion.
+
+Browser-rendered targets are outside the CSV workspace workflow. Do not auto-escalate a static failure to browser rendering. Use browser input only when the browser tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Never provide cookies or credentials.
 
 ## Repository boundary
 
