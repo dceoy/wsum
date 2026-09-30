@@ -237,9 +237,7 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
     return targets
 
 
-def _pending_target_dir(
-    state: Path, target_id: str, *, create: bool
-) -> Path:
+def _pending_target_dir(state: Path, target_id: str, *, create: bool) -> Path:
     pending = _ensure_directory(state / "pending", "pending directory")
     target = pending / _validate_target_id(target_id)
     try:
