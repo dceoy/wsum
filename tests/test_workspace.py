@@ -135,6 +135,7 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
     assert result["watch_focus"] == "pricing"
     pending = json.loads((state / "pending" / "example.json").read_text())
     assert pending["target_id"] == "example"
+    assert pending["run_id"] == _RUN_ID
     assert pending["revision"] == result["revision"]
     assert candidate.exists()
 
@@ -166,7 +167,7 @@ def test_finalize_material_change_writes_report_and_promotes(tmp_path: Path) -> 
             "target_id": "example",
             "revision": "a" * 32,
             "material": True,
-            "report": "# Example\n\nPricing changed.\n",
+            "report": "## Example\n\nPricing changed.\n",
         },
     )
 
@@ -215,9 +216,8 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
     reports = tmp_path / "reports"
     reports.mkdir()
     report = reports / f"{_RUN_ID}.md"
-    report.write_text(
-        f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\ncurrent report\n"
-    )
+    original_report = f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\ncurrent report\n"
+    report.write_text(original_report)
     target = {
         "target_id": "example",
         "name": "Example",
@@ -248,7 +248,7 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
         )
 
     assert (snapshot_dir / "example.txt").read_text() == "old\n"
-    assert report.read_text() == "current report\n"
+    assert report.read_text() == original_report
     assert candidate.read_text() == "second\n"
     assert (state / "pending" / "example.json").read_bytes() == pending
     assert str(second["revision"]) != first_revision
@@ -269,9 +269,8 @@ def test_finalize_material_snapshot_conflict_does_not_write_report(
     reports = tmp_path / "reports"
     reports.mkdir()
     report = reports / f"{_RUN_ID}.md"
-    report.write_text(
-        f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\nprevious report\n"
-    )
+    original_report = f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\nprevious report\n"
+    report.write_text(original_report)
     workspace._write_pending(  # pyright: ignore[reportPrivateUsage]
         state,
         {
@@ -297,7 +296,7 @@ def test_finalize_material_snapshot_conflict_does_not_write_report(
 
     assert result == {"action": "snapshot_conflict", "target_id": "example"}
     assert snapshot.read_text() == "external\n"
-    assert report.read_text() == "previous report\n"
+    assert report.read_text() == original_report
     assert candidate.read_text() == "new\n"
     assert (state / "pending" / "example.json").exists()
 
