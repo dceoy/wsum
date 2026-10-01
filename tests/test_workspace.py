@@ -1504,10 +1504,13 @@ def test_pending_reviews_recovers_partial_replacement_before_listing(
 
     assert workspace.pending_reviews(tmp_path) == {"reviews": []}
     assert not group.exists()
-    assert workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
-        state,
-        "example",
-    ) is None
+    assert (
+        workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is None
+    )
 
 
 def test_pending_reviews_legacy_reconstructs_diff_and_context(tmp_path: Path) -> None:
@@ -3956,19 +3959,28 @@ def test_recover_pending_accepts_committed_replacement_without_revision(
     payload = _pending_payload(candidate_sha256=hashlib.sha256(data).hexdigest())
     group = _grouped_pending(state, payload, data)
 
-    assert workspace._recover_pending(  # pyright: ignore[reportPrivateUsage]
-        state,
-        "example",
-    ) is None
+    assert (
+        workspace._recover_pending(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is None
+    )
     assert group.joinpath("candidate.txt").read_bytes() == data
-    assert workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
-        state,
-        "example",
-    ) is None
-    assert workspace._read_commit_record(  # pyright: ignore[reportPrivateUsage]
-        state,
-        "example",
-    ) is None
+    assert (
+        workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is None
+    )
+    assert (
+        workspace._read_commit_record(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(
