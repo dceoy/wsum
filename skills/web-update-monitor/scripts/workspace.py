@@ -1456,7 +1456,7 @@ def _compact_review(review: Mapping[str, object]) -> dict[str, object]:
         "name",
         "diff_truncated",
     )
-    return {key: review[key] for key in keys if key in review}
+    return {key: review[key] for key in keys}
 
 
 def check(workspace: str | Path, *, compact: bool = False) -> dict[str, object]:
