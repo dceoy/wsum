@@ -1691,11 +1691,12 @@ def test_legacy_pending_diff_rejects_invalid_state(
         snapshot.write_text("tampered\n", encoding="utf-8")
         expected = "baseline does not match"
     else:
-        monkeypatch.setattr(
-            workspace.monitor,
-            "compare_text",
-            lambda *_args, **_kwargs: {"diff": 1},
-        )
+        def invalid_diff(
+            *_args: Any, **_kwargs: Any  # ruff: ignore[any-type]
+        ) -> dict[str, object]:
+            return {"diff": 1}
+
+        monkeypatch.setattr(workspace.monitor, "compare_text", invalid_diff)
         expected = "diff is invalid"
 
     with pytest.raises(WorkspaceError, match=expected):
