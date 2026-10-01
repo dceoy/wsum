@@ -216,6 +216,10 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
     assert pending["target_id"] == "example"
     assert pending["run_id"] == _RUN_ID
     assert pending["revision"] == result["revision"]
+    assert pending["name"] == "Example"
+    assert pending["url"] == "https://example.com/"
+    assert pending["watch_focus"] == "pricing"
+    assert pending["diff"] == _changed_result()["diff"]
     assert candidate.exists()
 
 
@@ -921,7 +925,7 @@ def test_check_batches_targets_and_contains_failures(
     ]
 
 
-def test_check_failure_preserves_legacy_pending_for_finalize(
+def test_check_returns_legacy_pending_before_fetching(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_targets(
@@ -935,34 +939,27 @@ def test_check_failure_preserves_legacy_pending_for_finalize(
     )
 
     def fail_monitor(_args: argparse.Namespace) -> dict[str, object]:
-        raise workspace.monitor.MonitorError
+        raise AssertionError("pending reviews must be resumed before fetching")
 
     monkeypatch.setattr(workspace.monitor, "run", fail_monitor)
 
     result = check(tmp_path)
-    outcomes = cast("list[dict[str, object]]", result["targets"])
+    reviews = cast("list[dict[str, object]]", result["reviews"])
 
-    assert outcomes[0]["action"] == "error"
-    assert "error" in outcomes[0]
+    assert result["action"] == "pending_reviews"
+    assert reviews == [
+        {
+            "action": "review",
+            "run_id": _RUN_ID,
+            "target_id": target_id,
+            "revision": "a" * 32,
+            "name": "Example",
+            "diff_truncated": False,
+        }
+    ]
     assert metadata.exists()
     assert candidate.read_text(encoding="utf-8") == "new\n"
-    assert not (state / "pending" / target_id).exists()
-
-    pending = json.loads(metadata.read_text(encoding="utf-8"))
-    finalized = finalize(
-        tmp_path,
-        {
-            "target_id": target_id,
-            "revision": pending["revision"],
-            "material": True,
-            "report": "## Example\n\nReviewed.\n",
-        },
-    )
-
-    assert finalized["action"] == "finalized"
-    assert snapshot.read_text(encoding="utf-8") == "new\n"
-    assert not metadata.exists()
-    assert not candidate.exists()
+    assert snapshot.read_text(encoding="utf-8") == "old\n"
 
 
 @pytest.mark.parametrize(
@@ -1426,6 +1423,105 @@ def test_check_syncs_new_state_and_grouped_pending_directories(
     assert state / ".pending-recovery" in fsynced
     assert (pending / target_id / "state.json").exists()
 
+
+
+def test_check_compact_returns_handles_and_pending_returns_full_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_targets(
+        tmp_path / "targets.csv", "Example,https://example.com/,pricing,true\n"
+    )
+    state = tmp_path / ".wsum"
+    snapshots = state / "snapshots"
+    snapshots.mkdir(parents=True)
+    target_id = str(load_targets(tmp_path)[0]["target_id"])
+    (snapshots / f"{target_id}.txt").write_text("old\n", encoding="utf-8")
+
+    def fake_monitor(args: argparse.Namespace) -> dict[str, object]:
+        Path(args.output).write_text("new\n", encoding="utf-8")
+        return _changed_result()
+
+    monkeypatch.setattr(workspace, "_new_run_id", lambda: _RUN_ID)
+    monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
+
+    result = check(tmp_path, compact=True)
+    reviews = [
+        item
+        for item in cast("list[dict[str, object]]", result["targets"])
+        if item["action"] == "review"
+    ]
+    assert reviews == [
+        {
+            "action": "review",
+            "run_id": _RUN_ID,
+            "target_id": target_id,
+            "revision": reviews[0]["revision"],
+            "name": "Example",
+            "diff_truncated": False,
+        }
+    ]
+    assert "diff" not in reviews[0]
+
+    pending = workspace.pending_reviews(tmp_path, target_id=target_id)
+    full = cast("list[dict[str, object]]", pending["reviews"])[0]
+    assert full["run_id"] == _RUN_ID
+    assert full["target_id"] == target_id
+    assert full["revision"] == reviews[0]["revision"]
+    assert full["name"] == "Example"
+    assert full["url"] == "https://example.com/"
+    assert full["watch_focus"] == "pricing"
+    assert full["diff"] == _changed_result()["diff"]
+
+
+def test_pending_reviews_legacy_reconstructs_diff_and_context(tmp_path: Path) -> None:
+    _write_targets(
+        tmp_path / "targets.csv", "Example,https://example.com/,pricing,true\n"
+    )
+    target_id = str(load_targets(tmp_path)[0]["target_id"])
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_review_transaction(state, "legacy", target_id=target_id)
+
+    pending = workspace.pending_reviews(tmp_path, target_id=target_id)
+    review = cast("list[dict[str, object]]", pending["reviews"])[0]
+
+    assert review["run_id"] == _RUN_ID
+    assert review["target_id"] == target_id
+    assert review["name"] == "Example"
+    assert review["url"] == "https://example.com/"
+    assert review["watch_focus"] == "pricing"
+    assert "-old" in str(review["diff"])
+    assert "+new" in str(review["diff"])
+
+
+def test_discard_pending_clears_conflicted_review(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
+
+    result = workspace.discard_pending(tmp_path, "example")
+
+    assert result == {
+        "action": "discarded",
+        "run_id": _RUN_ID,
+        "target_id": "example",
+    }
+    assert not metadata.exists()
+    assert not candidate.exists()
+    assert snapshot.read_text(encoding="utf-8") == "old\n"
+    assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+
+
+def test_pending_target_listing_rejects_hidden_unsafe_entry(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    pending = state / "pending"
+    pending.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (pending / ".unsafe").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(WorkspaceError, match="unsafe entry"):
+        workspace.pending_reviews(tmp_path)
 
 def test_recovery_directory_parent_fsync_retries_after_creation_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2431,6 +2527,11 @@ def test_main_success_emits_json(
     assert workspace.main(["--workspace", str(tmp_path), "check"]) == 0
     captured = capsys.readouterr()
     assert '"action": "skipped"' in captured.out
+    assert not captured.err
+
+    assert workspace.main(["--workspace", str(tmp_path), "pending"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == '{"reviews": []}'
     assert not captured.err
 
 
