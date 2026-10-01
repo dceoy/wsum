@@ -1691,8 +1691,10 @@ def test_legacy_pending_diff_rejects_invalid_state(
         snapshot.write_text("tampered\n", encoding="utf-8")
         expected = "baseline does not match"
     else:
+
         def invalid_diff(
-            *_args: Any, **_kwargs: Any  # ruff: ignore[any-type]
+            *_args: Any,
+            **_kwargs: Any,  # ruff: ignore[any-type]
         ) -> dict[str, object]:
             return {"diff": 1}
 
