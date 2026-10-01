@@ -860,6 +860,42 @@ def _read_commit_record(state: Path, target_id: str) -> dict[str, object] | None
     return record
 
 
+def _recovery_target_ids(state: Path) -> list[str]:
+    """List target IDs with durable pending recovery records."""
+    directory = _recovery_directory(state, create=False)
+    if directory is None:
+        return []
+
+    target_ids: set[str] = set()
+    try:
+        entries = sorted(directory.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        raise WorkspaceError("cannot list pending recovery directory") from exc
+    for entry in entries:
+        try:
+            info = entry.lstat()
+        except OSError as exc:
+            raise WorkspaceError("cannot stat pending recovery entry") from exc
+        if entry.name.startswith("."):
+            if (
+                entry.name.endswith(".tmp")
+                and stat.S_ISREG(info.st_mode)
+                and not stat.S_ISLNK(info.st_mode)
+            ):
+                continue
+            raise WorkspaceError("pending recovery directory contains an unsafe entry")
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise WorkspaceError("pending recovery directory contains an unsafe entry")
+        if entry.name.endswith(".json.commit"):
+            target_id = entry.name[: -len(".json.commit")]
+        elif entry.name.endswith(".json"):
+            target_id = entry.name[: -len(".json")]
+        else:
+            raise WorkspaceError("pending recovery directory contains an unsafe entry")
+        target_ids.add(_validate_target_id(target_id))
+    return sorted(target_ids)
+
+
 def _write_recovery_record_at(
     state: Path, record: Mapping[str, object], *, commit: bool
 ) -> None:
@@ -1241,9 +1277,11 @@ def _recover_pending(
         if record.get("kind") != "replace":
             raise WorkspaceError("pending recovery records conflict")
         if revision is None:
-            raise WorkspaceError(
-                "pending replacement recovery requires a decision revision"
-            )
+            if not _replacement_matches_commit(state, target_id, commit):
+                raise WorkspaceError("pending committed replacement is incomplete")
+            _retire_recovery_record(state, target_id)
+            _retire_commit_record(state, target_id)
+            return None
         if revision == commit.get("revision"):
             if not _replacement_matches_commit(state, target_id, commit):
                 raise WorkspaceError("pending committed replacement is incomplete")
@@ -1685,6 +1723,8 @@ def pending_reviews(
     """Return resumable pending reviews without refetching monitored targets."""
     root = _workspace(workspace)
     state = _state_dir(root)
+    for recovery_target_id in _recovery_target_ids(state):
+        _recover_pending(state, recovery_target_id)
     target_ids = _pending_target_ids(state)
     if target_id is not None:
         target_id = _validate_target_id(target_id)
@@ -1703,6 +1743,7 @@ def discard_pending(workspace: str | Path, target_id: str) -> dict[str, object]:
     """Discard one pending review so a conflicted target can be checked again."""
     root = _workspace(workspace)
     state = _state_dir(root)
+    _recover_pending(state, target_id)
     pending = _read_pending(state, target_id)
     run_id = str(pending["run_id"])
     _discard_pending(state, target_id)
