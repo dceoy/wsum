@@ -1460,18 +1460,19 @@ def _compact_review(review: Mapping[str, object]) -> dict[str, object]:
 
 
 def check(workspace: str | Path, *, compact: bool = False) -> dict[str, object]:
-    """Check every enabled CSV target unless an older review is still pending."""
+    """Check targets without refetching any target that already has a review."""
     root = _workspace(workspace)
     existing = pending_reviews(root)
-    reviews = cast("list[dict[str, object]]", existing["reviews"])
-    if reviews:
-        return {"action": "pending_reviews", "reviews": reviews}
+    existing_reviews = cast("list[dict[str, object]]", existing["reviews"])
+    pending_ids = {str(review["target_id"]) for review in existing_reviews}
 
     targets = load_targets(root)
     state = _state_dir(root)
     run_id = _new_run_id()
-    outcomes: list[dict[str, object]] = []
+    outcomes: list[dict[str, object]] = list(existing_reviews)
     for target in targets:
+        if str(target["target_id"]) in pending_ids:
+            continue
         if target["action"] == "skip_disabled":
             outcomes.append({
                 "action": "skipped",
