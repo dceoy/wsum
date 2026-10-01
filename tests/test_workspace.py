@@ -1693,9 +1693,14 @@ def test_legacy_pending_diff_rejects_invalid_state(
     else:
 
         def invalid_diff(
-            *_args: Any,
-            **_kwargs: Any,  # ruff: ignore[any-type]
+            _current: str,
+            _previous: str | None,
+            *,
+            max_diff_lines: int,
+            max_diff_bytes: int,
         ) -> dict[str, object]:
+            assert max_diff_lines > 0
+            assert max_diff_bytes > 0
             return {"diff": 1}
 
         monkeypatch.setattr(workspace.monitor, "compare_text", invalid_diff)
