@@ -13,17 +13,19 @@ The repository ships these canonical skills:
 - `skills/web-update-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
 - `skills/web-update-monitor-google-workspace/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract and delivers finalized reports to Google Drive.
 
-To install a skill in an Agent Skills-compatible runtime, use the corresponding package from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain), extract it, and place the skill directory in the runtime's skill discovery directory.
+To install the core skill in an Agent Skills-compatible runtime, use the `web-update-monitor` package from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain). To use the Google Workspace composite, install **both** `web-update-monitor` and `web-update-monitor-google-workspace`; the composite package intentionally delegates to the core package instead of duplicating its runtime helpers.
 
 ### Google Workspace composition
 
 The Google Workspace composite keeps a one-way integration boundary:
 
 ```text
-Google Sheet -> targets.csv -> web-update-monitor -> reports/<run-id>.md -> Google Drive
+Google Drive state -> .wsum/ -> web-update-monitor -> .wsum/ -> Google Drive state
+                              ^
+Google Sheet -> targets.csv ---+-> reports/<run-id>.md -> Google Drive reports
 ```
 
-The Spreadsheet is authoritative for target configuration, while `targets.csv` is a generated adapter artifact. `.wsum/` remains persistent local machine state and is not a Drive report artifact. A Drive delivery failure after successful finalization must be retried as delivery only; it must not roll back or rerun the core monitoring transaction.
+The Spreadsheet is authoritative for target configuration, while `targets.csv` is a generated adapter artifact. Claude Code Routines may run in fresh cloud sessions, so the composite restores `.wsum/` from a dedicated Drive state file before each check and persists it after `check` and each successful `finalize`. The final state must be committed to Drive before a report is published. The state file is machine state and is kept separate from the user-facing report folder.
 
 Read `skills/web-update-monitor-google-workspace/SKILL.md` for the complete connector orchestration and failure semantics.
 
