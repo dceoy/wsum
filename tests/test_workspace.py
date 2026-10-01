@@ -2772,15 +2772,17 @@ def test_main_finalize_dispatches_decision(
     state = tmp_path / ".wsum"
     state.mkdir()
     _write_review_transaction(state, "grouped")
-    payload = json.dumps({
-        "target_id": "example",
-        "revision": "a" * 32,
-        "material": False,
-    })
+    payload = json.dumps(
+        {
+            "target_id": "example",
+            "revision": "a" * 32,
+            "material": False,
+        }
+    )
     monkeypatch.setattr(
         workspace.sys,
         "stdin",
-        type("Input", (), {"read": lambda _self: payload})(),
+        type("Input", (), {"read": lambda _self: payload})(),  # pyright: ignore[reportUnknownLambdaType]
     )
 
     assert workspace.main(["--workspace", str(tmp_path), "finalize"]) == 0
