@@ -2,7 +2,7 @@
 name: web-update-monitor
 description: Monitor public HTTP(S) websites, PDFs, and feeds for meaningful changes using local state, CSV target lists, and one concise Markdown report per run.
 license: MIT
-compatibility: Requires Python 3.11+ with pypdf >=6.15,<7 and outbound HTTP(S) access to monitored public targets.
+compatibility: Requires Python 3.11+ with pypdf >=6.19,<7 and outbound HTTP(S) access to monitored public targets.
 ---
 
 # Web Update Monitor
