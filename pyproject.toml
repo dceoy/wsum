@@ -127,32 +127,6 @@ ignore = [
   "assert",    # assert is expected in pytest
   "private-member-access",  # private helper access is intentional in tests
 ]
-"tests/test_uncovered_*.py" = [
-  "any-type",  # protocol-shaped test doubles cross dynamic I/O boundaries
-  "compare-to-empty-string",  # empty sentinel values are asserted exactly
-  "complex-structure",  # boundary matrices keep fault cases together
-  "float-equality-comparison",  # fake clocks make timeout values deterministic
-  "mutable-class-default",  # lightweight parser doubles share controlled state
-  "no-self-use",  # test doubles implement the methods under test
-  "pytest-raises-ambiguous-pattern",  # alternation is intentional in error checks
-  "pytest-raises-with-multiple-statements",  # parameterized failure branches run in context
-  "raise-vanilla-args",  # injected exceptions carry the expected error text
-  "raw-string-in-exception",  # injected exceptions carry the expected error text
-  "subclass-builtin",  # parser response double mirrors the parsed mapping
-  "too-many-return-statements",  # table-driven test exits keep cases local
-]
-"tests/test_workspace_io_edges.py" = [
-  "any-type",  # filesystem call doubles mirror standard-library signatures
-  "compare-to-empty-string",  # empty sentinel values are asserted exactly
-  "complex-structure",  # recovery state matrix keeps related cases together
-  "no-self-use",  # test doubles implement the methods under test
-  "pytest-raises-ambiguous-pattern",  # alternation is intentional in error checks
-  "pytest-raises-with-multiple-statements",  # parameterized failure branches run in context
-  "raise-vanilla-args",  # injected exceptions carry the expected error text
-  "raw-string-in-exception",  # injected exceptions carry the expected error text
-  "too-many-return-statements",  # table-driven cases keep state transitions local
-]
-
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
