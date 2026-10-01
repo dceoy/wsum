@@ -1,14 +1,31 @@
 # wsum
 
-A local-first Agent Skill for detecting meaningful updates on public websites and documents.
+Local-first Agent Skills for detecting meaningful updates on public websites and documents.
 
-The canonical skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
+The core skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
 
-## Agent Skill
+A thin composite integration skill lives in `skills/web-update-monitor-google-workspace/`. It keeps the core monitor unchanged while using Google Sheets as the target source and Google Drive as the report destination in runtimes with Google Workspace connectors.
 
-The repository's canonical distribution is the `skills/web-update-monitor/` directory, with its standard `SKILL.md` manifest and bundled scripts, requirements, and example CSV.
+## Agent Skills
 
-To install it in an Agent Skills-compatible runtime, download `web-update-monitor.zip` from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain), extract it, and place the `web-update-monitor/` directory in the runtime's skill discovery directory.
+The repository ships these canonical skills:
+
+- `skills/web-update-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
+- `skills/web-update-monitor-google-workspace/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract and delivers finalized reports to Google Drive.
+
+To install a skill in an Agent Skills-compatible runtime, use the corresponding package from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain), extract it, and place the skill directory in the runtime's skill discovery directory.
+
+### Google Workspace composition
+
+The Google Workspace composite keeps a one-way integration boundary:
+
+```text
+Google Sheet -> targets.csv -> web-update-monitor -> reports/<run-id>.md -> Google Drive
+```
+
+The Spreadsheet is authoritative for target configuration, while `targets.csv` is a generated adapter artifact. `.wsum/` remains persistent local machine state and is not a Drive report artifact. A Drive delivery failure after successful finalization must be retried as delivery only; it must not roll back or rerun the core monitoring transaction.
+
+Read `skills/web-update-monitor-google-workspace/SKILL.md` for the complete connector orchestration and failure semantics.
 
 ## Workspace
 
@@ -43,13 +60,13 @@ workspace/
             └── candidate.txt
 ```
 
-Users may edit `targets.csv`. `.wsum/` is internal state and should not be edited manually.
+Users may edit `targets.csv` when using the core skill directly. In the Google Workspace composite workflow, regenerate it from the authoritative Spreadsheet instead. `.wsum/` is internal state and should not be edited manually.
 
 ### Generated files
 
 The workspace contains one user-facing input, user-facing reports, and internal state:
 
-- `targets.csv`: the user-facing source of truth for monitored targets. The agent may create or edit it when the user changes monitoring configuration.
+- `targets.csv`: the user-facing source of truth for monitored targets in the core workflow. The agent may create or edit it when the user changes monitoring configuration. Composite integrations may generate it from an external authoritative source.
 - `reports/<run-id>.md`: the user-facing output. One report is created per `check` run only when at least one material change is finalized. The run ID has the form `YYYYMMDDTHHMMSSZ-xxxxxxxx`. Material targets from the same run are merged into this file.
 - `.wsum/snapshots/<target-id>.txt`: the accepted normalized baseline for each target. A first observation creates it; later finalized observations replace it atomically, including non-material changes.
 - `.wsum/pending/<target-id>/candidate.txt`: the normalized changed candidate awaiting semantic review.
@@ -63,7 +80,7 @@ The helper may briefly create hidden `*.tmp` files next to the report, snapshot,
 
 ## Agent workflow
 
-Read `skills/web-update-monitor/SKILL.md` for the complete procedure. At a high level, the agent edits `targets.csv` when requested, checks enabled targets, reviews bounded diffs for materiality, and contributes each material target to one run-level Markdown report. The helper handles deterministic state transitions and per-target errors.
+Read `skills/web-update-monitor/SKILL.md` for the complete core procedure. At a high level, the agent edits `targets.csv` when requested, checks enabled targets, reviews bounded diffs for materiality, and contributes each material target to one run-level Markdown report. The helper handles deterministic state transitions and per-target errors.
 
 ## Deterministic workspace facade
 
@@ -93,11 +110,12 @@ Set up the repository with:
 uv sync
 ```
 
-Then run tests and validate the canonical skill with the [Agent Skills reference validator](https://github.com/agentskills/agentskills/tree/main/skills-ref):
+Then run tests and validate the canonical skills with the [Agent Skills reference validator](https://github.com/agentskills/agentskills/tree/main/skills-ref):
 
 ```bash
 uv run pytest
 skills-ref validate skills/web-update-monitor
+skills-ref validate skills/web-update-monitor-google-workspace
 ```
 
 `monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workspace.py` validates targets and owns pending review transactions, safe report writing, and atomic snapshot promotion.
