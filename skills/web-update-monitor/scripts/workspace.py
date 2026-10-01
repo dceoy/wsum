@@ -1418,8 +1418,8 @@ def _handle_monitor_result(
         "candidate_sha256": result.get("sha256"),
         "diff_truncated": result.get("diff_truncated") is True,
         "name": str(target["name"]),
-        "url": str(target["url"]),
-        "watch_focus": str(target["watch_focus"]),
+        "url": str(target.get("url", "")),
+        "watch_focus": str(target.get("watch_focus", "")),
         "diff": diff,
     }
     if candidate_data is None:
