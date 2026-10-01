@@ -8,6 +8,7 @@ import runpy
 import ssl
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import monitor
@@ -109,7 +110,6 @@ def test_html_extractor_caps_destination_count(monkeypatch: pytest.MonkeyPatch) 
         "http://[::1",  # malformed authority
         "ftp://example.com/",  # unsupported scheme
         "http:///missing-host",  # absent host
-        "http://example.com/\rpath",  # control characters in host parsed below
         "http://user@example.com/",  # user information
         "http://example.com/#fragment",  # fragment
         "http://discord.com/api/webhooks/123/secret",  # webhook path
@@ -118,7 +118,6 @@ def test_html_extractor_caps_destination_count(monkeypatch: pytest.MonkeyPatch) 
         "invalid-url",
         "scheme",
         "missing-host",
-        "control",
         "userinfo",
         "fragment",
         "webhook",
@@ -127,6 +126,23 @@ def test_html_extractor_caps_destination_count(monkeypatch: pytest.MonkeyPatch) 
 def test_public_url_rejects_invalid_components(url: str) -> None:
     with pytest.raises(MonitorError):
         monitor._resolve_public_url(url)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_public_url_rejects_control_characters_in_parsed_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed = SimpleNamespace(
+        scheme="http",
+        hostname="exa\rample.com",
+        port=None,
+        username=None,
+        password=None,
+        fragment="",
+        query="",
+    )
+    monkeypatch.setattr(monitor, "urlsplit", lambda _url: parsed)
+    with pytest.raises(MonitorError, match="host contains control characters"):
+        monitor._resolve_public_url("http://example.com/")  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize(
