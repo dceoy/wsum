@@ -1448,11 +1448,15 @@ def _handle_monitor_result(
 
 def _compact_review(review: Mapping[str, object]) -> dict[str, object]:
     """Return the small review handle used by orchestration layers."""
-    return {
-        key: review[key]
-        for key in ("action", "run_id", "target_id", "revision", "name", "diff_truncated")
-        if key in review
-    }
+    keys = (
+        "action",
+        "run_id",
+        "target_id",
+        "revision",
+        "name",
+        "diff_truncated",
+    )
+    return {key: review[key] for key in keys if key in review}
 
 
 def check(workspace: str | Path, *, compact: bool = False) -> dict[str, object]:
@@ -1546,12 +1550,18 @@ def _pending_target_ids(state: Path) -> list[str]:
     except OSError as exc:
         raise WorkspaceError("cannot list pending directory") from exc
     for entry in entries:
-        if entry.name.startswith("."):
-            continue
         try:
             entry_info = entry.lstat()
         except OSError as exc:
             raise WorkspaceError("cannot stat pending entry") from exc
+        if entry.name.startswith("."):
+            if (
+                entry.name.endswith(".tmp")
+                and stat.S_ISREG(entry_info.st_mode)
+                and not stat.S_ISLNK(entry_info.st_mode)
+            ):
+                continue
+            raise WorkspaceError("pending directory contains an unsafe entry")
         if stat.S_ISDIR(entry_info.st_mode) and not stat.S_ISLNK(entry_info.st_mode):
             target_ids.add(_validate_target_id(entry.name))
             continue
@@ -1581,7 +1591,9 @@ def _legacy_review_context(root: Path, target_id: str) -> dict[str, str]:
     return {"name": target_id, "url": "", "watch_focus": ""}
 
 
-def _legacy_pending_diff(state: Path, target_id: str, pending: Mapping[str, object]) -> str:
+def _legacy_pending_diff(
+    state: Path, target_id: str, pending: Mapping[str, object]
+) -> str:
     candidate_data = _read_text_bytes(_candidate_path(state, target_id), "candidate")
     candidate_sha256 = _validate_sha256(
         pending.get("candidate_sha256"), "candidate_sha256"
@@ -1599,8 +1611,8 @@ def _legacy_pending_diff(state: Path, target_id: str, pending: Mapping[str, obje
     result = monitor.compare_text(
         candidate_data.decode("utf-8"),
         snapshot.decode("utf-8"),
-        max_diff_lines=monitor._DEFAULT_MAX_DIFF_LINES,  # pyright: ignore[reportPrivateUsage]
-        max_diff_bytes=monitor._DEFAULT_MAX_DIFF_BYTES,  # pyright: ignore[reportPrivateUsage]
+        max_diff_lines=monitor._DEFAULT_MAX_DIFF_LINES,  # pyright: ignore[reportPrivateUsage]  # noqa: E501
+        max_diff_bytes=monitor._DEFAULT_MAX_DIFF_BYTES,  # pyright: ignore[reportPrivateUsage]  # noqa: E501
     )
     diff = result.get("diff")
     if not isinstance(diff, str):
@@ -1638,6 +1650,29 @@ def _pending_review(root: Path, state: Path, target_id: str) -> dict[str, object
     }
 
 
+def _pending_review_handle(
+    root: Path, state: Path, target_id: str
+) -> dict[str, object]:
+    pending = _read_pending(state, target_id)
+    context = (
+        {
+            "name": str(pending["name"]),
+            "url": str(pending["url"]),
+            "watch_focus": str(pending["watch_focus"]),
+        }
+        if _PENDING_REVIEW_FIELDS.issubset(pending)
+        else _legacy_review_context(root, target_id)
+    )
+    return _compact_review({
+        "action": "review",
+        "run_id": pending["run_id"],
+        "target_id": target_id,
+        "revision": pending["revision"],
+        **context,
+        "diff_truncated": pending["diff_truncated"],
+    })
+
+
 def pending_reviews(
     workspace: str | Path, *, target_id: str | None = None
 ) -> dict[str, object]:
@@ -1651,11 +1686,11 @@ def pending_reviews(
             raise WorkspaceError("no valid pending decision exists for target")
         return {"reviews": [_pending_review(root, state, target_id)]}
 
-    reviews = [
-        _compact_review(_pending_review(root, state, current))
-        for current in target_ids
-    ]
-    return {"reviews": reviews}
+    return {
+        "reviews": [
+            _pending_review_handle(root, state, current) for current in target_ids
+        ]
+    }
 
 
 def discard_pending(workspace: str | Path, target_id: str) -> dict[str, object]:
