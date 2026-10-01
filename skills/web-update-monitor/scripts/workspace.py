@@ -1718,29 +1718,15 @@ def _finalize_record_matches(
 
 def _finalized_result(root: Path, record: Mapping[str, object]) -> dict[str, object]:
     target_id = _validate_target_id(record.get("target_id"))
-    run_id = _validate_run_id(record.get("run_id"))
     material = record.get("material")
     result: dict[str, object] = {
         "action": "finalized",
-        "run_id": run_id,
         "target_id": target_id,
         "material": material,
     }
     if material is True:
+        run_id = _validate_run_id(record.get("run_id"))
         result["report_path"] = str(root / "reports" / f"{run_id}.md")
-    return result
-
-
-def _with_run_status(
-    state: Path, result: dict[str, object], run_id: str
-) -> dict[str, object]:
-    pending_for_run = 0
-    for target_id in _pending_target_ids(state):
-        pending = _read_pending(state, target_id)
-        if pending.get("run_id") == run_id:
-            pending_for_run += 1
-    result["pending_for_run"] = pending_for_run
-    result["run_complete"] = pending_for_run == 0
     return result
 
 
@@ -1760,8 +1746,7 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
             if not _finalize_record_matches(recovery, revision, material, report):
                 raise WorkspaceError("decision does not match pending cleanup")
             _complete_cleanup_record(state, recovery)
-            result = _finalized_result(root, recovery)
-            return _with_run_status(state, result, str(result["run_id"]))
+            return _finalized_result(root, recovery)
         _recover_pending(state, target_id)
     elif recovery is not None:
         _recover_pending(state, target_id)
@@ -1771,17 +1756,8 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
         raise WorkspaceError("pending decision target does not match")
     if pending["revision"] != revision:
         raise WorkspaceError("decision revision does not match pending review")
-    run_id = str(pending["run_id"])
     if pending["diff_truncated"] is True and not material:
-        return _with_run_status(
-            state,
-            {
-                "action": "manual_review_required",
-                "run_id": run_id,
-                "target_id": target_id,
-            },
-            run_id,
-        )
+        return {"action": "manual_review_required", "target_id": target_id}
 
     promoted = _promote_snapshot(
         state,
@@ -1790,15 +1766,7 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
         candidate_sha256=pending["candidate_sha256"],
     )
     if promoted.get("action") == "snapshot_conflict":
-        return _with_run_status(
-            state,
-            {
-                "action": "snapshot_conflict",
-                "run_id": run_id,
-                "target_id": target_id,
-            },
-            run_id,
-        )
+        return {"action": "snapshot_conflict", "target_id": target_id}
 
     report_path: str | None = None
     if report is not None:
@@ -1817,7 +1785,7 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
     result = _finalized_result(root, cleanup)
     if report_path is not None and result.get("report_path") != report_path:
         raise WorkspaceError("finalized report path mismatch")
-    return _with_run_status(state, result, run_id)
+    return result
 
 
 def _read_decision() -> Mapping[str, object]:
