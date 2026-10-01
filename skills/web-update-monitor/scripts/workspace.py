@@ -1462,14 +1462,24 @@ def _compact_review(review: Mapping[str, object]) -> dict[str, object]:
 def check(workspace: str | Path, *, compact: bool = False) -> dict[str, object]:
     """Check targets without refetching any target that already has a review."""
     root = _workspace(workspace)
+    targets = load_targets(root)
+    targets_by_id = {str(target["target_id"]): target for target in targets}
     existing = pending_reviews(root)
     existing_reviews = cast("list[dict[str, object]]", existing["reviews"])
-    pending_ids = {str(review["target_id"]) for review in existing_reviews}
+    retained_reviews: list[dict[str, object]] = []
+    pending_ids: set[str] = set()
+    for review in existing_reviews:
+        target_id = str(review["target_id"])
+        target = targets_by_id.get(target_id)
+        if target is None or target["action"] == "skip_disabled":
+            discard_pending(root, target_id)
+            continue
+        retained_reviews.append(review)
+        pending_ids.add(target_id)
 
-    targets = load_targets(root)
     state = _state_dir(root)
     run_id = _new_run_id()
-    outcomes: list[dict[str, object]] = list(existing_reviews)
+    outcomes: list[dict[str, object]] = list(retained_reviews)
     for target in targets:
         if str(target["target_id"]) in pending_ids:
             continue
