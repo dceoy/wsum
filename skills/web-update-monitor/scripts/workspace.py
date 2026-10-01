@@ -1721,6 +1721,7 @@ def discard_pending(workspace: str | Path, target_id: str) -> dict[str, object]:
     _prepare_pending_for_read(state, target_id)
     pending = _read_pending(state, target_id)
     run_id = str(pending["run_id"])
+    _recover_pending(state, target_id, revision=str(pending["revision"]))
     _discard_pending(state, target_id)
     return {
         "action": "discarded",
