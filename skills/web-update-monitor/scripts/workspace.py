@@ -1241,11 +1241,9 @@ def _recover_pending(
         if record.get("kind") != "replace":
             raise WorkspaceError("pending recovery records conflict")
         if revision is None:
-            if not _replacement_matches_commit(state, target_id, commit):
-                raise WorkspaceError("pending committed replacement is incomplete")
-            _retire_recovery_record(state, target_id)
-            _retire_commit_record(state, target_id)
-            return None
+            raise WorkspaceError(
+                "pending replacement recovery requires a decision revision"
+            )
         if revision == commit.get("revision"):
             if not _replacement_matches_commit(state, target_id, commit):
                 raise WorkspaceError("pending committed replacement is incomplete")
@@ -1681,6 +1679,22 @@ def _pending_review_handle(
     })
 
 
+def _prepare_pending_for_read(state: Path, target_id: str) -> None:
+    """Recover interrupted writes while preserving committed revision ambiguity."""
+    target_id = _validate_target_id(target_id)
+    record = _read_recovery_record(state, target_id)
+    commit = _read_commit_record(state, target_id)
+    if (
+        commit is not None
+        and record is not None
+        and record.get("kind") == "replace"
+    ):
+        if not _replacement_matches_commit(state, target_id, commit):
+            raise WorkspaceError("pending committed replacement is incomplete")
+        return
+    _recover_pending(state, target_id)
+
+
 def pending_reviews(
     workspace: str | Path, *, target_id: str | None = None
 ) -> dict[str, object]:
@@ -1689,7 +1703,7 @@ def pending_reviews(
     state = _state_dir(root)
     target_ids = _pending_target_ids(state)
     for pending_target_id in target_ids:
-        _recover_pending(state, pending_target_id)
+        _prepare_pending_for_read(state, pending_target_id)
     target_ids = _pending_target_ids(state)
     if target_id is not None:
         target_id = _validate_target_id(target_id)
@@ -1708,7 +1722,7 @@ def discard_pending(workspace: str | Path, target_id: str) -> dict[str, object]:
     """Discard one pending review so a conflicted target can be checked again."""
     root = _workspace(workspace)
     state = _state_dir(root)
-    _recover_pending(state, target_id)
+    _prepare_pending_for_read(state, target_id)
     pending = _read_pending(state, target_id)
     run_id = str(pending["run_id"])
     _discard_pending(state, target_id)
