@@ -930,8 +930,7 @@ def test_check_reuses_pending_target_and_fetches_other_targets(
 ) -> None:
     _write_targets(
         tmp_path / "targets.csv",
-        "Example,https://example.com/,pricing,true\n"
-        "Other,https://example.org/,,true\n",
+        "Example,https://example.com/,pricing,true\nOther,https://example.org/,,true\n",
     )
     targets = load_targets(tmp_path)
     target_id = str(targets[0]["target_id"])
@@ -1591,6 +1590,7 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
 
     pending.mkdir()
     if fault == "pending-stat":
+
         def fail_pending(path: Path) -> os.stat_result:
             if path == pending:
                 message = "injected"
@@ -1603,6 +1603,7 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
         return
 
     if fault == "list":
+
         def fail_list(path: Path) -> Any:  # ruff: ignore[any-type]
             if path == pending:
                 message = "injected"
@@ -1617,6 +1618,7 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
     entry = pending / (".orphan.tmp" if fault == "hidden-temp" else "unexpected.txt")
     entry.write_text("x", encoding="utf-8")
     if fault == "entry-stat":
+
         def fail_entry(path: Path) -> os.stat_result:
             if path == entry:
                 message = "injected"
@@ -2772,13 +2774,11 @@ def test_main_finalize_dispatches_decision(
     state = tmp_path / ".wsum"
     state.mkdir()
     _write_review_transaction(state, "grouped")
-    payload = json.dumps(
-        {
-            "target_id": "example",
-            "revision": "a" * 32,
-            "material": False,
-        }
-    )
+    payload = json.dumps({
+        "target_id": "example",
+        "revision": "a" * 32,
+        "material": False,
+    })
     monkeypatch.setattr(
         workspace.sys,
         "stdin",
