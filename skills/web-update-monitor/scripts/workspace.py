@@ -1684,11 +1684,7 @@ def _prepare_pending_for_read(state: Path, target_id: str) -> None:
     target_id = _validate_target_id(target_id)
     record = _read_recovery_record(state, target_id)
     commit = _read_commit_record(state, target_id)
-    if (
-        commit is not None
-        and record is not None
-        and record.get("kind") == "replace"
-    ):
+    if commit is not None and record is not None and record.get("kind") == "replace":
         if not _replacement_matches_commit(state, target_id, commit):
             raise WorkspaceError("pending committed replacement is incomplete")
         return
