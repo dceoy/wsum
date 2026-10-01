@@ -4,7 +4,7 @@ Local-first Agent Skills for detecting meaningful updates on public websites and
 
 The core skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
 
-A thin composite integration skill lives in `skills/web-update-monitor-google-workspace/`. It keeps the core monitor unchanged while using Google Sheets as the target source and Google Drive for cross-run state, recovery journals, and report delivery in runtimes with Google Workspace connectors.
+A thin composite integration skill lives in `skills/web-update-monitor-google-workspace/`. It keeps Google-specific orchestration outside the core while using Google Sheets as the target source and Google Drive for cross-run state and report delivery.
 
 ## Agent Skills
 
@@ -17,22 +17,22 @@ To install the core skill in an Agent Skills-compatible runtime, use the `web-up
 
 ### Google Workspace composition
 
-The Google Workspace composite keeps a one-way integration boundary:
-
-```text
-Google Drive state folder -> .wsum/ + run journals + durable outbox
-                                      |
-Google Sheet -> targets.csv -> web-update-monitor
-                                      |
-                                      +-> .wsum/
-                                      +-> reports/<run-id>.md -> durable outbox
-                                                                |
-                                                                +-> Google Drive reports
+```mermaid
+flowchart LR
+    GS["Google Sheet"] --> CSV["targets.csv"]
+    DS["Google Drive state"] <-->|sync| STATE[".wsum/"]
+    CSV --> CORE["web-update-monitor"]
+    STATE --> CORE
+    CORE --> STATE
+    CORE --> REPORT["reports/<run-id>.md"]
+    OUT["durable outbox"] --> REPORT
+    REPORT --> OUT
+    OUT --> DR["Google Drive reports"]
 ```
 
-The Spreadsheet is authoritative for target configuration, while `targets.csv` is a generated adapter artifact. Claude Code Routines may run in fresh cloud sessions, so the composite mirrors regular UTF-8 state files into a dedicated Drive state folder instead of relying on a binary archive. A composite-owned run journal persists every `check` review payload and original revision before finalization; on restart, the journal is resumed before any fresh `check`. Existing outbox content is first restored to `reports/<run-id>.md` so later material finalizations continue the same run-level report instead of replacing earlier sections. The durable outbox is removed only after idempotent report upload is confirmed.
+The core now exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded diff on demand, and a target with an existing pending review is not refetched. The Google Workspace composite therefore persists the core `.wsum/` state directly instead of duplicating review metadata in an adapter-owned journal. A small durable report outbox remains adapter-owned because Drive delivery is external to the core transaction.
 
-Read `skills/web-update-monitor-google-workspace/SKILL.md` for the complete connector orchestration and failure semantics.
+Read `skills/web-update-monitor-google-workspace/SKILL.md` for connector orchestration and recovery semantics.
 
 ## Workspace
 
@@ -91,14 +91,19 @@ Read `skills/web-update-monitor/SKILL.md` for the complete core procedure. At a 
 
 ## Deterministic workspace facade
 
-For development or direct invocation, run:
+For development or agent orchestration, run:
 
 ```bash
 python skills/web-update-monitor/scripts/workspace.py \
-  --workspace /path/to/workspace check
+  --workspace /path/to/workspace check --compact
 ```
 
-The facade validates the complete CSV before fetching any target. It automatically handles first baselines, unchanged snapshots, disabled rows, and per-target failures. Changed targets are returned to the agent for semantic review.
+The compact form keeps batch output small. Existing pending targets are returned as review handles without refetching, while unrelated targets continue normally. Fetch one pending review's bounded diff on demand:
+
+```bash
+python skills/web-update-monitor/scripts/workspace.py \
+  --workspace /path/to/workspace pending --target-id <target-id>
+```
 
 After the agent decides whether a change is material, it passes an internal decision to:
 
