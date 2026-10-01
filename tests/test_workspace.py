@@ -1487,6 +1487,29 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
     assert full["diff"] == _changed_result()["diff"]
 
 
+def test_pending_reviews_recovers_partial_replacement_before_listing(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    pending = state / "pending"
+    pending.mkdir()
+    workspace._write_recovery_record(  # pyright: ignore[reportPrivateUsage]
+        state,
+        _replace_record(),
+    )
+    group = pending / "example"
+    group.mkdir()
+    (group / "candidate.txt").write_text("partial\n", encoding="utf-8")
+
+    assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+    assert not group.exists()
+    assert workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
+        state,
+        "example",
+    ) is None
+
+
 def test_pending_reviews_legacy_reconstructs_diff_and_context(tmp_path: Path) -> None:
     _write_targets(
         tmp_path / "targets.csv", "Example,https://example.com/,pricing,true\n"
@@ -3902,11 +3925,11 @@ def test_recover_pending_completes_noncommit_recovery_records(
 @pytest.mark.parametrize(
     ("case", "revision", "expected"),
     [
-        ("no-revision", None, "decision revision"),
+        ("no-revision", None, "committed replacement is incomplete"),
         ("wrong-revision", "c" * 32, "does not match pending replacement"),
         ("committed-incomplete", _REVISION, "committed replacement is incomplete"),
     ],
-    ids=["requires-revision", "wrong-revision", "incomplete-commit"],
+    ids=["incomplete-without-revision", "wrong-revision", "incomplete-commit"],
 )
 def test_recover_pending_rejects_unresolvable_commit_states(
     tmp_path: Path, case: str, revision: str | None, expected: str
@@ -3920,6 +3943,32 @@ def test_recover_pending_rejects_unresolvable_commit_states(
         revision = _REVISION
     with pytest.raises(WorkspaceError, match=expected):
         workspace._recover_pending(state, "example", revision=revision)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_recover_pending_accepts_committed_replacement_without_revision(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_recovery(state, _replace_record())
+    _write_commit(state)
+    data = b"new candidate"
+    payload = _pending_payload(candidate_sha256=hashlib.sha256(data).hexdigest())
+    group = _grouped_pending(state, payload, data)
+
+    assert workspace._recover_pending(  # pyright: ignore[reportPrivateUsage]
+        state,
+        "example",
+    ) is None
+    assert group.joinpath("candidate.txt").read_bytes() == data
+    assert workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
+        state,
+        "example",
+    ) is None
+    assert workspace._read_commit_record(  # pyright: ignore[reportPrivateUsage]
+        state,
+        "example",
+    ) is None
 
 
 @pytest.mark.parametrize(
