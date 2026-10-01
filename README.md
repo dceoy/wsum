@@ -4,14 +4,14 @@ Local-first Agent Skills for detecting meaningful updates on public websites and
 
 The core skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
 
-A thin composite integration skill lives in `skills/web-update-monitor-google-workspace/`. It keeps Google-specific orchestration outside the core while using Google Sheets as the target source and Google Drive for cross-run state and report delivery.
+A thin composite integration skill lives in `skills/web-update-monitor-google-workspace/`. It keeps Google-specific orchestration outside the core while using Google Sheets as the target source, Google Drive for cross-run state, and Google Docs for completed report delivery.
 
 ## Agent Skills
 
 The repository ships these canonical skills:
 
 - `skills/web-update-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
-- `skills/web-update-monitor-google-workspace/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract and delivers finalized reports to Google Drive.
+- `skills/web-update-monitor-google-workspace/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract, persists core state in Drive, and publishes completed runs as Google Docs.
 
 To install the core skill in an Agent Skills-compatible runtime, use the `web-update-monitor` package from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain). To use the Google Workspace composite, install **both** `web-update-monitor` and `web-update-monitor-google-workspace`; the composite package intentionally delegates to the core package instead of duplicating its runtime helpers.
 
@@ -25,12 +25,15 @@ flowchart LR
     STATE --> CORE
     CORE --> STATE
     CORE --> REPORT["reports/<run-id>.md"]
-    OUT["durable outbox"] --> REPORT
-    REPORT --> OUT
-    OUT --> DR["Google Drive reports"]
+    OUT["durable Markdown outbox"] -->|restore| REPORT
+    REPORT -->|stage| OUT
+    OUT -->|run complete| GDOC["Google Doc"]
+    GDOC --> DR["Google Drive report folder"]
 ```
 
-The core now exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded diff on demand, and a target with an existing pending review is not refetched. The Google Workspace composite therefore persists the core `.wsum/` state directly instead of duplicating review metadata in an adapter-owned journal. A small durable report outbox remains adapter-owned because Drive delivery is external to the core transaction.
+The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded diff on demand, and a target with an existing pending review is not refetched. The Google Workspace composite therefore persists the core `.wsum/` state directly instead of duplicating review metadata in an adapter-owned journal.
+
+Markdown remains the canonical core report and durable outbox format. The composite waits until a run has no pending reviews, then creates or updates one Google Doc named `Web Update Report — <run-id>` in the configured report folder. Exact-title lookup makes retries converge on the same Doc instead of creating duplicates.
 
 Read `skills/web-update-monitor-google-workspace/SKILL.md` for connector orchestration and recovery semantics.
 
