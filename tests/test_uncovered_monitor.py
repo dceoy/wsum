@@ -1,6 +1,6 @@
-# pyright: reportPrivateUsage=false, reportUnknownLambdaType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportGeneralTypeIssues=false
-
 """Focused boundary tests for monitor branches not reached by the main workflows."""
+
+# pyright: reportPrivateUsage=false
 
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ def test_public_url_rejects_control_characters_in_parsed_host(
         fragment="",
         query="",
     )
-    monkeypatch.setattr(monitor, "urlsplit", lambda _url: parsed)
+    monkeypatch.setattr(monitor, "urlsplit", lambda _url: parsed)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     with pytest.raises(MonitorError, match="host contains control characters"):
         monitor._resolve_public_url("http://example.com/")  # pyright: ignore[reportPrivateUsage]
 
@@ -318,11 +318,11 @@ def test_tls_handshake_retries_and_enforces_deadline(
 
     monkeypatch.setattr(monitor.select, "select", select)
     if readiness:
-        monitor._do_handshake_with_deadline(fake, monitor.monotonic() + 2)  # pyright: ignore[reportPrivateUsage]
+        monitor._do_handshake_with_deadline(fake, monitor.monotonic() + 2)  # pyright: ignore[reportArgumentType, reportPrivateUsage]
         assert fake.calls == 2
     else:
         with pytest.raises(TimeoutError, match=message):
-            monitor._do_handshake_with_deadline(fake, monitor.monotonic() + 2)  # pyright: ignore[reportPrivateUsage]
+            monitor._do_handshake_with_deadline(fake, monitor.monotonic() + 2)  # pyright: ignore[reportArgumentType, reportPrivateUsage]
         assert fake.calls == 1
     assert fake.blocking is False
     assert fake.timeout == 3.0
@@ -342,7 +342,7 @@ def test_wrap_tls_rejects_unguarded_socket(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(monitor, "_DeadlineSSLSocket", Guarded)
     monkeypatch.setattr(monitor.ssl, "create_default_context", Context)
     with pytest.raises(MonitorError, match="unguarded socket"):
-        monitor._wrap_tls(object(), "example.com", monitor.monotonic() + 1)  # pyright: ignore[reportPrivateUsage]
+        monitor._wrap_tls(object(), "example.com", monitor.monotonic() + 1)  # pyright: ignore[reportArgumentType, reportPrivateUsage]
 
 
 @pytest.mark.parametrize(
@@ -422,7 +422,7 @@ def test_request_target_rejects_control_characters(
     monkeypatch.setattr(
         monitor,
         "urlsplit",
-        lambda _value: type("Parts", (), {"path": "/bad\r\npath", "query": ""})(),
+        lambda _value: type("Parts", (), {"path": "/bad\r\npath", "query": ""})(),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     with pytest.raises(MonitorError, match="control characters"):
         monitor._request_target("http://example.com/")  # pyright: ignore[reportPrivateUsage]
@@ -446,11 +446,11 @@ def test_response_validation_rejects_unsafe_responses(
         (),
         {
             "status": status,
-            "getheader": lambda _self, name, default=None: headers.get(name, default),
+            "getheader": lambda _self, name, default=None: headers.get(name, default),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
         },
     )()
     with pytest.raises(MonitorError, match=message):
-        monitor._validate_response(response, max_bytes=10)  # pyright: ignore[reportPrivateUsage]
+        monitor._validate_response(response, max_bytes=10)  # pyright: ignore[reportArgumentType, reportPrivateUsage]
 
 
 def test_read_response_supports_read_fallback_closed_response_and_deadline(
@@ -476,7 +476,7 @@ def test_read_response_supports_read_fallback_closed_response_and_deadline(
     monkeypatch.setattr(monitor, "monotonic", lambda: 10.0)
     assert (
         monitor._read_response_limited(  # pyright: ignore[reportPrivateUsage]
-            Reader(), 10, deadline=12.0, sock=transport
+            Reader(), 10, deadline=12.0, sock=transport  # pyright: ignore[reportArgumentType]
         )
         == b"abc"
     )
@@ -759,7 +759,7 @@ def test_resolver_pool_covers_started_capacity_and_wait_deadlines(
 
     pool = monitor._ResolverPool(1)  # pyright: ignore[reportPrivateUsage]
     monkeypatch.setattr(pool, "_ensure_started", lambda: None)
-    monkeypatch.setattr(pool._capacity, "acquire", lambda **_kwargs: False)
+    monkeypatch.setattr(pool._capacity, "acquire", lambda **_kwargs: False)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     with pytest.raises(TimeoutError, match="DNS resolution"):
         pool.resolve(lambda: 1, (), {}, 1.0)
 
@@ -767,12 +767,12 @@ def test_resolver_pool_covers_started_capacity_and_wait_deadlines(
 
     class RacingLock:
         def __enter__(self) -> None:
-            pool._workers.append(object())
+            pool._workers.append(object())  # pyright: ignore[reportArgumentType]
 
         def __exit__(self, *_args: object) -> None:
             pass
 
-    pool._start_lock = RacingLock()  # pyright: ignore[reportPrivateUsage]
+    pool._start_lock = RacingLock()  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
     pool._ensure_started()  # pyright: ignore[reportPrivateUsage]
 
     class FakeCapacity:
@@ -848,12 +848,12 @@ def test_credential_scanners_fail_closed_after_decode_limits(
 ) -> None:
     original_query_check = monitor._query_has_credentials
     monkeypatch.setattr(
-        monitor, "_query_has_credentials", lambda *_args, **_kwargs: False
+        monitor, "_query_has_credentials", lambda *_args, **_kwargs: False  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
-    monkeypatch.setattr(monitor, "unquote", lambda value: value + "x")
+    monkeypatch.setattr(monitor, "unquote", lambda value: value + "x")  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     assert monitor._nested_url_has_credentials("plain", depth=0)  # pyright: ignore[reportPrivateUsage]
     monkeypatch.setattr(monitor, "_query_has_credentials", original_query_check)
-    monkeypatch.setattr(monitor, "parse_qsl", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(monitor, "parse_qsl", lambda *_args, **_kwargs: [])  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     assert monitor._query_has_credentials("safe=1", depth=0)  # pyright: ignore[reportPrivateUsage]
 
 
@@ -865,7 +865,7 @@ def test_nested_url_rejects_invalid_host_property(
         def hostname(self) -> str:
             raise ValueError("invalid host")
 
-    monkeypatch.setattr(monitor, "urlsplit", lambda _value: Parsed())
+    monkeypatch.setattr(monitor, "urlsplit", lambda _value: Parsed())  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     assert monitor._nested_url_has_credentials("value", depth=0)  # pyright: ignore[reportPrivateUsage]
 
 
@@ -882,7 +882,7 @@ def test_public_url_rejects_host_controls_and_invalid_dns_results(
         query = ""
         path = "/"
 
-    monkeypatch.setattr(monitor, "urlsplit", lambda _value: Parsed())
+    monkeypatch.setattr(monitor, "urlsplit", lambda _value: Parsed())  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     with pytest.raises(MonitorError, match="control characters"):
         monitor._resolve_public_url("http://anything/")  # pyright: ignore[reportPrivateUsage]
 
@@ -890,7 +890,7 @@ def test_public_url_rejects_host_controls_and_invalid_dns_results(
     monkeypatch.setattr(
         monitor.socket,
         "getaddrinfo",
-        lambda *_args: [(0, 0, 0, "", ("not-an-ip", 80))],
+        lambda *_args: [(0, 0, 0, "", ("not-an-ip", 80))],  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     with pytest.raises(MonitorError, match="invalid address"):
         monitor._resolve_addresses("example.com", 80, None)  # pyright: ignore[reportPrivateUsage]
@@ -953,11 +953,11 @@ def test_wrap_tls_sets_deadline_and_runs_guarded_handshake(
     monkeypatch.setattr(monitor, "_DeadlineSSLSocket", Guarded)
     monkeypatch.setattr(monitor.ssl, "create_default_context", lambda: context)
     monkeypatch.setattr(
-        monitor, "_do_handshake_with_deadline", lambda _sock, _deadline: None
+        monitor, "_do_handshake_with_deadline", lambda _sock, _deadline: None  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
-    result = monitor._wrap_tls(object(), "example.com", deadline)  # pyright: ignore[reportPrivateUsage]
+    result = monitor._wrap_tls(object(), "example.com", deadline)  # pyright: ignore[reportArgumentType, reportPrivateUsage]
     assert result is context.wrapped
-    assert result.deadline == deadline
+    assert result.deadline == deadline  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
 
 
 @pytest.mark.parametrize("failure", ["tls", "http"], ids=["tls-error", "http-error"])
@@ -972,13 +972,13 @@ def test_open_connection_closes_socket_after_post_connect_errors(
 
     raw = FakeSocket()
     monkeypatch.setattr(
-        monitor, "_connect_pinned_socket", lambda *_args, **_kwargs: raw
+        monitor, "_connect_pinned_socket", lambda *_args, **_kwargs: raw  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     if failure == "tls":
         monkeypatch.setattr(
             monitor,
             "_wrap_tls",
-            lambda *_args: (_ for _ in ()).throw(MonitorError("TLS rejected")),
+            lambda *_args: (_ for _ in ()).throw(MonitorError("TLS rejected")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
         )
         target = monitor._ResolvedTarget(  # pyright: ignore[reportPrivateUsage]
             "https://example.com", "https", "example.com", 443, ("93.184.216.34",)
@@ -1015,7 +1015,7 @@ def test_open_response_closes_connection_when_request_fails(
 
     connection = Connection()
     monkeypatch.setattr(
-        monitor, "_open_connection", lambda *_args, **_kwargs: connection
+        monitor, "_open_connection", lambda *_args, **_kwargs: connection  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     target = monitor._ResolvedTarget(
         "http://example.com", "http", "example.com", 80, ()
@@ -1051,7 +1051,7 @@ def test_redirect_validation_rejects_missing_location_or_excess(
         message = "Location"
     with pytest.raises(MonitorError, match=message):
         monitor._redirect_target(  # pyright: ignore[reportPrivateUsage]
-            Redirect(), target, redirect_count, monitor.monotonic() + 1
+            Redirect(), target, redirect_count, monitor.monotonic() + 1  # pyright: ignore[reportArgumentType]
         )
 
 
@@ -1065,18 +1065,18 @@ def test_fetch_document_validates_limits_wraps_io_errors_and_stops_redirects(
         "http://example.com", "http", "example.com", 80, ()
     )
     monkeypatch.setattr(
-        monitor, "_resolve_public_url", lambda *_args, **_kwargs: target
+        monitor, "_resolve_public_url", lambda *_args, **_kwargs: target  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     monkeypatch.setattr(
         monitor,
         "_fetch_once",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("network down")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("network down")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     with pytest.raises(MonitorError, match="fetch failed: OSError"):
         monitor.fetch_document("http://example.com/", timeout=1, max_bytes=10)
 
     monkeypatch.setattr(monitor, "_DEFAULT_MAX_REDIRECTS", 0)
-    monkeypatch.setattr(monitor, "_fetch_once", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(monitor, "_fetch_once", lambda *_args, **_kwargs: target)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     with pytest.raises(MonitorError, match="maximum redirects"):
         monitor.fetch_document("http://example.com/", timeout=1, max_bytes=10)
 
@@ -1187,7 +1187,7 @@ def test_feed_parser_rejects_non_string_parser_result(
         def close(self) -> object:
             return object()
 
-    monkeypatch.setattr(monitor.ET, "XMLParser", lambda **_kwargs: Parser())
+    monkeypatch.setattr(monitor.ET, "XMLParser", lambda **_kwargs: Parser())  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     with pytest.raises(MonitorError, match="invalid result"):
         monitor._normalize_feed(  # pyright: ignore[reportPrivateUsage]
             "<root/>",
@@ -1225,7 +1225,7 @@ def test_pdf_value_and_page_tree_helpers_cover_tuple_and_limits(
     assert monitor._pdf_values((1, 2)) == [1, 2]  # pyright: ignore[reportPrivateUsage]
     assert monitor._pdf_values(None) == []  # pyright: ignore[reportPrivateUsage]
     monkeypatch.setattr(monitor, "_DEFAULT_MAX_PDF_PAGES", 1)
-    pages = {"/Count": 0, "/Kids": [{}, {}]}
+    pages = {"/Count": 0, "/Kids": [{}, {}]}  # pyright: ignore[reportUnknownVariableType]
     reader = type("Reader", (), {"trailer": {"/Root": {"/Pages": pages}}})()
     with pytest.raises(MonitorError, match="page count"):
         monitor._preflight_pdf_pages(reader)  # pyright: ignore[reportPrivateUsage]
@@ -1240,8 +1240,8 @@ def test_pdf_value_and_page_tree_helpers_cover_tuple_and_limits(
 
 
 def test_pdf_form_xobject_traversal_covers_mapping_and_duplicate_forms() -> None:
-    nested = {"/Subtype": "/Form", "/Resources": {"/XObject": {}}}
-    resources = {
+    nested = {"/Subtype": "/Form", "/Resources": {"/XObject": {}}}  # pyright: ignore[reportUnknownVariableType]
+    resources = {  # pyright: ignore[reportUnknownVariableType]
         "/XObject": {
             "/first": nested,
             "/same": nested,
@@ -1439,7 +1439,7 @@ def test_pdf_encryption_and_materialized_page_count_are_bounded(
     output = BytesIO()
     writer.write(output)
     monkeypatch.setattr(monitor, "_DEFAULT_MAX_PDF_PAGES", 1)
-    monkeypatch.setattr(monitor, "_preflight_pdf_pages", lambda _reader: [0])
+    monkeypatch.setattr(monitor, "_preflight_pdf_pages", lambda _reader: [0])  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     with pytest.raises(MonitorError, match="page count"):
         monitor._normalize_pdf_content(  # pyright: ignore[reportPrivateUsage]
             output.getvalue(), max_decompressed_bytes=1_000, max_extracted_chars=1_000
@@ -1472,7 +1472,7 @@ def test_run_rejects_empty_and_oversized_normalized_content(
     source = tmp_path / "source.txt"
     source.write_text("source", encoding="utf-8")
     text = "" if failure == "empty" else "x" * (monitor._DEFAULT_MAX_SNAPSHOT_BYTES + 1)
-    monkeypatch.setattr(monitor, "normalize_document", lambda *_args, **_kwargs: text)
+    monkeypatch.setattr(monitor, "normalize_document", lambda *_args, **_kwargs: text)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     args = monitor._parser().parse_args(["--input", str(source)])
     message = "empty content" if failure == "empty" else "size limit"
     with pytest.raises(MonitorError, match=message):
@@ -1512,7 +1512,7 @@ def test_monitor_cli_success_failure_and_module_entrypoint(
     assert '"status": "baseline"' in capsys.readouterr().out
 
     monkeypatch.setattr(
-        monitor, "run", lambda _args: (_ for _ in ()).throw(MonitorError("failed"))
+        monitor, "run", lambda _args: (_ for _ in ()).throw(MonitorError("failed"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     assert monitor.main(["--input", str(source)]) == 1
     assert '"error": "failed"' in capsys.readouterr().err

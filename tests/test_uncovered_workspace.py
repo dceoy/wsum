@@ -1,6 +1,6 @@
-# pyright: reportPrivateUsage=false, reportUnknownLambdaType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportGeneralTypeIssues=false
-
 """Boundary and fault-injection tests for workspace persistence helpers."""
+
+# pyright: reportPrivateUsage=false
 
 from __future__ import annotations
 
@@ -138,7 +138,7 @@ def test_ensure_directory_wraps_filesystem_failures(
         monkeypatch.setattr(
             workspace,
             "_fsync_directory",
-            lambda _target: (_ for _ in ()).throw(OSError("sync failed")),
+            lambda _target: (_ for _ in ()).throw(OSError("sync failed")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
         )
     else:
         original_lstat = Path.lstat
@@ -207,7 +207,7 @@ def test_target_id_falls_back_for_malformed_urlsplit(
     monkeypatch.setattr(
         workspace,
         "urlsplit",
-        lambda _url: (_ for _ in ()).throw(ValueError("bad URL")),
+        lambda _url: (_ for _ in ()).throw(ValueError("bad URL")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     target_id = workspace._target_id("not-a-url")  # pyright: ignore[reportPrivateUsage]
     assert target_id.startswith("target-")
@@ -226,10 +226,10 @@ def test_target_id_falls_back_for_malformed_urlsplit(
 def test_identifier_validators_reject_malformed_values(
     value: object, validator: str, message: str
 ) -> None:
-    function = {
+    function = {  # pyright: ignore[reportUnknownVariableType]
         "target": workspace._validate_target_id,
         "run": workspace._validate_run_id,
-        "sha": lambda item: workspace._validate_sha256(item, "digest"),
+        "sha": lambda item: workspace._validate_sha256(item, "digest"),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     }[validator]
     with pytest.raises(WorkspaceError, match=message):
         function(value)  # pyright: ignore[reportPrivateUsage]
@@ -279,17 +279,17 @@ def test_pending_path_resolver_selects_layout_or_creates_grouped(
         assert metadata == pending / "example" / "state.json"
         assert candidate == pending / "example" / "candidate.txt"
     else:
-        metadata, candidate, found = workspace._existing_pending_paths(  # pyright: ignore[reportPrivateUsage]
+        metadata, candidate, found = workspace._existing_pending_paths(  # pyright: ignore[reportGeneralTypeIssues, reportPrivateUsage, reportUnknownVariableType]
             state, "example"
         )
         assert found == layout
-        assert metadata.name == (
+        assert metadata.name == (  # pyright: ignore[reportUnknownMemberType]
             "state.json" if layout == "grouped" else "example.json"
         )
         assert (
-            candidate.name == "candidate.txt"
+            candidate.name == "candidate.txt"  # pyright: ignore[reportUnknownMemberType]
             if layout == "grouped"
-            else candidate.name == "example.txt"
+            else candidate.name == "example.txt"  # pyright: ignore[reportUnknownMemberType]
         )
 
 
@@ -504,7 +504,7 @@ def test_retire_recovery_record_ignores_unlink_errors_when_requested(
     path.write_text(json.dumps(_replace_record()), encoding="utf-8")
     path.chmod(0o600)
     monkeypatch.setattr(
-        Path, "unlink", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("busy"))
+        Path, "unlink", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("busy"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     workspace._retire_recovery_record(  # pyright: ignore[reportPrivateUsage]
         state, "example", ignore_errors=True
@@ -580,7 +580,7 @@ def test_read_decision_rejects_invalid_stdin(
     monkeypatch: pytest.MonkeyPatch, payload: str
 ) -> None:
     monkeypatch.setattr(
-        workspace.sys, "stdin", type("Input", (), {"read": lambda _self: payload})()
+        workspace.sys, "stdin", type("Input", (), {"read": lambda _self: payload})()  # pyright: ignore[reportUnknownLambdaType]
     )
     with pytest.raises(WorkspaceError, match="stdin|object"):
         workspace._read_decision()  # pyright: ignore[reportPrivateUsage]
