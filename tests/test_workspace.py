@@ -3928,11 +3928,11 @@ def test_recover_pending_completes_noncommit_recovery_records(
 @pytest.mark.parametrize(
     ("case", "revision", "expected"),
     [
-        ("no-revision", None, "committed replacement is incomplete"),
+        ("no-revision", None, "decision revision"),
         ("wrong-revision", "c" * 32, "does not match pending replacement"),
         ("committed-incomplete", _REVISION, "committed replacement is incomplete"),
     ],
-    ids=["incomplete-without-revision", "wrong-revision", "incomplete-commit"],
+    ids=["requires-revision", "wrong-revision", "incomplete-commit"],
 )
 def test_recover_pending_rejects_unresolvable_commit_states(
     tmp_path: Path, case: str, revision: str | None, expected: str
@@ -3948,7 +3948,7 @@ def test_recover_pending_rejects_unresolvable_commit_states(
         workspace._recover_pending(state, "example", revision=revision)  # pyright: ignore[reportPrivateUsage]
 
 
-def test_recover_pending_accepts_committed_replacement_without_revision(
+def test_prepare_pending_for_read_preserves_complete_committed_replacement(
     tmp_path: Path,
 ) -> None:
     state = tmp_path / ".wsum"
@@ -3959,28 +3959,36 @@ def test_recover_pending_accepts_committed_replacement_without_revision(
     payload = _pending_payload(candidate_sha256=hashlib.sha256(data).hexdigest())
     group = _grouped_pending(state, payload, data)
 
-    assert (
-        workspace._recover_pending(  # pyright: ignore[reportPrivateUsage]
-            state,
-            "example",
-        )
-        is None
+    workspace._prepare_pending_for_read(  # pyright: ignore[reportPrivateUsage]
+        state,
+        "example",
     )
+
     assert group.joinpath("candidate.txt").read_bytes() == data
-    assert (
-        workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
+    assert workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
+        state,
+        "example",
+    ) is not None
+    assert workspace._read_commit_record(  # pyright: ignore[reportPrivateUsage]
+        state,
+        "example",
+    ) is not None
+
+
+def test_prepare_pending_for_read_rejects_incomplete_committed_replacement(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    (state / "pending").mkdir()
+    _write_recovery(state, _replace_record())
+    _write_commit(state)
+
+    with pytest.raises(WorkspaceError, match="committed replacement is incomplete"):
+        workspace._prepare_pending_for_read(  # pyright: ignore[reportPrivateUsage]
             state,
             "example",
         )
-        is None
-    )
-    assert (
-        workspace._read_commit_record(  # pyright: ignore[reportPrivateUsage]
-            state,
-            "example",
-        )
-        is None
-    )
 
 
 @pytest.mark.parametrize(
