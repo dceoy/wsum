@@ -127,7 +127,6 @@ ignore = [
   "assert",    # assert is expected in pytest
   "private-member-access",  # private helper access is intentional in tests
 ]
-
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
@@ -136,7 +135,12 @@ max-args = 10
 max-public-methods = 40
 
 [tool.pyright]
-exclude = ["build", ".venv", ".agents", ".claude"]
+exclude = [
+  "build",
+  ".venv",
+  ".agents",
+  ".claude",
+]
 extraPaths = ["skills/web-update-monitor/scripts"]
 venvPath = "."
 venv = ".venv"
@@ -157,5 +161,5 @@ source = ["skills/web-update-monitor/scripts"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 79
+fail_under = 100
 exclude_lines = ["if TYPE_CHECKING:"]
