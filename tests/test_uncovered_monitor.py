@@ -476,7 +476,10 @@ def test_read_response_supports_read_fallback_closed_response_and_deadline(
     monkeypatch.setattr(monitor, "monotonic", lambda: 10.0)
     assert (
         monitor._read_response_limited(  # pyright: ignore[reportPrivateUsage]
-            Reader(), 10, deadline=12.0, sock=transport  # pyright: ignore[reportArgumentType]
+            Reader(),
+            10,
+            deadline=12.0,
+            sock=transport,  # pyright: ignore[reportArgumentType]
         )
         == b"abc"
     )
@@ -848,7 +851,9 @@ def test_credential_scanners_fail_closed_after_decode_limits(
 ) -> None:
     original_query_check = monitor._query_has_credentials
     monkeypatch.setattr(
-        monitor, "_query_has_credentials", lambda *_args, **_kwargs: False  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        monitor,
+        "_query_has_credentials",
+        lambda *_args, **_kwargs: False,  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     monkeypatch.setattr(monitor, "unquote", lambda value: value + "x")  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     assert monitor._nested_url_has_credentials("plain", depth=0)  # pyright: ignore[reportPrivateUsage]
@@ -953,7 +958,9 @@ def test_wrap_tls_sets_deadline_and_runs_guarded_handshake(
     monkeypatch.setattr(monitor, "_DeadlineSSLSocket", Guarded)
     monkeypatch.setattr(monitor.ssl, "create_default_context", lambda: context)
     monkeypatch.setattr(
-        monitor, "_do_handshake_with_deadline", lambda _sock, _deadline: None  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        monitor,
+        "_do_handshake_with_deadline",
+        lambda _sock, _deadline: None,  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     result = monitor._wrap_tls(object(), "example.com", deadline)  # pyright: ignore[reportArgumentType, reportPrivateUsage]
     assert result is context.wrapped
@@ -972,7 +979,9 @@ def test_open_connection_closes_socket_after_post_connect_errors(
 
     raw = FakeSocket()
     monkeypatch.setattr(
-        monitor, "_connect_pinned_socket", lambda *_args, **_kwargs: raw  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        monitor,
+        "_connect_pinned_socket",
+        lambda *_args, **_kwargs: raw,  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     if failure == "tls":
         monkeypatch.setattr(
@@ -1015,7 +1024,9 @@ def test_open_response_closes_connection_when_request_fails(
 
     connection = Connection()
     monkeypatch.setattr(
-        monitor, "_open_connection", lambda *_args, **_kwargs: connection  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        monitor,
+        "_open_connection",
+        lambda *_args, **_kwargs: connection,  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     target = monitor._ResolvedTarget(
         "http://example.com", "http", "example.com", 80, ()
@@ -1051,7 +1062,10 @@ def test_redirect_validation_rejects_missing_location_or_excess(
         message = "Location"
     with pytest.raises(MonitorError, match=message):
         monitor._redirect_target(  # pyright: ignore[reportPrivateUsage]
-            Redirect(), target, redirect_count, monitor.monotonic() + 1  # pyright: ignore[reportArgumentType]
+            Redirect(),  # pyright: ignore[reportArgumentType]
+            target,
+            redirect_count,
+            monitor.monotonic() + 1,
         )
 
 
@@ -1065,7 +1079,9 @@ def test_fetch_document_validates_limits_wraps_io_errors_and_stops_redirects(
         "http://example.com", "http", "example.com", 80, ()
     )
     monkeypatch.setattr(
-        monitor, "_resolve_public_url", lambda *_args, **_kwargs: target  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        monitor,
+        "_resolve_public_url",
+        lambda *_args, **_kwargs: target,  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     monkeypatch.setattr(
         monitor,
@@ -1512,7 +1528,9 @@ def test_monitor_cli_success_failure_and_module_entrypoint(
     assert '"status": "baseline"' in capsys.readouterr().out
 
     monkeypatch.setattr(
-        monitor, "run", lambda _args: (_ for _ in ()).throw(MonitorError("failed"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        monitor,
+        "run",
+        lambda _args: (_ for _ in ()).throw(MonitorError("failed")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     assert monitor.main(["--input", str(source)]) == 1
     assert '"error": "failed"' in capsys.readouterr().err

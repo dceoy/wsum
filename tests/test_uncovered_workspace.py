@@ -504,7 +504,9 @@ def test_retire_recovery_record_ignores_unlink_errors_when_requested(
     path.write_text(json.dumps(_replace_record()), encoding="utf-8")
     path.chmod(0o600)
     monkeypatch.setattr(
-        Path, "unlink", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("busy"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        Path,
+        "unlink",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("busy")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     workspace._retire_recovery_record(  # pyright: ignore[reportPrivateUsage]
         state, "example", ignore_errors=True
@@ -580,7 +582,9 @@ def test_read_decision_rejects_invalid_stdin(
     monkeypatch: pytest.MonkeyPatch, payload: str
 ) -> None:
     monkeypatch.setattr(
-        workspace.sys, "stdin", type("Input", (), {"read": lambda _self: payload})()  # pyright: ignore[reportUnknownLambdaType]
+        workspace.sys,
+        "stdin",
+        type("Input", (), {"read": lambda _self: payload})(),  # pyright: ignore[reportUnknownLambdaType]
     )
     with pytest.raises(WorkspaceError, match="stdin|object"):
         workspace._read_decision()  # pyright: ignore[reportPrivateUsage]

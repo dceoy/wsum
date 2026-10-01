@@ -316,7 +316,9 @@ def test_read_text_bytes_wraps_filesystem_errors(
     elif kind == "read":
         path.write_text("valid", encoding="utf-8")
         monkeypatch.setattr(
-            Path, "read_bytes", lambda _path: (_ for _ in ()).throw(OSError("injected"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+            Path,
+            "read_bytes",
+            lambda _path: (_ for _ in ()).throw(OSError("injected")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
         )
     else:
         original_lstat = Path.lstat
@@ -369,7 +371,9 @@ def test_snapshot_promotion_wraps_failures_and_checks_durable_readback(
     monkeypatch.setattr(workspace, "_fsync_snapshot_directory", lambda _path: None)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     if fault == "replace":
         monkeypatch.setattr(
-            Path, "replace", lambda *_args: (_ for _ in ()).throw(OSError("injected"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+            Path,
+            "replace",
+            lambda *_args: (_ for _ in ()).throw(OSError("injected")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
         )
         expected = "cannot promote snapshot"
     elif fault == "fsync":
@@ -568,7 +572,9 @@ def test_pending_file_wraps_atomic_write_failures(
     destination.parent.mkdir()
     if fault == "replace":
         monkeypatch.setattr(
-            Path, "replace", lambda *_args: (_ for _ in ()).throw(OSError("injected"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+            Path,
+            "replace",
+            lambda *_args: (_ for _ in ()).throw(OSError("injected")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
         )
         expected = "cannot persist pending decision"
     else:
@@ -670,7 +676,9 @@ def test_recovery_writer_validates_and_wraps_failures(
         expected = "unsafe"
     elif fault == "replace":
         monkeypatch.setattr(
-            Path, "replace", lambda *_args: (_ for _ in ()).throw(OSError("injected"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+            Path,
+            "replace",
+            lambda *_args: (_ for _ in ()).throw(OSError("injected")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
         )
         expected = "cannot persist"
     else:
@@ -741,7 +749,9 @@ def test_pending_candidate_persistence_checks_durable_copy(
     target.mkdir(parents=True)
     if fault == "replace":
         monkeypatch.setattr(
-            Path, "replace", lambda *_args: (_ for _ in ()).throw(OSError("injected"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+            Path,
+            "replace",
+            lambda *_args: (_ for _ in ()).throw(OSError("injected")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
         )
         expected = "cannot persist pending candidate"
     elif fault == "fsync":
@@ -779,7 +789,9 @@ def test_transaction_restore_wraps_delete_and_atomic_restore_errors(
         expected = "cannot restore"
     elif fault == "replace":
         monkeypatch.setattr(
-            Path, "replace", lambda *_args: (_ for _ in ()).throw(OSError("injected"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+            Path,
+            "replace",
+            lambda *_args: (_ for _ in ()).throw(OSError("injected")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
         )
         data = b"new"
         expected = "cannot restore"
@@ -809,7 +821,9 @@ def test_pending_temporary_cleanup_rejects_invalid_or_unremovable_files(
     directory.mkdir()
     if kind == "iterdir":
         monkeypatch.setattr(
-            Path, "iterdir", lambda _path: (_ for _ in ()).throw(OSError("injected"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+            Path,
+            "iterdir",
+            lambda _path: (_ for _ in ()).throw(OSError("injected")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
         )
         expected = "cannot inspect"
     else:
@@ -1334,7 +1348,9 @@ def test_recovery_writer_rejects_size_and_missing_directory(
         expected = "size is invalid"
     else:
         monkeypatch.setattr(
-            workspace, "_recovery_directory", lambda *_args, **_kwargs: None  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+            workspace,
+            "_recovery_directory",
+            lambda *_args, **_kwargs: None,  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
         )
         expected = "directory is unavailable"
     with pytest.raises(WorkspaceError, match=expected):
@@ -1347,7 +1363,9 @@ def test_recovery_retirement_returns_when_directory_is_missing(
     state = tmp_path / ".wsum"
     state.mkdir()
     monkeypatch.setattr(
-        workspace, "_recovery_directory", lambda *_args, **_kwargs: None  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        workspace,
+        "_recovery_directory",
+        lambda *_args, **_kwargs: None,  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     workspace._retire_recovery_record(state, "example")  # pyright: ignore[reportPrivateUsage]
 
@@ -1643,7 +1661,9 @@ def test_finalize_rejects_pending_target_id_mismatch(
     state = root / ".wsum"
     state.mkdir()
     monkeypatch.setattr(
-        workspace, "_read_pending", lambda *_args: {"target_id": "other"}  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        workspace,
+        "_read_pending",
+        lambda *_args: {"target_id": "other"},  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     decision = {"target_id": "example", "revision": _REVISION, "material": False}
     with pytest.raises(WorkspaceError, match="pending decision target does not match"):
@@ -1671,7 +1691,9 @@ def test_finalize_checks_report_path_after_commit(
         lambda *_args, **_kwargs: {"action": "snapshot_promoted"},  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     monkeypatch.setattr(
-        workspace, "_write_report", lambda *_args: root / "reports" / "actual.md"  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        workspace,
+        "_write_report",
+        lambda *_args: root / "reports" / "actual.md",  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     monkeypatch.setattr(workspace, "_write_recovery_record", lambda *_args: None)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     monkeypatch.setattr(workspace, "_complete_cleanup_record", lambda *_args: None)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
