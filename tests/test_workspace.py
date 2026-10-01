@@ -1572,7 +1572,7 @@ def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
         "unexpected-file",
     ],
 )
-def test_pending_target_listing_handles_filesystem_edges(
+def test_pending_target_listing_handles_filesystem_edges(  # noqa: C901
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
     state = tmp_path / ".wsum"
@@ -1631,7 +1631,9 @@ def test_pending_target_listing_handles_filesystem_edges(
         workspace.pending_reviews(tmp_path)
 
 
-def test_pending_reviews_legacy_without_targets_uses_safe_fallback(tmp_path: Path) -> None:
+def test_pending_reviews_legacy_without_targets_uses_safe_fallback(
+    tmp_path: Path,
+) -> None:
     state = tmp_path / ".wsum"
     state.mkdir()
     _write_review_transaction(state, "legacy")
@@ -1640,8 +1642,8 @@ def test_pending_reviews_legacy_without_targets_uses_safe_fallback(tmp_path: Pat
     review = cast("list[dict[str, object]]", result["reviews"])[0]
 
     assert review["name"] == "example"
-    assert review["url"] == ""
-    assert review["watch_focus"] == ""
+    assert not review["url"]
+    assert not review["watch_focus"]
 
 
 @pytest.mark.parametrize(
