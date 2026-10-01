@@ -1572,9 +1572,9 @@ def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
         "unexpected-file",
     ],
 )
-def test_pending_target_listing_handles_filesystem_edges(
+def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
-) -> None:  # ruff: ignore[complex-structure]
+) -> None:
     state = tmp_path / ".wsum"
     state.mkdir()
     pending = state / "pending"
