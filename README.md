@@ -20,12 +20,17 @@ To install the core skill in an Agent Skills-compatible runtime, use the `web-up
 The Google Workspace composite keeps a one-way integration boundary:
 
 ```text
-Google Drive state -> .wsum/ -> web-update-monitor -> .wsum/ -> Google Drive state
-                              ^
-Google Sheet -> targets.csv ---+-> reports/<run-id>.md -> Google Drive reports
+Google Drive state bundle -> .wsum/ + durable outbox
+                                  |
+Google Sheet -> targets.csv -> web-update-monitor
+                                  |
+                                  +-> .wsum/
+                                  +-> reports/<run-id>.md -> durable outbox
+                                                            |
+                                                            +-> Google Drive reports
 ```
 
-The Spreadsheet is authoritative for target configuration, while `targets.csv` is a generated adapter artifact. Claude Code Routines may run in fresh cloud sessions, so the composite restores `.wsum/` from a dedicated Drive state file before each check and persists it after `check` and each successful `finalize`. The final state must be committed to Drive before a report is published. The state file is machine state and is kept separate from the user-facing report folder.
+The Spreadsheet is authoritative for target configuration, while `targets.csv` is a generated adapter artifact. Claude Code Routines may run in fresh cloud sessions, so the composite restores a dedicated Drive state bundle containing `.wsum/` plus a composite-owned durable report outbox. After each material `finalize`, the complete run report is staged into the outbox and persisted together with `.wsum/` before delivery. The outbox is removed only after idempotent report upload is confirmed, so an interrupted Routine cannot lose an already-finalized material report. The state bundle remains separate from the user-facing report folder.
 
 Read `skills/web-update-monitor-google-workspace/SKILL.md` for the complete connector orchestration and failure semantics.
 
