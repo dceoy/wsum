@@ -1609,8 +1609,12 @@ def _legacy_pending_diff(
     )
     if hashlib.sha256(snapshot).hexdigest() != expected_sha256:
         raise WorkspaceError("pending review baseline does not match")
-    max_diff_lines = cast("int", getattr(monitor, "_DEFAULT_MAX_DIFF_LINES"))
-    max_diff_bytes = cast("int", getattr(monitor, "_DEFAULT_MAX_DIFF_BYTES"))
+    max_diff_lines = (
+        monitor._DEFAULT_MAX_DIFF_LINES  # pyright: ignore[reportPrivateUsage]
+    )
+    max_diff_bytes = (
+        monitor._DEFAULT_MAX_DIFF_BYTES  # pyright: ignore[reportPrivateUsage]
+    )
     result = monitor.compare_text(
         candidate_data.decode("utf-8"),
         snapshot.decode("utf-8"),
