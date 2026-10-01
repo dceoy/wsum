@@ -4,7 +4,7 @@ Local-first Agent Skills for detecting meaningful updates on public websites and
 
 The core skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
 
-A thin composite integration skill lives in `skills/web-update-monitor-google-workspace/`. It keeps the core monitor unchanged while using Google Sheets as the target source and Google Drive as the report destination in runtimes with Google Workspace connectors.
+A thin composite integration skill lives in `skills/web-update-monitor-google-workspace/`. It keeps the core monitor unchanged while using Google Sheets as the target source and Google Drive for cross-run state, recovery journals, and report delivery in runtimes with Google Workspace connectors.
 
 ## Agent Skills
 
@@ -20,17 +20,17 @@ To install the core skill in an Agent Skills-compatible runtime, use the `web-up
 The Google Workspace composite keeps a one-way integration boundary:
 
 ```text
-Google Drive state bundle -> .wsum/ + durable outbox
-                                  |
+Google Drive state folder -> .wsum/ + run journals + durable outbox
+                                      |
 Google Sheet -> targets.csv -> web-update-monitor
-                                  |
-                                  +-> .wsum/
-                                  +-> reports/<run-id>.md -> durable outbox
-                                                            |
-                                                            +-> Google Drive reports
+                                      |
+                                      +-> .wsum/
+                                      +-> reports/<run-id>.md -> durable outbox
+                                                                |
+                                                                +-> Google Drive reports
 ```
 
-The Spreadsheet is authoritative for target configuration, while `targets.csv` is a generated adapter artifact. Claude Code Routines may run in fresh cloud sessions, so the composite restores a dedicated Drive state bundle containing `.wsum/` plus a composite-owned durable report outbox. After each material `finalize`, the complete run report is staged into the outbox and persisted together with `.wsum/` before delivery. The outbox is removed only after idempotent report upload is confirmed, so an interrupted Routine cannot lose an already-finalized material report. The state bundle remains separate from the user-facing report folder.
+The Spreadsheet is authoritative for target configuration, while `targets.csv` is a generated adapter artifact. Claude Code Routines may run in fresh cloud sessions, so the composite mirrors regular UTF-8 state files into a dedicated Drive state folder instead of relying on a binary archive. A composite-owned run journal persists every `check` review payload and original revision before finalization; on restart, the journal is resumed before any fresh `check`. Existing outbox content is first restored to `reports/<run-id>.md` so later material finalizations continue the same run-level report instead of replacing earlier sections. The durable outbox is removed only after idempotent report upload is confirmed.
 
 Read `skills/web-update-monitor-google-workspace/SKILL.md` for the complete connector orchestration and failure semantics.
 
