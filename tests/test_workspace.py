@@ -3965,14 +3965,20 @@ def test_prepare_pending_for_read_preserves_complete_committed_replacement(
     )
 
     assert group.joinpath("candidate.txt").read_bytes() == data
-    assert workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
-        state,
-        "example",
-    ) is not None
-    assert workspace._read_commit_record(  # pyright: ignore[reportPrivateUsage]
-        state,
-        "example",
-    ) is not None
+    assert (
+        workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is not None
+    )
+    assert (
+        workspace._read_commit_record(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is not None
+    )
 
 
 def test_prepare_pending_for_read_rejects_incomplete_committed_replacement(
