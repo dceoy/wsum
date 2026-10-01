@@ -216,6 +216,10 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
     assert pending["target_id"] == "example"
     assert pending["run_id"] == _RUN_ID
     assert pending["revision"] == result["revision"]
+    assert pending["name"] == "Example"
+    assert pending["url"] == "https://example.com/"
+    assert pending["watch_focus"] == "pricing"
+    assert pending["diff"] == _changed_result()["diff"]
     assert candidate.exists()
 
 
@@ -921,48 +925,108 @@ def test_check_batches_targets_and_contains_failures(
     ]
 
 
-def test_check_failure_preserves_legacy_pending_for_finalize(
+def test_check_reuses_pending_target_and_fetches_other_targets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_targets(
-        tmp_path / "targets.csv", "Example,https://example.com/,pricing,true\n"
+        tmp_path / "targets.csv",
+        "Example,https://example.com/,pricing,true\nOther,https://example.org/,,true\n",
     )
-    target_id = str(load_targets(tmp_path)[0]["target_id"])
+    targets = load_targets(tmp_path)
+    target_id = str(targets[0]["target_id"])
+    other_id = str(targets[1]["target_id"])
     state = tmp_path / ".wsum"
     state.mkdir()
     metadata, candidate, snapshot = _write_review_transaction(
         state, "legacy", target_id=target_id
     )
+    calls = 0
 
-    def fail_monitor(_args: argparse.Namespace) -> dict[str, object]:
-        raise workspace.monitor.MonitorError
+    def fake_monitor(_args: argparse.Namespace) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "unchanged",
+            "sha256": "b" * 64,
+            "previous_sha256": "b" * 64,
+            "diff": "",
+            "diff_truncated": False,
+        }
 
-    monkeypatch.setattr(workspace.monitor, "run", fail_monitor)
+    monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
 
     result = check(tmp_path)
     outcomes = cast("list[dict[str, object]]", result["targets"])
 
-    assert outcomes[0]["action"] == "error"
-    assert "error" in outcomes[0]
+    assert calls == 1
+    assert outcomes[0] == {
+        "action": "review",
+        "run_id": _RUN_ID,
+        "target_id": target_id,
+        "revision": "a" * 32,
+        "name": "Example",
+        "diff_truncated": False,
+    }
+    assert outcomes[1] == {
+        "action": "unchanged",
+        "target_id": other_id,
+        "name": "Other",
+    }
     assert metadata.exists()
     assert candidate.read_text(encoding="utf-8") == "new\n"
-    assert not (state / "pending" / target_id).exists()
+    assert snapshot.read_text(encoding="utf-8") == "old\n"
 
-    pending = json.loads(metadata.read_text(encoding="utf-8"))
-    finalized = finalize(
-        tmp_path,
-        {
-            "target_id": target_id,
-            "revision": pending["revision"],
-            "material": True,
-            "report": "## Example\n\nReviewed.\n",
-        },
-    )
 
-    assert finalized["action"] == "finalized"
-    assert snapshot.read_text(encoding="utf-8") == "new\n"
+@pytest.mark.parametrize(
+    ("targets_csv", "expected_action", "expected_monitor_calls"),
+    [
+        (
+            "Example,https://example.com/,pricing,false\n",
+            "skipped",
+            0,
+        ),
+        (
+            "Other,https://example.org/,,true\n",
+            "unchanged",
+            1,
+        ),
+    ],
+    ids=["disabled", "removed"],
+)
+def test_check_discards_stale_pending_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    targets_csv: str,
+    expected_action: str,
+    expected_monitor_calls: int,
+) -> None:
+    _write_targets(tmp_path / "targets.csv", targets_csv)
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
+    calls = 0
+
+    def fake_monitor(_args: argparse.Namespace) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "unchanged",
+            "sha256": "b" * 64,
+            "previous_sha256": "b" * 64,
+            "diff": "",
+            "diff_truncated": False,
+        }
+
+    monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
+
+    result = check(tmp_path)
+    outcomes = cast("list[dict[str, object]]", result["targets"])
+
+    assert calls == expected_monitor_calls
+    assert [str(item["action"]) for item in outcomes] == [expected_action]
     assert not metadata.exists()
     assert not candidate.exists()
+    assert snapshot.read_text(encoding="utf-8") == "old\n"
 
 
 @pytest.mark.parametrize(
@@ -1425,6 +1489,413 @@ def test_check_syncs_new_state_and_grouped_pending_directories(
     assert pending / target_id in fsynced
     assert state / ".pending-recovery" in fsynced
     assert (pending / target_id / "state.json").exists()
+
+
+def test_check_compact_returns_handles_and_pending_returns_full_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_targets(
+        tmp_path / "targets.csv", "Example,https://example.com/,pricing,true\n"
+    )
+    state = tmp_path / ".wsum"
+    snapshots = state / "snapshots"
+    snapshots.mkdir(parents=True)
+    target_id = str(load_targets(tmp_path)[0]["target_id"])
+    (snapshots / f"{target_id}.txt").write_text("old\n", encoding="utf-8")
+
+    def fake_monitor(args: argparse.Namespace) -> dict[str, object]:
+        Path(args.output).write_text("new\n", encoding="utf-8")
+        return _changed_result()
+
+    monkeypatch.setattr(workspace, "_new_run_id", lambda: _RUN_ID)
+    monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
+
+    result = check(tmp_path, compact=True)
+    reviews = [
+        item
+        for item in cast("list[dict[str, object]]", result["targets"])
+        if item["action"] == "review"
+    ]
+    assert reviews == [
+        {
+            "action": "review",
+            "run_id": _RUN_ID,
+            "target_id": target_id,
+            "revision": reviews[0]["revision"],
+            "name": "Example",
+            "diff_truncated": False,
+        }
+    ]
+    assert "diff" not in reviews[0]
+
+    pending = workspace.pending_reviews(tmp_path, target_id=target_id)
+    full = cast("list[dict[str, object]]", pending["reviews"])[0]
+    assert full["run_id"] == _RUN_ID
+    assert full["target_id"] == target_id
+    assert full["revision"] == reviews[0]["revision"]
+    assert full["name"] == "Example"
+    assert full["url"] == "https://example.com/"
+    assert full["watch_focus"] == "pricing"
+    assert full["diff"] == _changed_result()["diff"]
+
+    _write_targets(
+        tmp_path / "targets.csv",
+        "Renamed,https://example.com/,security,true\n",
+    )
+
+    resumed = check(tmp_path, compact=True)
+    resumed_reviews = [
+        item
+        for item in cast("list[dict[str, object]]", resumed["targets"])
+        if item["action"] == "review"
+    ]
+    assert resumed_reviews == [
+        {
+            "action": "review",
+            "run_id": _RUN_ID,
+            "target_id": target_id,
+            "revision": reviews[0]["revision"],
+            "name": "Renamed",
+            "diff_truncated": False,
+        }
+    ]
+
+    refreshed = workspace.pending_reviews(tmp_path, target_id=target_id)
+    refreshed_full = cast("list[dict[str, object]]", refreshed["reviews"])[0]
+    assert refreshed_full["revision"] == reviews[0]["revision"]
+    assert refreshed_full["run_id"] == _RUN_ID
+    assert refreshed_full["name"] == "Renamed"
+    assert refreshed_full["url"] == "https://example.com/"
+    assert refreshed_full["watch_focus"] == "security"
+    assert refreshed_full["diff"] == _changed_result()["diff"]
+
+
+def test_pending_reviews_recovers_partial_replacement_before_listing(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    pending = state / "pending"
+    pending.mkdir()
+    workspace._write_recovery_record(  # pyright: ignore[reportPrivateUsage]
+        state,
+        _replace_record(),
+    )
+    group = pending / "example"
+    group.mkdir()
+    (group / "candidate.txt").write_text("partial\n", encoding="utf-8")
+
+    assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+    assert not group.exists()
+    assert (
+        workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is None
+    )
+
+
+def test_pending_reviews_legacy_reconstructs_diff_and_context(tmp_path: Path) -> None:
+    _write_targets(
+        tmp_path / "targets.csv", "Example,https://example.com/,pricing,true\n"
+    )
+    target_id = str(load_targets(tmp_path)[0]["target_id"])
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_review_transaction(state, "legacy", target_id=target_id)
+
+    pending = workspace.pending_reviews(tmp_path, target_id=target_id)
+    review = cast("list[dict[str, object]]", pending["reviews"])[0]
+
+    assert review["run_id"] == _RUN_ID
+    assert review["target_id"] == target_id
+    assert review["name"] == "Example"
+    assert review["url"] == "https://example.com/"
+    assert review["watch_focus"] == "pricing"
+    assert "-old" in str(review["diff"])
+    assert "+new" in str(review["diff"])
+
+
+def test_discard_pending_clears_conflicted_review(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
+
+    result = workspace.discard_pending(tmp_path, "example")
+
+    assert result == {
+        "action": "discarded",
+        "run_id": _RUN_ID,
+        "target_id": "example",
+    }
+    assert not metadata.exists()
+    assert not candidate.exists()
+    assert snapshot.read_text(encoding="utf-8") == "old\n"
+    assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+
+
+def test_pending_target_listing_rejects_hidden_unsafe_entry(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    pending = state / "pending"
+    pending.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (pending / ".unsafe").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(WorkspaceError, match="unsafe entry"):
+        workspace.pending_reviews(tmp_path)
+
+
+def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    target = {
+        "target_id": "example",
+        "name": "Example",
+        "url": "https://example.com/",
+        "watch_focus": "pricing",
+    }
+    result = _changed_result()
+    result["diff"] = 1
+
+    with pytest.raises(WorkspaceError, match="invalid diff"):
+        workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
+            state,
+            target,
+            result,
+            _RUN_ID,
+            candidate_data=b"new\n",
+        )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "pending-stat",
+        "pending-symlink",
+        "list",
+        "entry-stat",
+        "hidden-temp",
+        "unexpected-file",
+    ],
+)
+def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    pending = state / "pending"
+    original_lstat = Path.lstat
+    original_iterdir = Path.iterdir
+
+    if fault == "pending-symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        pending.symlink_to(outside, target_is_directory=True)
+        with pytest.raises(WorkspaceError, match="non-symlink"):
+            workspace.pending_reviews(tmp_path)
+        return
+
+    pending.mkdir()
+    if fault == "pending-stat":
+
+        def fail_pending(path: Path) -> os.stat_result:
+            if path == pending:
+                message = "injected"
+                raise PermissionError(message)
+            return original_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", fail_pending)
+        with pytest.raises(WorkspaceError, match="pending directory is unavailable"):
+            workspace.pending_reviews(tmp_path)
+        return
+
+    if fault == "list":
+
+        def fail_list(path: Path) -> Any:  # ruff: ignore[any-type]
+            if path == pending:
+                message = "injected"
+                raise PermissionError(message)
+            return original_iterdir(path)
+
+        monkeypatch.setattr(Path, "iterdir", fail_list)
+        with pytest.raises(WorkspaceError, match="cannot list pending directory"):
+            workspace.pending_reviews(tmp_path)
+        return
+
+    entry = pending / (".orphan.tmp" if fault == "hidden-temp" else "unexpected.txt")
+    entry.write_text("x", encoding="utf-8")
+    if fault == "entry-stat":
+
+        def fail_entry(path: Path) -> os.stat_result:
+            if path == entry:
+                message = "injected"
+                raise PermissionError(message)
+            return original_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", fail_entry)
+        with pytest.raises(WorkspaceError, match="cannot stat pending entry"):
+            workspace.pending_reviews(tmp_path)
+        return
+    if fault == "hidden-temp":
+        assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+        return
+    with pytest.raises(WorkspaceError, match="unsafe entry"):
+        workspace.pending_reviews(tmp_path)
+
+
+def test_pending_reviews_grouped_without_targets_uses_persisted_context(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, _, _ = _write_review_transaction(state, "grouped")
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    payload.update({
+        "name": "Persisted",
+        "url": "https://example.com/",
+        "watch_focus": "pricing",
+        "diff": "persisted diff",
+    })
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+
+    listed = workspace.pending_reviews(tmp_path)
+    handle = cast("list[dict[str, object]]", listed["reviews"])[0]
+    assert handle["name"] == "Persisted"
+
+    result = workspace.pending_reviews(tmp_path, target_id="example")
+    review = cast("list[dict[str, object]]", result["reviews"])[0]
+    assert review["name"] == "Persisted"
+    assert review["url"] == "https://example.com/"
+    assert review["watch_focus"] == "pricing"
+    assert review["diff"] == "persisted diff"
+
+
+def test_pending_reviews_legacy_without_targets_uses_safe_fallback(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_review_transaction(state, "legacy")
+
+    result = workspace.pending_reviews(tmp_path, target_id="example")
+    review = cast("list[dict[str, object]]", result["reviews"])[0]
+
+    assert review["name"] == "example"
+    assert not review["url"]
+    assert not review["watch_focus"]
+
+
+def test_legacy_review_context_falls_back_when_target_is_not_in_csv(
+    tmp_path: Path,
+) -> None:
+    _write_targets(
+        tmp_path / "targets.csv",
+        "Other,https://example.org/,,true\n",
+    )
+
+    assert workspace._legacy_review_context(  # pyright: ignore[reportPrivateUsage]
+        tmp_path,
+        "example",
+    ) == {
+        "name": "example",
+        "url": "",
+        "watch_focus": "",
+    }
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["candidate-hash", "missing-baseline", "baseline-hash", "invalid-diff"],
+)
+def test_legacy_pending_diff_rejects_invalid_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
+    pending = json.loads(metadata.read_text(encoding="utf-8"))
+
+    if fault == "candidate-hash":
+        candidate.write_text("tampered\n", encoding="utf-8")
+        expected = "candidate_sha256"
+    elif fault == "missing-baseline":
+        snapshot.unlink()
+        expected = "baseline is missing"
+    elif fault == "baseline-hash":
+        snapshot.write_text("tampered\n", encoding="utf-8")
+        expected = "baseline does not match"
+    else:
+
+        def invalid_diff(
+            _current: str,
+            _previous: str | None,
+            *,
+            max_diff_lines: int,
+            max_diff_bytes: int,
+        ) -> dict[str, object]:
+            assert max_diff_lines > 0
+            assert max_diff_bytes > 0
+            return {"diff": 1}
+
+        monkeypatch.setattr(workspace.monitor, "compare_text", invalid_diff)
+        expected = "diff is invalid"
+
+    with pytest.raises(WorkspaceError, match=expected):
+        workspace._legacy_pending_diff(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+            pending,
+        )
+
+
+def test_pending_review_rejects_candidate_hash_mismatch(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, candidate, _ = _write_review_transaction(state, "grouped")
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    payload.update({
+        "name": "Example",
+        "url": "https://example.com/",
+        "watch_focus": "pricing",
+        "diff": "diff",
+    })
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    candidate.write_text("tampered\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceError, match="candidate_sha256"):
+        workspace.pending_reviews(tmp_path, target_id="example")
+
+
+def test_pending_reviews_rejects_unknown_target_id(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+
+    with pytest.raises(WorkspaceError, match="no valid pending"):
+        workspace.pending_reviews(tmp_path, target_id="example")
+
+
+def test_main_discard_command_emits_json(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_review_transaction(state, "grouped")
+
+    assert (
+        workspace.main([
+            "--workspace",
+            str(tmp_path),
+            "discard",
+            "--target-id",
+            "example",
+        ])
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert '"action": "discarded"' in captured.out
+    assert not captured.err
 
 
 def test_recovery_directory_parent_fsync_retries_after_creation_failure(
@@ -2433,6 +2904,36 @@ def test_main_success_emits_json(
     assert '"action": "skipped"' in captured.out
     assert not captured.err
 
+    assert workspace.main(["--workspace", str(tmp_path), "pending"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == '{"reviews": []}'
+    assert not captured.err
+
+
+def test_main_finalize_dispatches_decision(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_review_transaction(state, "grouped")
+    payload = json.dumps({
+        "target_id": "example",
+        "revision": "a" * 32,
+        "material": False,
+    })
+    monkeypatch.setattr(
+        workspace.sys,
+        "stdin",
+        type("Input", (), {"read": lambda _self: payload})(),  # pyright: ignore[reportUnknownLambdaType]
+    )
+
+    assert workspace.main(["--workspace", str(tmp_path), "finalize"]) == 0
+    captured = capsys.readouterr()
+    assert '"action": "finalized"' in captured.out
+    assert not captured.err
+
 
 @pytest.mark.parametrize(
     "payload", ["not json", "[]"], ids=["invalid-json", "not-object"]
@@ -2659,7 +3160,8 @@ def test_candidate_path_rejects_unavailable_candidate(
 
         def fail(path: Path) -> os.stat_result:
             if path == candidate:
-                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+                message = "injected"
+                raise PermissionError(message)
             return original_lstat(path)
 
         monkeypatch.setattr(Path, "lstat", fail)
@@ -2683,7 +3185,8 @@ def test_report_path_rejects_invalid_destination(
 
         def fail(path: Path) -> os.stat_result:
             if path == destination:
-                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+                message = "injected"
+                raise PermissionError(message)
             return original_lstat(path)
 
         monkeypatch.setattr(Path, "lstat", fail)
@@ -2740,7 +3243,8 @@ def test_read_text_bytes_wraps_filesystem_errors(
 
         def fail(target: Path) -> os.stat_result:
             if target == path:
-                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+                message = "injected"
+                raise PermissionError(message)
             return original_lstat(target)
 
         monkeypatch.setattr(Path, "lstat", fail)
@@ -3554,6 +4058,88 @@ def test_recover_pending_rejects_unresolvable_commit_states(
         workspace._recover_pending(state, "example", revision=revision)  # pyright: ignore[reportPrivateUsage]
 
 
+def test_prepare_pending_for_read_preserves_complete_committed_replacement(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_recovery(state, _replace_record())
+    _write_commit(state)
+    data = b"new candidate"
+    payload = _pending_payload(candidate_sha256=hashlib.sha256(data).hexdigest())
+    group = _grouped_pending(state, payload, data)
+
+    workspace._prepare_pending_for_read(  # pyright: ignore[reportPrivateUsage]
+        state,
+        "example",
+    )
+
+    assert group.joinpath("candidate.txt").read_bytes() == data
+    assert (
+        workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is not None
+    )
+    assert (
+        workspace._read_commit_record(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is not None
+    )
+
+
+def test_discard_pending_accepts_complete_committed_replacement(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_recovery(state, _replace_record())
+    _write_commit(state)
+    data = b"new candidate"
+    payload = _pending_payload(candidate_sha256=hashlib.sha256(data).hexdigest())
+    group = _grouped_pending(state, payload, data)
+
+    assert workspace.discard_pending(tmp_path, "example") == {
+        "action": "discarded",
+        "run_id": _RUN_ID,
+        "target_id": "example",
+    }
+    assert not group.exists()
+    assert (
+        workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is None
+    )
+    assert (
+        workspace._read_commit_record(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is None
+    )
+
+
+def test_prepare_pending_for_read_rejects_incomplete_committed_replacement(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    (state / "pending").mkdir()
+    _write_recovery(state, _replace_record())
+    _write_commit(state)
+
+    with pytest.raises(WorkspaceError, match="committed replacement is incomplete"):
+        workspace._prepare_pending_for_read(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+
+
 @pytest.mark.parametrize(
     "resolution", ["accept", "rollback"], ids=["accept-commit", "rollback-old"]
 )
@@ -3635,8 +4221,23 @@ def test_read_pending_rejects_invalid_json_and_wrong_shapes(
     [
         ({"extra": 1}, "pending decision is invalid"),
         ({"run_id": "bad"}, "pending decision is invalid"),
+        ({"diff_truncated": "false"}, "pending decision is invalid"),
+        (
+            {
+                "name": "Example",
+                "url": "https://example.com/",
+                "watch_focus": "pricing",
+                "diff": 1,
+            },
+            "pending decision is invalid",
+        ),
     ],
-    ids=["unexpected-field", "invalid-run-id"],
+    ids=[
+        "unexpected-field",
+        "invalid-run-id",
+        "invalid-truncated-flag",
+        "invalid-review-context",
+    ],
 )
 def test_read_pending_rejects_extra_fields_and_bad_run_ids(
     tmp_path: Path, field_change: dict[str, object], message: str
@@ -3743,7 +4344,8 @@ def test_recovery_directory_wraps_second_lstat_failure(
         if path == directory:
             calls += 1
             if calls == 2:
-                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+                message = "injected"
+                raise PermissionError(message)
         return original_lstat(path)
 
     monkeypatch.setattr(Path, "lstat", fail_second)

@@ -32,7 +32,7 @@ _MAX_SNAPSHOT_BYTES = 40 * 1024 * 1024
 _MAX_RECOVERY_RECORD_BYTES = 3 * _MAX_SNAPSHOT_BYTES + 1024 * 1024
 _REQUIRED_FIELDS = {"name", "url"}
 _ALLOWED_FIELDS = _REQUIRED_FIELDS | {"enabled", "watch_focus"}
-_PENDING_FIELDS = {
+_PENDING_BASE_FIELDS = {
     "candidate_sha256",
     "diff_truncated",
     "expected_sha256",
@@ -40,6 +40,12 @@ _PENDING_FIELDS = {
     "run_id",
     "target_id",
 }
+_PENDING_REVIEW_FIELDS = {"diff", "name", "url", "watch_focus"}
+_PENDING_FIELDS = _PENDING_BASE_FIELDS | _PENDING_REVIEW_FIELDS
+_PENDING_FIELD_SETS = (
+    frozenset(_PENDING_BASE_FIELDS),
+    frozenset(_PENDING_FIELDS),
+)
 _TARGET_ID_PART_RE = re.compile(r"[^a-z0-9]+")
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
@@ -1181,7 +1187,7 @@ def _replacement_matches_commit(
     if not isinstance(pending, dict):
         return False
     pending = cast("dict[str, object]", pending)
-    if set(pending) != _PENDING_FIELDS:
+    if frozenset(pending) not in _PENDING_FIELD_SETS:
         return False
     if pending.get("target_id") != target_id or pending.get("revision") != commit.get(
         "revision"
@@ -1401,6 +1407,9 @@ def _handle_monitor_result(
     if status != "changed":
         raise WorkspaceError("monitor returned an unsupported status")
 
+    diff = result.get("diff", "")
+    if not isinstance(diff, str):
+        raise WorkspaceError("monitor returned an invalid diff")
     pending = {
         "target_id": target_id,
         "run_id": run_id,
@@ -1408,6 +1417,10 @@ def _handle_monitor_result(
         "expected_sha256": result.get("previous_sha256"),
         "candidate_sha256": result.get("sha256"),
         "diff_truncated": result.get("diff_truncated") is True,
+        "name": str(target["name"]),
+        "url": str(target.get("url", "")),
+        "watch_focus": str(target.get("watch_focus", "")),
+        "diff": diff,
     }
     if candidate_data is None:
         candidate = (
@@ -1422,24 +1435,54 @@ def _handle_monitor_result(
     _write_pending_transaction(state, pending, candidate_data)
     return {
         "action": "review",
+        "run_id": run_id,
         "target_id": target_id,
         "revision": pending["revision"],
         "name": target["name"],
         "url": target["url"],
         "watch_focus": target["watch_focus"],
-        "diff": result.get("diff", ""),
+        "diff": diff,
         "diff_truncated": pending["diff_truncated"],
     }
 
 
-def check(workspace: str | Path) -> dict[str, object]:
-    """Check every enabled CSV target and return only agent-relevant outcomes."""
+def _compact_review(review: Mapping[str, object]) -> dict[str, object]:
+    """Return the small review handle used by orchestration layers."""
+    keys = (
+        "action",
+        "run_id",
+        "target_id",
+        "revision",
+        "name",
+        "diff_truncated",
+    )
+    return {key: review[key] for key in keys}
+
+
+def check(workspace: str | Path, *, compact: bool = False) -> dict[str, object]:
+    """Check targets without refetching any target that already has a review."""
     root = _workspace(workspace)
     targets = load_targets(root)
+    targets_by_id = {str(target["target_id"]): target for target in targets}
+    existing = pending_reviews(root)
+    existing_reviews = cast("list[dict[str, object]]", existing["reviews"])
+    retained_reviews: list[dict[str, object]] = []
+    pending_ids: set[str] = set()
+    for review in existing_reviews:
+        target_id = str(review["target_id"])
+        target = targets_by_id.get(target_id)
+        if target is None or target["action"] == "skip_disabled":
+            discard_pending(root, target_id)
+            continue
+        retained_reviews.append(review)
+        pending_ids.add(target_id)
+
     state = _state_dir(root)
     run_id = _new_run_id()
-    outcomes: list[dict[str, object]] = []
+    outcomes: list[dict[str, object]] = list(retained_reviews)
     for target in targets:
+        if str(target["target_id"]) in pending_ids:
+            continue
         if target["action"] == "skip_disabled":
             outcomes.append({
                 "action": "skipped",
@@ -1448,7 +1491,12 @@ def check(workspace: str | Path) -> dict[str, object]:
             })
             continue
         try:
-            outcomes.append(_monitor_target(state, target, run_id))
+            outcome = _monitor_target(state, target, run_id)
+            outcomes.append(
+                _compact_review(outcome)
+                if compact and outcome.get("action") == "review"
+                else outcome
+            )
         except (monitor.MonitorError, OSError, WorkspaceError) as exc:
             outcomes.append({
                 "action": "error",
@@ -1475,15 +1523,261 @@ def _read_pending(state: Path, target_id: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise WorkspaceError("pending decision is invalid")
     pending = cast("dict[str, object]", value)
-    if set(pending) == _PENDING_FIELDS - {"run_id"}:
+    fields = frozenset(pending)
+    missing_run_sets = tuple(fields_ - {"run_id"} for fields_ in _PENDING_FIELD_SETS)
+    if fields in missing_run_sets:
         pending["run_id"] = _new_run_id()
         _write_pending_file(path, pending)
-    elif set(pending) != _PENDING_FIELDS:
+        fields = frozenset(pending)
+    if fields not in _PENDING_FIELD_SETS:
         raise WorkspaceError("pending decision is invalid")
     run_id = pending.get("run_id")
     if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
         raise WorkspaceError("pending decision is invalid")
+    if type(pending.get("diff_truncated")) is not bool:
+        raise WorkspaceError("pending decision is invalid")
+    if _PENDING_REVIEW_FIELDS.issubset(pending):
+        for field in _PENDING_REVIEW_FIELDS:
+            if not isinstance(pending.get(field), str):
+                raise WorkspaceError("pending decision is invalid")
     return pending
+
+
+def _pending_target_ids(state: Path) -> list[str]:
+    """List pending target IDs without following unsafe filesystem entries."""
+    pending_dir = state / "pending"
+    try:
+        info = pending_dir.lstat()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise WorkspaceError("pending directory is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise WorkspaceError("pending directory must be a non-symlink directory")
+
+    target_ids: set[str] = set()
+    try:
+        entries = sorted(pending_dir.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        raise WorkspaceError("cannot list pending directory") from exc
+    for entry in entries:
+        try:
+            entry_info = entry.lstat()
+        except OSError as exc:
+            raise WorkspaceError("cannot stat pending entry") from exc
+        if entry.name.startswith("."):
+            if (
+                entry.name.endswith(".tmp")
+                and stat.S_ISREG(entry_info.st_mode)
+                and not stat.S_ISLNK(entry_info.st_mode)
+            ):
+                continue
+            raise WorkspaceError("pending directory contains an unsafe entry")
+        if stat.S_ISDIR(entry_info.st_mode) and not stat.S_ISLNK(entry_info.st_mode):
+            target_ids.add(_validate_target_id(entry.name))
+            continue
+        if (
+            stat.S_ISREG(entry_info.st_mode)
+            and not stat.S_ISLNK(entry_info.st_mode)
+            and entry.suffix == ".json"
+        ):
+            target_ids.add(_validate_target_id(entry.stem))
+            continue
+        raise WorkspaceError("pending directory contains an unsafe entry")
+    return sorted(target_ids)
+
+
+def _current_review_contexts(root: Path) -> dict[str, dict[str, str]]:
+    """Return current CSV review context keyed by stable target ID."""
+    try:
+        targets = load_targets(root)
+    except WorkspaceError:
+        return {}
+    return {
+        str(target["target_id"]): {
+            "name": str(target["name"]),
+            "url": str(target["url"]),
+            "watch_focus": str(target["watch_focus"]),
+        }
+        for target in targets
+    }
+
+
+def _legacy_review_context(root: Path, target_id: str) -> dict[str, str]:
+    return _current_review_contexts(root).get(
+        target_id,
+        {"name": target_id, "url": "", "watch_focus": ""},
+    )
+
+
+def _legacy_pending_diff(
+    state: Path, target_id: str, pending: Mapping[str, object]
+) -> str:
+    candidate_data = _read_text_bytes(_candidate_path(state, target_id), "candidate")
+    candidate_sha256 = _validate_sha256(
+        pending.get("candidate_sha256"), "candidate_sha256"
+    )
+    if hashlib.sha256(candidate_data).hexdigest() != candidate_sha256:
+        raise WorkspaceError("candidate_sha256 does not match candidate")
+    snapshot = _read_snapshot(state / "snapshots" / f"{target_id}.txt")
+    if snapshot is None:
+        raise WorkspaceError("pending review baseline is missing")
+    expected_sha256 = _validate_sha256(
+        pending.get("expected_sha256"), "expected_sha256"
+    )
+    if hashlib.sha256(snapshot).hexdigest() != expected_sha256:
+        raise WorkspaceError("pending review baseline does not match")
+    max_diff_lines = (
+        monitor._DEFAULT_MAX_DIFF_LINES  # pyright: ignore[reportPrivateUsage]
+    )
+    max_diff_bytes = (
+        monitor._DEFAULT_MAX_DIFF_BYTES  # pyright: ignore[reportPrivateUsage]
+    )
+    result = monitor.compare_text(
+        candidate_data.decode("utf-8"),
+        snapshot.decode("utf-8"),
+        max_diff_lines=max_diff_lines,
+        max_diff_bytes=max_diff_bytes,
+    )
+    diff = result.get("diff")
+    if not isinstance(diff, str):
+        raise WorkspaceError("pending review diff is invalid")
+    return diff
+
+
+def _pending_review(
+    root: Path,
+    state: Path,
+    target_id: str,
+    *,
+    current_context: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    pending = _read_pending(state, target_id)
+    candidate_data = _read_text_bytes(_candidate_path(state, target_id), "candidate")
+    candidate_sha256 = _validate_sha256(
+        pending.get("candidate_sha256"), "candidate_sha256"
+    )
+    if hashlib.sha256(candidate_data).hexdigest() != candidate_sha256:
+        raise WorkspaceError("candidate_sha256 does not match candidate")
+
+    if current_context is not None:
+        context = dict(current_context)
+    elif _PENDING_REVIEW_FIELDS.issubset(pending):
+        context = {
+            field: str(pending[field]) for field in ("name", "url", "watch_focus")
+        }
+    else:
+        context = _legacy_review_context(root, target_id)
+
+    if _PENDING_REVIEW_FIELDS.issubset(pending):
+        diff = str(pending["diff"])
+    else:
+        diff = _legacy_pending_diff(state, target_id, pending)
+
+    return {
+        "action": "review",
+        "run_id": pending["run_id"],
+        "target_id": target_id,
+        "revision": pending["revision"],
+        **context,
+        "diff": diff,
+        "diff_truncated": pending["diff_truncated"],
+    }
+
+
+def _pending_review_handle(
+    root: Path,
+    state: Path,
+    target_id: str,
+    *,
+    current_context: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    pending = _read_pending(state, target_id)
+    if current_context is not None:
+        context = dict(current_context)
+    elif _PENDING_REVIEW_FIELDS.issubset(pending):
+        context = {
+            "name": str(pending["name"]),
+            "url": str(pending["url"]),
+            "watch_focus": str(pending["watch_focus"]),
+        }
+    else:
+        context = _legacy_review_context(root, target_id)
+    return _compact_review({
+        "action": "review",
+        "run_id": pending["run_id"],
+        "target_id": target_id,
+        "revision": pending["revision"],
+        **context,
+        "diff_truncated": pending["diff_truncated"],
+    })
+
+
+def _prepare_pending_for_read(state: Path, target_id: str) -> None:
+    """Recover interrupted writes while preserving committed revision ambiguity."""
+    target_id = _validate_target_id(target_id)
+    record = _read_recovery_record(state, target_id)
+    commit = _read_commit_record(state, target_id)
+    if commit is not None and record is not None and record.get("kind") == "replace":
+        if not _replacement_matches_commit(state, target_id, commit):
+            raise WorkspaceError("pending committed replacement is incomplete")
+        return
+    _recover_pending(state, target_id)
+
+
+def pending_reviews(
+    workspace: str | Path, *, target_id: str | None = None
+) -> dict[str, object]:
+    """Return resumable pending reviews without refetching monitored targets."""
+    root = _workspace(workspace)
+    state = _state_dir(root)
+    target_ids = _pending_target_ids(state)
+    for pending_target_id in target_ids:
+        _prepare_pending_for_read(state, pending_target_id)
+    target_ids = _pending_target_ids(state)
+    current_contexts = _current_review_contexts(root)
+    if target_id is not None:
+        target_id = _validate_target_id(target_id)
+        if target_id not in target_ids:
+            raise WorkspaceError("no valid pending decision exists for target")
+        return {
+            "reviews": [
+                _pending_review(
+                    root,
+                    state,
+                    target_id,
+                    current_context=current_contexts.get(target_id),
+                )
+            ]
+        }
+
+    return {
+        "reviews": [
+            _pending_review_handle(
+                root,
+                state,
+                current,
+                current_context=current_contexts.get(current),
+            )
+            for current in target_ids
+        ]
+    }
+
+
+def discard_pending(workspace: str | Path, target_id: str) -> dict[str, object]:
+    """Discard one pending review so a conflicted target can be checked again."""
+    root = _workspace(workspace)
+    state = _state_dir(root)
+    _prepare_pending_for_read(state, target_id)
+    pending = _read_pending(state, target_id)
+    run_id = str(pending["run_id"])
+    _recover_pending(state, target_id, revision=str(pending["revision"]))
+    _discard_pending(state, target_id)
+    return {
+        "action": "discarded",
+        "run_id": run_id,
+        "target_id": target_id,
+    }
 
 
 def _validate_decision(
@@ -1616,20 +1910,32 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", required=True)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("check")
+
+    check_parser = subparsers.add_parser("check")
+    check_parser.add_argument("--compact", action="store_true")
+
+    pending_parser = subparsers.add_parser("pending")
+    pending_parser.add_argument("--target-id")
+
+    discard_parser = subparsers.add_parser("discard")
+    discard_parser.add_argument("--target-id", required=True)
+
     subparsers.add_parser("finalize")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the workspace-facing checker or finalizer."""
+    """Run the workspace-facing orchestration command."""
     args = _parser().parse_args(argv)
     try:
-        result = (
-            check(args.workspace)
-            if args.command == "check"
-            else finalize(args.workspace, _read_decision())
-        )
+        if args.command == "check":
+            result = check(args.workspace, compact=args.compact)
+        elif args.command == "pending":
+            result = pending_reviews(args.workspace, target_id=args.target_id)
+        elif args.command == "discard":
+            result = discard_pending(args.workspace, args.target_id)
+        else:
+            result = finalize(args.workspace, _read_decision())
     except WorkspaceError as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2

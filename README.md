@@ -1,14 +1,41 @@
 # wsum
 
-A local-first Agent Skill for detecting meaningful updates on public websites and documents.
+Local-first Agent Skills for detecting meaningful updates on public websites and documents.
 
-The canonical skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
+The core skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
 
-## Agent Skill
+A thin composite integration skill lives in `skills/web-update-monitor-google-workspace/`. It keeps Google-specific orchestration outside the core while using Google Sheets as the target source, Google Drive for cross-run state, and Google Docs for completed report delivery.
 
-The repository's canonical distribution is the `skills/web-update-monitor/` directory, with its standard `SKILL.md` manifest and bundled scripts, requirements, and example CSV.
+## Agent Skills
 
-To install it in an Agent Skills-compatible runtime, download `web-update-monitor.zip` from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain), extract it, and place the `web-update-monitor/` directory in the runtime's skill discovery directory.
+The repository ships these canonical skills:
+
+- `skills/web-update-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
+- `skills/web-update-monitor-google-workspace/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract, persists core state in Drive, and publishes completed runs as Google Docs.
+
+To install the core skill in an Agent Skills-compatible runtime, use the `web-update-monitor` package from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain). To use the Google Workspace composite, install **both** `web-update-monitor` and `web-update-monitor-google-workspace`; the composite package intentionally delegates to the core package instead of duplicating its runtime helpers.
+
+### Google Workspace composition
+
+```mermaid
+flowchart LR
+    GS["Google Sheet"] --> CSV["targets.csv"]
+    DS["Google Drive state"] <-->|sync| STATE[".wsum/"]
+    CSV --> CORE["web-update-monitor"]
+    STATE --> CORE
+    CORE --> STATE
+    CORE --> REPORT["reports/<run-id>.md"]
+    OUT["durable Markdown outbox"] -->|restore| REPORT
+    REPORT -->|stage| OUT
+    OUT -->|run complete| GDOC["Google Doc"]
+    GDOC --> DR["Google Drive report folder"]
+```
+
+The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded diff on demand, and a target with an existing pending review is not refetched. The Google Workspace composite therefore persists the core `.wsum/` state directly instead of duplicating review metadata in an adapter-owned journal.
+
+Markdown remains the canonical core report and durable outbox format. The composite waits until a run has no pending reviews, then creates or updates one Google Doc named `Web Update Report — <run-id>` in the configured report folder. Exact-title lookup makes retries converge on the same Doc instead of creating duplicates.
+
+Read `skills/web-update-monitor-google-workspace/SKILL.md` for connector orchestration and recovery semantics.
 
 ## Workspace
 
@@ -43,13 +70,13 @@ workspace/
             └── candidate.txt
 ```
 
-Users may edit `targets.csv`. `.wsum/` is internal state and should not be edited manually.
+Users may edit `targets.csv` when using the core skill directly. In the Google Workspace composite workflow, regenerate it from the authoritative Spreadsheet instead. `.wsum/` is internal state and should not be edited manually.
 
 ### Generated files
 
 The workspace contains one user-facing input, user-facing reports, and internal state:
 
-- `targets.csv`: the user-facing source of truth for monitored targets. The agent may create or edit it when the user changes monitoring configuration.
+- `targets.csv`: the user-facing source of truth for monitored targets in the core workflow. The agent may create or edit it when the user changes monitoring configuration. Composite integrations may generate it from an external authoritative source.
 - `reports/<run-id>.md`: the user-facing output. One report is created per `check` run only when at least one material change is finalized. The run ID has the form `YYYYMMDDTHHMMSSZ-xxxxxxxx`. Material targets from the same run are merged into this file.
 - `.wsum/snapshots/<target-id>.txt`: the accepted normalized baseline for each target. A first observation creates it; later finalized observations replace it atomically, including non-material changes.
 - `.wsum/pending/<target-id>/candidate.txt`: the normalized changed candidate awaiting semantic review.
@@ -63,18 +90,23 @@ The helper may briefly create hidden `*.tmp` files next to the report, snapshot,
 
 ## Agent workflow
 
-Read `skills/web-update-monitor/SKILL.md` for the complete procedure. At a high level, the agent edits `targets.csv` when requested, checks enabled targets, reviews bounded diffs for materiality, and contributes each material target to one run-level Markdown report. The helper handles deterministic state transitions and per-target errors.
+Read `skills/web-update-monitor/SKILL.md` for the complete core procedure. At a high level, the agent edits `targets.csv` when requested, checks enabled targets, reviews bounded diffs for materiality, and contributes each material target to one run-level Markdown report. The helper handles deterministic state transitions and per-target errors.
 
 ## Deterministic workspace facade
 
-For development or direct invocation, run:
+For development or agent orchestration, run:
 
 ```bash
 python skills/web-update-monitor/scripts/workspace.py \
-  --workspace /path/to/workspace check
+  --workspace /path/to/workspace check --compact
 ```
 
-The facade validates the complete CSV before fetching any target. It automatically handles first baselines, unchanged snapshots, disabled rows, and per-target failures. Changed targets are returned to the agent for semantic review.
+The compact form keeps batch output small. Existing pending targets are returned as review handles without refetching, while unrelated targets continue normally. Fetch one pending review's bounded diff on demand:
+
+```bash
+python skills/web-update-monitor/scripts/workspace.py \
+  --workspace /path/to/workspace pending --target-id <target-id>
+```
 
 After the agent decides whether a change is material, it passes an internal decision to:
 
@@ -93,11 +125,12 @@ Set up the repository with:
 uv sync
 ```
 
-Then run tests and validate the canonical skill with the [Agent Skills reference validator](https://github.com/agentskills/agentskills/tree/main/skills-ref):
+Then run tests and validate the canonical skills with the [Agent Skills reference validator](https://github.com/agentskills/agentskills/tree/main/skills-ref):
 
 ```bash
 uv run pytest
 skills-ref validate skills/web-update-monitor
+skills-ref validate skills/web-update-monitor-google-workspace
 ```
 
 `monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workspace.py` validates targets and owns pending review transactions, safe report writing, and atomic snapshot promotion.
