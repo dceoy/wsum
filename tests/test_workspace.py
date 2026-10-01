@@ -1745,6 +1745,33 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
         workspace.pending_reviews(tmp_path)
 
 
+def test_pending_reviews_grouped_without_targets_uses_persisted_context(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, _, _ = _write_review_transaction(state, "grouped")
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    payload.update({
+        "name": "Persisted",
+        "url": "https://example.com/",
+        "watch_focus": "pricing",
+        "diff": "persisted diff",
+    })
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+
+    listed = workspace.pending_reviews(tmp_path)
+    handle = cast("list[dict[str, object]]", listed["reviews"])[0]
+    assert handle["name"] == "Persisted"
+
+    result = workspace.pending_reviews(tmp_path, target_id="example")
+    review = cast("list[dict[str, object]]", result["reviews"])[0]
+    assert review["name"] == "Persisted"
+    assert review["url"] == "https://example.com/"
+    assert review["watch_focus"] == "pricing"
+    assert review["diff"] == "persisted diff"
+
+
 def test_pending_reviews_legacy_without_targets_uses_safe_fallback(
     tmp_path: Path,
 ) -> None:
