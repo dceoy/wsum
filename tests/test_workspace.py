@@ -1539,6 +1539,196 @@ def test_pending_target_listing_rejects_hidden_unsafe_entry(tmp_path: Path) -> N
         workspace.pending_reviews(tmp_path)
 
 
+def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    target = {
+        "target_id": "example",
+        "name": "Example",
+        "url": "https://example.com/",
+        "watch_focus": "pricing",
+    }
+    result = _changed_result()
+    result["diff"] = 1
+
+    with pytest.raises(WorkspaceError, match="invalid diff"):
+        workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
+            state,
+            target,
+            result,
+            _RUN_ID,
+            candidate_data=b"new\n",
+        )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "pending-stat",
+        "pending-symlink",
+        "list",
+        "entry-stat",
+        "hidden-temp",
+        "unexpected-file",
+    ],
+)
+def test_pending_target_listing_handles_filesystem_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    pending = state / "pending"
+    original_lstat = Path.lstat
+    original_iterdir = Path.iterdir
+
+    if fault == "pending-symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        pending.symlink_to(outside, target_is_directory=True)
+        with pytest.raises(WorkspaceError, match="non-symlink"):
+            workspace.pending_reviews(tmp_path)
+        return
+
+    pending.mkdir()
+    if fault == "pending-stat":
+        def fail_pending(path: Path) -> os.stat_result:
+            if path == pending:
+                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+            return original_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", fail_pending)
+        with pytest.raises(WorkspaceError, match="pending directory is unavailable"):
+            workspace.pending_reviews(tmp_path)
+        return
+
+    if fault == "list":
+        def fail_list(path: Path) -> Any:  # ruff: ignore[any-type]
+            if path == pending:
+                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+            return original_iterdir(path)
+
+        monkeypatch.setattr(Path, "iterdir", fail_list)
+        with pytest.raises(WorkspaceError, match="cannot list pending directory"):
+            workspace.pending_reviews(tmp_path)
+        return
+
+    entry = pending / (".orphan.tmp" if fault == "hidden-temp" else "unexpected.txt")
+    entry.write_text("x", encoding="utf-8")
+    if fault == "entry-stat":
+        def fail_entry(path: Path) -> os.stat_result:
+            if path == entry:
+                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+            return original_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", fail_entry)
+        with pytest.raises(WorkspaceError, match="cannot stat pending entry"):
+            workspace.pending_reviews(tmp_path)
+        return
+    if fault == "hidden-temp":
+        assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+        return
+    with pytest.raises(WorkspaceError, match="unsafe entry"):
+        workspace.pending_reviews(tmp_path)
+
+
+def test_pending_reviews_legacy_without_targets_uses_safe_fallback(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_review_transaction(state, "legacy")
+
+    result = workspace.pending_reviews(tmp_path, target_id="example")
+    review = cast("list[dict[str, object]]", result["reviews"])[0]
+
+    assert review["name"] == "example"
+    assert review["url"] == ""
+    assert review["watch_focus"] == ""
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["candidate-hash", "missing-baseline", "baseline-hash", "invalid-diff"],
+)
+def test_legacy_pending_diff_rejects_invalid_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
+    pending = json.loads(metadata.read_text(encoding="utf-8"))
+
+    if fault == "candidate-hash":
+        candidate.write_text("tampered\n", encoding="utf-8")
+        expected = "candidate_sha256"
+    elif fault == "missing-baseline":
+        snapshot.unlink()
+        expected = "baseline is missing"
+    elif fault == "baseline-hash":
+        snapshot.write_text("tampered\n", encoding="utf-8")
+        expected = "baseline does not match"
+    else:
+        monkeypatch.setattr(
+            workspace.monitor,
+            "compare_text",
+            lambda *_args, **_kwargs: {"diff": 1},
+        )
+        expected = "diff is invalid"
+
+    with pytest.raises(WorkspaceError, match=expected):
+        workspace._legacy_pending_diff(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+            pending,
+        )
+
+
+def test_pending_review_rejects_candidate_hash_mismatch(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, candidate, _ = _write_review_transaction(state, "grouped")
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    payload.update({
+        "name": "Example",
+        "url": "https://example.com/",
+        "watch_focus": "pricing",
+        "diff": "diff",
+    })
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    candidate.write_text("tampered\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceError, match="candidate_sha256"):
+        workspace.pending_reviews(tmp_path, target_id="example")
+
+
+def test_pending_reviews_rejects_unknown_target_id(tmp_path: Path) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+
+    with pytest.raises(WorkspaceError, match="no valid pending"):
+        workspace.pending_reviews(tmp_path, target_id="example")
+
+
+def test_main_discard_command_emits_json(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_review_transaction(state, "grouped")
+
+    assert (
+        workspace.main([
+            "--workspace",
+            str(tmp_path),
+            "discard",
+            "--target-id",
+            "example",
+        ])
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert '"action": "discarded"' in captured.out
+    assert not captured.err
+
+
 def test_recovery_directory_parent_fsync_retries_after_creation_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3752,8 +3942,23 @@ def test_read_pending_rejects_invalid_json_and_wrong_shapes(
     [
         ({"extra": 1}, "pending decision is invalid"),
         ({"run_id": "bad"}, "pending decision is invalid"),
+        ({"diff_truncated": "false"}, "pending decision is invalid"),
+        (
+            {
+                "name": "Example",
+                "url": "https://example.com/",
+                "watch_focus": "pricing",
+                "diff": 1,
+            },
+            "pending decision is invalid",
+        ),
     ],
-    ids=["unexpected-field", "invalid-run-id"],
+    ids=[
+        "unexpected-field",
+        "invalid-run-id",
+        "invalid-truncated-flag",
+        "invalid-review-context",
+    ],
 )
 def test_read_pending_rejects_extra_fields_and_bad_run_ids(
     tmp_path: Path, field_change: dict[str, object], message: str
