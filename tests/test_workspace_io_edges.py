@@ -1,3 +1,5 @@
+# pyright: reportPrivateUsage=false, reportUnknownLambdaType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportGeneralTypeIssues=false
+
 """Parametrized filesystem edge cases for workspace persistence helpers."""
 
 from __future__ import annotations

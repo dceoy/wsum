@@ -1,3 +1,5 @@
+# pyright: reportPrivateUsage=false, reportUnknownLambdaType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportGeneralTypeIssues=false
+
 """Boundary and fault-injection tests for workspace persistence helpers."""
 
 from __future__ import annotations

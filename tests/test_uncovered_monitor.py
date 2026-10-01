@@ -1,3 +1,5 @@
+# pyright: reportPrivateUsage=false, reportUnknownLambdaType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportGeneralTypeIssues=false
+
 """Focused boundary tests for monitor branches not reached by the main workflows."""
 
 from __future__ import annotations

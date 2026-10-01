@@ -161,15 +161,11 @@ max-args = 10
 max-public-methods = 40
 
 [tool.pyright]
-# White-box fault-injection modules use intentionally partial protocol doubles.
 exclude = [
   "build",
   ".venv",
   ".agents",
   ".claude",
-  "tests/test_uncovered_monitor.py",
-  "tests/test_uncovered_workspace.py",
-  "tests/test_workspace_io_edges.py",
 ]
 extraPaths = ["skills/web-update-monitor/scripts"]
 venvPath = "."
