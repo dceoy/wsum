@@ -1587,19 +1587,27 @@ def _pending_target_ids(state: Path) -> list[str]:
     return sorted(target_ids)
 
 
-def _legacy_review_context(root: Path, target_id: str) -> dict[str, str]:
+def _current_review_contexts(root: Path) -> dict[str, dict[str, str]]:
+    """Return current CSV review context keyed by stable target ID."""
     try:
         targets = load_targets(root)
     except WorkspaceError:
-        targets = []
-    for target in targets:
-        if target["target_id"] == target_id:
-            return {
-                "name": str(target["name"]),
-                "url": str(target["url"]),
-                "watch_focus": str(target["watch_focus"]),
-            }
-    return {"name": target_id, "url": "", "watch_focus": ""}
+        return {}
+    return {
+        str(target["target_id"]): {
+            "name": str(target["name"]),
+            "url": str(target["url"]),
+            "watch_focus": str(target["watch_focus"]),
+        }
+        for target in targets
+    }
+
+
+def _legacy_review_context(root: Path, target_id: str) -> dict[str, str]:
+    return _current_review_contexts(root).get(
+        target_id,
+        {"name": target_id, "url": "", "watch_focus": ""},
+    )
 
 
 def _legacy_pending_diff(
@@ -1637,7 +1645,13 @@ def _legacy_pending_diff(
     return diff
 
 
-def _pending_review(root: Path, state: Path, target_id: str) -> dict[str, object]:
+def _pending_review(
+    root: Path,
+    state: Path,
+    target_id: str,
+    *,
+    current_context: Mapping[str, str] | None = None,
+) -> dict[str, object]:
     pending = _read_pending(state, target_id)
     candidate_data = _read_text_bytes(_candidate_path(state, target_id), "candidate")
     candidate_sha256 = _validate_sha256(
@@ -1646,13 +1660,18 @@ def _pending_review(root: Path, state: Path, target_id: str) -> dict[str, object
     if hashlib.sha256(candidate_data).hexdigest() != candidate_sha256:
         raise WorkspaceError("candidate_sha256 does not match candidate")
 
-    if _PENDING_REVIEW_FIELDS.issubset(pending):
+    if current_context is not None:
+        context = dict(current_context)
+    elif _PENDING_REVIEW_FIELDS.issubset(pending):
         context = {
             field: str(pending[field]) for field in ("name", "url", "watch_focus")
         }
-        diff = str(pending["diff"])
     else:
         context = _legacy_review_context(root, target_id)
+
+    if _PENDING_REVIEW_FIELDS.issubset(pending):
+        diff = str(pending["diff"])
+    else:
         diff = _legacy_pending_diff(state, target_id, pending)
 
     return {
@@ -1667,18 +1686,23 @@ def _pending_review(root: Path, state: Path, target_id: str) -> dict[str, object
 
 
 def _pending_review_handle(
-    root: Path, state: Path, target_id: str
+    root: Path,
+    state: Path,
+    target_id: str,
+    *,
+    current_context: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     pending = _read_pending(state, target_id)
-    context = (
-        {
+    if current_context is not None:
+        context = dict(current_context)
+    elif _PENDING_REVIEW_FIELDS.issubset(pending):
+        context = {
             "name": str(pending["name"]),
             "url": str(pending["url"]),
             "watch_focus": str(pending["watch_focus"]),
         }
-        if _PENDING_REVIEW_FIELDS.issubset(pending)
-        else _legacy_review_context(root, target_id)
-    )
+    else:
+        context = _legacy_review_context(root, target_id)
     return _compact_review({
         "action": "review",
         "run_id": pending["run_id"],
@@ -1711,15 +1735,31 @@ def pending_reviews(
     for pending_target_id in target_ids:
         _prepare_pending_for_read(state, pending_target_id)
     target_ids = _pending_target_ids(state)
+    current_contexts = _current_review_contexts(root)
     if target_id is not None:
         target_id = _validate_target_id(target_id)
         if target_id not in target_ids:
             raise WorkspaceError("no valid pending decision exists for target")
-        return {"reviews": [_pending_review(root, state, target_id)]}
+        return {
+            "reviews": [
+                _pending_review(
+                    root,
+                    state,
+                    target_id,
+                    current_context=current_contexts.get(target_id),
+                )
+            ]
+        }
 
     return {
         "reviews": [
-            _pending_review_handle(root, state, current) for current in target_ids
+            _pending_review_handle(
+                root,
+                state,
+                current,
+                current_context=current_contexts.get(current),
+            )
+            for current in target_ids
         ]
     }
 
