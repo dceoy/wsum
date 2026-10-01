@@ -1638,8 +1638,7 @@ def _pending_review(root: Path, state: Path, target_id: str) -> dict[str, object
 
     if _PENDING_REVIEW_FIELDS.issubset(pending):
         context = {
-            field: str(pending[field])
-            for field in ("name", "url", "watch_focus")
+            field: str(pending[field]) for field in ("name", "url", "watch_focus")
         }
         diff = str(pending["diff"])
     else:
