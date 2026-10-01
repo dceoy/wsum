@@ -925,38 +925,54 @@ def test_check_batches_targets_and_contains_failures(
     ]
 
 
-def test_check_returns_legacy_pending_before_fetching(
+def test_check_reuses_pending_target_and_fetches_other_targets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_targets(
-        tmp_path / "targets.csv", "Example,https://example.com/,pricing,true\n"
+        tmp_path / "targets.csv",
+        "Example,https://example.com/,pricing,true\n"
+        "Other,https://example.org/,,true\n",
     )
-    target_id = str(load_targets(tmp_path)[0]["target_id"])
+    targets = load_targets(tmp_path)
+    target_id = str(targets[0]["target_id"])
+    other_id = str(targets[1]["target_id"])
     state = tmp_path / ".wsum"
     state.mkdir()
     metadata, candidate, snapshot = _write_review_transaction(
         state, "legacy", target_id=target_id
     )
+    calls = 0
 
-    def fail_monitor(_args: argparse.Namespace) -> dict[str, object]:
-        raise AssertionError("pending reviews must be resumed before fetching")
-
-    monkeypatch.setattr(workspace.monitor, "run", fail_monitor)
-
-    result = check(tmp_path)
-    reviews = cast("list[dict[str, object]]", result["reviews"])
-
-    assert result["action"] == "pending_reviews"
-    assert reviews == [
-        {
-            "action": "review",
-            "run_id": _RUN_ID,
-            "target_id": target_id,
-            "revision": "a" * 32,
-            "name": "Example",
+    def fake_monitor(_args: argparse.Namespace) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "unchanged",
+            "sha256": "b" * 64,
+            "previous_sha256": "b" * 64,
+            "diff": "",
             "diff_truncated": False,
         }
-    ]
+
+    monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
+
+    result = check(tmp_path)
+    outcomes = cast("list[dict[str, object]]", result["targets"])
+
+    assert calls == 1
+    assert outcomes[0] == {
+        "action": "review",
+        "run_id": _RUN_ID,
+        "target_id": target_id,
+        "revision": "a" * 32,
+        "name": "Example",
+        "diff_truncated": False,
+    }
+    assert outcomes[1] == {
+        "action": "unchanged",
+        "target_id": other_id,
+        "name": "Other",
+    }
     assert metadata.exists()
     assert candidate.read_text(encoding="utf-8") == "new\n"
     assert snapshot.read_text(encoding="utf-8") == "old\n"
