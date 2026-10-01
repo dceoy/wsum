@@ -3981,6 +3981,39 @@ def test_prepare_pending_for_read_preserves_complete_committed_replacement(
     )
 
 
+def test_discard_pending_accepts_complete_committed_replacement(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_recovery(state, _replace_record())
+    _write_commit(state)
+    data = b"new candidate"
+    payload = _pending_payload(candidate_sha256=hashlib.sha256(data).hexdigest())
+    group = _grouped_pending(state, payload, data)
+
+    assert workspace.discard_pending(tmp_path, "example") == {
+        "action": "discarded",
+        "run_id": _RUN_ID,
+        "target_id": "example",
+    }
+    assert not group.exists()
+    assert (
+        workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is None
+    )
+    assert (
+        workspace._read_commit_record(  # pyright: ignore[reportPrivateUsage]
+            state,
+            "example",
+        )
+        is None
+    )
+
+
 def test_prepare_pending_for_read_rejects_incomplete_committed_replacement(
     tmp_path: Path,
 ) -> None:
