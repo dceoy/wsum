@@ -1538,6 +1538,37 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
     assert full["watch_focus"] == "pricing"
     assert full["diff"] == _changed_result()["diff"]
 
+    _write_targets(
+        tmp_path / "targets.csv",
+        "Renamed,https://example.com/,security,true\n",
+    )
+
+    resumed = check(tmp_path, compact=True)
+    resumed_reviews = [
+        item
+        for item in cast("list[dict[str, object]]", resumed["targets"])
+        if item["action"] == "review"
+    ]
+    assert resumed_reviews == [
+        {
+            "action": "review",
+            "run_id": _RUN_ID,
+            "target_id": target_id,
+            "revision": reviews[0]["revision"],
+            "name": "Renamed",
+            "diff_truncated": False,
+        }
+    ]
+
+    refreshed = workspace.pending_reviews(tmp_path, target_id=target_id)
+    refreshed_full = cast("list[dict[str, object]]", refreshed["reviews"])[0]
+    assert refreshed_full["revision"] == reviews[0]["revision"]
+    assert refreshed_full["run_id"] == _RUN_ID
+    assert refreshed_full["name"] == "Renamed"
+    assert refreshed_full["url"] == "https://example.com/"
+    assert refreshed_full["watch_focus"] == "security"
+    assert refreshed_full["diff"] == _changed_result()["diff"]
+
 
 def test_pending_reviews_recovers_partial_replacement_before_listing(
     tmp_path: Path,
