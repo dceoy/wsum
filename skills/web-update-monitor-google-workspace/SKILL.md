@@ -116,7 +116,9 @@ After `check` returns, persist the complete local `.wsum/` state back to the sam
 
 After each successful `finalize`, persist `.wsum/` again before finalizing the next target. Replace the existing state object or update the same Drive file rather than creating ambiguous duplicate state files.
 
-Record the run ID returned by the check. After all decisions for that run have been finalized, use `reports/<run-id>.md` as the only candidate report for Google Drive delivery. If the run produced no report, do not upload a report.
+Record the run ID returned by the check. Treat each returned `review` independently. A target is ready for run-level delivery accounting when it is either finalized as material/non-material or explicitly left pending because the core returned `manual_review_required` or `snapshot_conflict`. Persist the state after recording any such pending outcome. A held target does not block delivery of report sections already finalized for other targets in the same run.
+
+Once every review outcome from the run is either finalized or explicitly held pending, use `reports/<run-id>.md` as the only candidate report for Google Drive delivery. If the run produced no report, do not upload a report. Keep held targets in `.wsum/pending/`; resolve them separately according to the core skill instead of treating them as finalized.
 
 ## Deliver the report to Google Drive
 
@@ -136,6 +138,7 @@ Keep source projection, core monitoring, state persistence, and report delivery 
 - If state restore fails validation, do not run the monitor from an empty baseline.
 - If `check` succeeds but persisting its resulting state fails, stop before finalization or report delivery.
 - If a `finalize` succeeds locally but the following state persistence fails, do not publish the report. A later run may safely replay from the last committed Drive state.
+- If a target returns `manual_review_required` or `snapshot_conflict`, keep and persist its pending state, report that target separately, and allow finalized material sections from other targets in the same run to be delivered.
 - If no material change is finalized, no report exists and no report upload is needed, but updated state must still be persisted.
 - If report upload fails after final state persistence succeeds, keep the committed state and retry only report delivery; do not rerun check or finalize merely to retry the upload.
 - If an exact report filename already exists in the destination, avoid creating another copy unless the user explicitly requests duplicates.
