@@ -1593,7 +1593,8 @@ def test_pending_target_listing_handles_filesystem_edges(  # noqa: C901
     if fault == "pending-stat":
         def fail_pending(path: Path) -> os.stat_result:
             if path == pending:
-                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+                message = "injected"
+                raise PermissionError(message)
             return original_lstat(path)
 
         monkeypatch.setattr(Path, "lstat", fail_pending)
@@ -1604,7 +1605,8 @@ def test_pending_target_listing_handles_filesystem_edges(  # noqa: C901
     if fault == "list":
         def fail_list(path: Path) -> Any:  # ruff: ignore[any-type]
             if path == pending:
-                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+                message = "injected"
+                raise PermissionError(message)
             return original_iterdir(path)
 
         monkeypatch.setattr(Path, "iterdir", fail_list)
@@ -1617,7 +1619,8 @@ def test_pending_target_listing_handles_filesystem_edges(  # noqa: C901
     if fault == "entry-stat":
         def fail_entry(path: Path) -> os.stat_result:
             if path == entry:
-                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+                message = "injected"
+                raise PermissionError(message)
             return original_lstat(path)
 
         monkeypatch.setattr(Path, "lstat", fail_entry)
@@ -2968,7 +2971,8 @@ def test_candidate_path_rejects_unavailable_candidate(
 
         def fail(path: Path) -> os.stat_result:
             if path == candidate:
-                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+                message = "injected"
+                raise PermissionError(message)
             return original_lstat(path)
 
         monkeypatch.setattr(Path, "lstat", fail)
@@ -2992,7 +2996,8 @@ def test_report_path_rejects_invalid_destination(
 
         def fail(path: Path) -> os.stat_result:
             if path == destination:
-                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+                message = "injected"
+                raise PermissionError(message)
             return original_lstat(path)
 
         monkeypatch.setattr(Path, "lstat", fail)
@@ -3049,7 +3054,8 @@ def test_read_text_bytes_wraps_filesystem_errors(
 
         def fail(target: Path) -> os.stat_result:
             if target == path:
-                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+                message = "injected"
+                raise PermissionError(message)
             return original_lstat(target)
 
         monkeypatch.setattr(Path, "lstat", fail)
@@ -4067,7 +4073,8 @@ def test_recovery_directory_wraps_second_lstat_failure(
         if path == directory:
             calls += 1
             if calls == 2:
-                raise PermissionError("injected")  # ruff: ignore[raw-string-in-exception]
+                message = "injected"
+                raise PermissionError(message)
         return original_lstat(path)
 
     monkeypatch.setattr(Path, "lstat", fail_second)
