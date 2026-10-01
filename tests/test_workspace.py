@@ -978,6 +978,58 @@ def test_check_reuses_pending_target_and_fetches_other_targets(
 
 
 @pytest.mark.parametrize(
+    ("targets_csv", "expected_action", "expected_monitor_calls"),
+    [
+        (
+            "Example,https://example.com/,pricing,false\n",
+            "skipped",
+            0,
+        ),
+        (
+            "Other,https://example.org/,,true\n",
+            "unchanged",
+            1,
+        ),
+    ],
+    ids=["disabled", "removed"],
+)
+def test_check_discards_stale_pending_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    targets_csv: str,
+    expected_action: str,
+    expected_monitor_calls: int,
+) -> None:
+    _write_targets(tmp_path / "targets.csv", targets_csv)
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
+    calls = 0
+
+    def fake_monitor(_args: argparse.Namespace) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "unchanged",
+            "sha256": "b" * 64,
+            "previous_sha256": "b" * 64,
+            "diff": "",
+            "diff_truncated": False,
+        }
+
+    monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
+
+    result = check(tmp_path)
+    outcomes = cast("list[dict[str, object]]", result["targets"])
+
+    assert calls == expected_monitor_calls
+    assert [str(item["action"]) for item in outcomes] == [expected_action]
+    assert not metadata.exists()
+    assert not candidate.exists()
+    assert snapshot.read_text(encoding="utf-8") == "old\n"
+
+
+@pytest.mark.parametrize(
     "failure_point",
     ["staged-output-fsync", "pending-candidate-fsync"],
     ids=["staged-output-fsync", "pending-candidate-fsync"],
