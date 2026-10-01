@@ -1,4 +1,4 @@
-"""Tests for the compact monitor helper."""
+"""Tests for the monitor module."""
 
 from __future__ import annotations
 
@@ -36,16 +36,40 @@ def test_normalize_html_removes_markup_and_scripts() -> None:
     assert normalize_document(document) == "Hello\nWorld\n"
 
 
-def test_compare_text_reports_baseline_unchanged_and_change() -> None:
-    baseline = compare_text("alpha\n", None, max_diff_lines=20)
-    unchanged = compare_text("alpha\n", "alpha\n", max_diff_lines=20)
-    changed = compare_text("beta\n", "alpha\n", max_diff_lines=20)
+@pytest.mark.parametrize(
+    ("current", "previous", "status", "previous_sha256", "diff"),
+    [
+        ("alpha\n", None, "baseline", "", ""),
+        (
+            "alpha\n",
+            "alpha\n",
+            "unchanged",
+            "b6a98d9ce9a2d9149288fa3df42d377c3e42737afdcdaf714e33c0a100b51060",
+            "",
+        ),
+        (
+            "beta\n",
+            "alpha\n",
+            "changed",
+            "b6a98d9ce9a2d9149288fa3df42d377c3e42737afdcdaf714e33c0a100b51060",
+            "--- previous\n+++ current\n@@ -1 +1 @@\n-alpha\n+beta",
+        ),
+    ],
+    ids=["baseline", "unchanged", "changed"],
+)
+def test_compare_text_reports_baseline_unchanged_and_change(
+    current: str,
+    previous: str | None,
+    status: str,
+    previous_sha256: str,
+    diff: str,
+) -> None:
+    result = compare_text(current, previous, max_diff_lines=20)
 
-    assert baseline["status"] == "baseline"
-    assert unchanged["status"] == "unchanged"
-    assert changed["status"] == "changed"
-    assert "-alpha" in str(changed["diff"])
-    assert "+beta" in str(changed["diff"])
+    assert result["status"] == status
+    assert result["previous_sha256"] == previous_sha256
+    assert result["diff"] == diff
+    assert result["diff_truncated"] is False
 
 
 def test_compare_text_bounds_diff() -> None:
@@ -105,6 +129,7 @@ def test_compare_text_exact_byte_bound_is_not_truncated() -> None:
         (".xml", "application/xml"),
         (".txt", "text/plain"),
     ],
+    ids=["pdf", "html", "htm-alias", "rss", "atom", "xml", "plain-text"],
 )
 def test_guess_content_type_by_suffix(
     tmp_path: Path, suffix: str, expected: str
@@ -126,21 +151,34 @@ def test_request_target_and_host_header_formatting() -> None:
     assert monitor._host_header(target) == "[2001:db8::1]:8443"  # pyright: ignore[reportPrivateUsage]
 
 
-def test_read_response_rejects_invalid_readers_and_chunks() -> None:
-    class NoReader:
-        pass
+class _TextReader:
+    @staticmethod
+    def read(_size: int) -> str:
+        return "not bytes"
 
-    class TextReader:
-        @staticmethod
-        def read(_size: int) -> str:
-            return "not bytes"
 
-    with pytest.raises(MonitorError, match="not readable"):
-        monitor._read_response_limited(NoReader(), 10)  # pyright: ignore[reportPrivateUsage]
-    with pytest.raises(MonitorError, match="did not return bytes"):
-        monitor._read_response_limited(TextReader(), 10)  # pyright: ignore[reportPrivateUsage]
-    with pytest.raises(MonitorError, match="max-bytes"):
-        monitor._read_response_limited(_FakeResponse(200, b"012345"), 3)  # pyright: ignore[reportPrivateUsage]
+class _OversizedReader:
+    @staticmethod
+    def read(_size: int) -> bytes:
+        return b"012345"
+
+
+@pytest.mark.parametrize(
+    ("response", "limit", "message"),
+    [
+        (object(), 10, "not readable"),
+        (_TextReader(), 10, "did not return bytes"),
+        (_OversizedReader(), 3, "max-bytes"),
+    ],
+    ids=["missing-reader", "text-chunk", "oversized-chunk"],
+)
+def test_read_response_rejects_invalid_readers_and_chunks(
+    response: object, limit: int, message: str
+) -> None:
+    with pytest.raises(MonitorError, match=message):
+        monitor._read_response_limited(  # pyright: ignore[reportPrivateUsage]
+            response, limit
+        )
 
 
 def test_parse_content_type_extracts_charset() -> None:
@@ -149,37 +187,65 @@ def test_parse_content_type_extracts_charset() -> None:
     ) == ("text/html", "utf-8")
 
 
-def test_resolver_pool_propagates_errors_and_deadlines() -> None:
+def _resolver_failure() -> int:
+    message = "resolver failed"
+    raise ValueError(message)
+
+
+@pytest.mark.parametrize(
+    ("resolver", "timeout", "error", "message"),
+    [
+        (_resolver_failure, 1.0, ValueError, "resolver failed"),
+        (lambda: 42, 0.0, TimeoutError, "deadline"),
+    ],
+    ids=["worker-error", "expired-deadline"],
+)
+def test_resolver_pool_propagates_errors_and_deadlines(
+    resolver: Callable[[], int],
+    timeout: float,
+    error: type[Exception],
+    message: str,
+) -> None:
     pool = monitor._ResolverPool(1)  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(error, match=message):
+        pool.resolve(resolver, (), {}, timeout)
+
+
+def test_resolver_pool_returns_result() -> None:
+    pool = monitor._ResolverPool(1)  # pyright: ignore[reportPrivateUsage]
+
     assert pool.resolve(lambda: 42, (), {}, 1.0) == 42
 
-    def fail() -> None:
-        message = "resolver failed"
-        raise ValueError(message)
 
-    with pytest.raises(ValueError, match="resolver failed"):
-        pool.resolve(fail, (), {}, 1.0)
-    with pytest.raises(TimeoutError, match="deadline"):
-        pool.resolve(lambda: 42, (), {}, 0)
-
-
-@pytest.mark.parametrize("value", ["x" * 65, "not-a-real-encoding"])
+@pytest.mark.parametrize(
+    "value", ["x" * 65, "not-a-real-encoding"], ids=["too-long", "unknown"]
+)
 def test_encoding_name_rejects_unsupported_values(value: str) -> None:
     with pytest.raises(MonitorError, match="unsupported"):
         monitor._encoding_name(value)  # pyright: ignore[reportPrivateUsage]
 
 
-def test_normalization_rejects_unsupported_and_mismatched_types() -> None:
-    with pytest.raises(MonitorError, match="unsupported"):
-        normalize_document(Document(b"hello", "https://example.com/", "image/png"))
-    with pytest.raises(MonitorError, match="does not match"):
-        normalize_document(
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        (Document(b"hello", "https://example.com/", "image/png"), "unsupported"),
+        (
             Document(
                 b"<html><body>hello</body></html>",
                 "https://example.com/",
                 "application/xml",
-            )
-        )
+            ),
+            "does not match",
+        ),
+    ],
+    ids=["unsupported-content-type", "mismatched-document-type"],
+)
+def test_normalization_rejects_unsupported_and_mismatched_types(
+    document: Document, message: str
+) -> None:
+    with pytest.raises(MonitorError, match=message):
+        normalize_document(document)
 
 
 def test_destination_validation_fails_closed_for_malformed_url() -> None:
@@ -204,7 +270,9 @@ def test_address_resolution_rejects_empty_or_failed_lookup(
         monitor._resolve_addresses("example.com", 80, None)  # pyright: ignore[reportPrivateUsage]
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "192.0.0.8"])
+@pytest.mark.parametrize(
+    "host", ["127.0.0.1", "192.0.0.8"], ids=["loopback", "reserved"]
+)
 def test_non_public_literal_ip_is_rejected(host: str) -> None:
     with pytest.raises(MonitorError, match="public IP"):
         validate_public_url(f"http://{host}/")
@@ -295,6 +363,14 @@ def test_public_url_rejects_explicit_zero_port() -> None:
             "Hello\n",
         ),
         (
+            b'<?xml version="1.0" encoding="shift_jis"?><root>'
+            + "こんにちは".encode("shift_jis")
+            + b"</root>",
+            "application/xml",
+            None,
+            "こんにちは\n",
+        ),
+        (
             "<html><body>価格</body></html>".encode("cp932"),
             "text/html",
             "cp932",
@@ -308,6 +384,7 @@ def test_public_url_rejects_explicit_zero_port() -> None:
         "http-charset",
         "utf16-html-no-bom",
         "utf32-xml-no-bom",
+        "xml-declaration",
         "cp932",
     ],
 )
@@ -320,19 +397,6 @@ def test_normalize_document_detects_supported_encodings(
     document = Document(body, "https://example.com/", content_type, charset)
 
     assert normalize_document(document) == expected
-
-
-def test_normalize_xml_declaration_detects_encoding() -> None:
-    body = (
-        b'<?xml version="1.0" encoding="shift_jis"?><root>'
-        + "こんにちは".encode("shift_jis")
-        + b"</root>"
-    )
-
-    assert (
-        normalize_document(Document(body, "https://example.com/", "application/xml"))
-        == "こんにちは\n"
-    )
 
 
 @pytest.mark.parametrize(
@@ -918,25 +982,67 @@ def test_normalize_pdf_rejects_credential_bearing_links(uri: str) -> None:
         )
 
 
-def test_normalize_pdf_bounds_font_resources(monkeypatch: pytest.MonkeyPatch) -> None:
+def _pdf_with_multiple_pages() -> bytes:
     pytest.importorskip("pypdf")
-    pdf = _make_pdf(b"BT /F1 12 Tf (hello) Tj ET", compressed=False)
-    monkeypatch.setattr(monitor, "_DEFAULT_MAX_PDF_FONTS", 0)
+    from pypdf import PdfWriter  # ruff: ignore[import-outside-top-level]
 
-    with pytest.raises(MonitorError, match="font resources"):
-        normalize_document(
-            Document(pdf, "https://example.com/file.pdf", "application/pdf")
-        )
+    writer = PdfWriter()
+    writer.add_blank_page(width=300, height=300)
+    writer.add_blank_page(width=300, height=300)
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
 
 
-def test_normalize_pdf_bounds_annotations(monkeypatch: pytest.MonkeyPatch) -> None:
+def _pdf_with_single_page() -> bytes:
     pytest.importorskip("pypdf")
-    pdf = _make_pdf_with_link(
-        b"BT /F1 12 Tf (hello) Tj ET", uri="https://example.com/item"
-    )
-    monkeypatch.setattr(monitor, "_DEFAULT_MAX_PDF_ANNOTATIONS", 0)
+    from pypdf import PdfWriter  # ruff: ignore[import-outside-top-level]
 
-    with pytest.raises(MonitorError, match="annotations"):
+    writer = PdfWriter()
+    writer.add_blank_page(width=300, height=300)
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("pdf_factory", "limit_name", "limit", "message"),
+    [
+        (
+            lambda: _make_pdf(b"BT /F1 12 Tf (hello) Tj ET", compressed=False),
+            "_DEFAULT_MAX_PDF_FONTS",
+            0,
+            "font resources",
+        ),
+        (
+            lambda: _make_pdf_with_link(
+                b"BT /F1 12 Tf (hello) Tj ET", uri="https://example.com/item"
+            ),
+            "_DEFAULT_MAX_PDF_ANNOTATIONS",
+            0,
+            "annotations",
+        ),
+        (_pdf_with_multiple_pages, "_DEFAULT_MAX_PDF_PAGES", 1, "page count"),
+        (
+            _pdf_with_single_page,
+            "_DEFAULT_MAX_PDF_OBJECTS",
+            1,
+            "object traversal",
+        ),
+    ],
+    ids=["font-resources", "annotations", "pages", "objects"],
+)
+def test_normalize_pdf_bounds_structure(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_factory: Callable[[], bytes],
+    limit_name: str,
+    limit: int,
+    message: str,
+) -> None:
+    pdf = pdf_factory()
+    monkeypatch.setattr(monitor, limit_name, limit)
+
+    with pytest.raises(MonitorError, match=message):
         normalize_document(
             Document(pdf, "https://example.com/file.pdf", "application/pdf")
         )
@@ -963,43 +1069,6 @@ def test_normalize_pdf_bounds_extracted_text() -> None:
             Document(pdf, "https://example.com/file.pdf", "application/pdf"),
             max_pdf_decompressed_bytes=4_096,
             max_pdf_extracted_chars=5,
-        )
-
-
-def test_normalize_pdf_bounds_page_traversal(monkeypatch: pytest.MonkeyPatch) -> None:
-    pytest.importorskip("pypdf")
-    from pypdf import PdfWriter  # ruff: ignore[import-outside-top-level]
-
-    writer = PdfWriter()
-    writer.add_blank_page(width=300, height=300)
-    writer.add_blank_page(width=300, height=300)
-    output = BytesIO()
-    writer.write(output)
-    monkeypatch.setattr(monitor, "_DEFAULT_MAX_PDF_PAGES", 1)
-
-    with pytest.raises(MonitorError, match="page count"):
-        normalize_document(
-            Document(
-                output.getvalue(), "https://example.com/file.pdf", "application/pdf"
-            )
-        )
-
-
-def test_normalize_pdf_bounds_object_traversal(monkeypatch: pytest.MonkeyPatch) -> None:
-    pytest.importorskip("pypdf")
-    from pypdf import PdfWriter  # ruff: ignore[import-outside-top-level]
-
-    writer = PdfWriter()
-    writer.add_blank_page(width=300, height=300)
-    output = BytesIO()
-    writer.write(output)
-    monkeypatch.setattr(monitor, "_DEFAULT_MAX_PDF_OBJECTS", 1)
-
-    with pytest.raises(MonitorError, match="object traversal"):
-        normalize_document(
-            Document(
-                output.getvalue(), "https://example.com/file.pdf", "application/pdf"
-            )
         )
 
 
@@ -1208,3 +1277,336 @@ def test_run_bounds_previous_snapshot(tmp_path: Path) -> None:
 
     with pytest.raises(MonitorError, match="max-bytes"):
         run(args)
+
+
+def test_feed_normalization_preserves_field_boundaries() -> None:
+    left = normalize_document(
+        Document(
+            b'<rss><channel><link href="ab"/><link href="c"/></channel></rss>',
+            "https://example.com/feed.xml",
+            "application/rss+xml",
+        )
+    )
+    right = normalize_document(
+        Document(
+            b'<rss><channel><link href="a"/><link href="bc"/></channel></rss>',
+            "https://example.com/feed.xml",
+            "application/rss+xml",
+        )
+    )
+
+    assert left != right
+
+
+@pytest.mark.parametrize("line_break", ["\n", "\r"], ids=["lf", "cr"])
+def test_diff_complexity_short_circuits_before_unified_diff(
+    monkeypatch: pytest.MonkeyPatch, line_break: str
+) -> None:
+    def fail_unified_diff(
+        before: list[str],
+        after: list[str],
+        *,
+        fromfile: str,
+        tofile: str,
+        lineterm: str,
+    ) -> None:
+        del before, after, fromfile, tofile, lineterm
+        message = "unified_diff must not run past the complexity budget"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(monitor, "unified_diff", fail_unified_diff)
+    previous = line_break.join(f"old-{index}" for index in range(2_100))
+    current = line_break.join(f"new-{index}" for index in range(2_100))
+
+    result = compare_text(current, previous, max_diff_lines=20)
+
+    assert result["status"] == "changed"
+    assert result["diff_truncated"] is True
+    assert "complexity limit exceeded" in str(result["diff"])
+
+
+def test_html_served_as_text_plain_still_uses_html_normalization() -> None:
+    document = Document(
+        b"<html><body><main>Hello</main><script>ignore()</script></body></html>",
+        "https://example.com/",
+        "text/plain",
+    )
+
+    assert normalize_document(document) == "Hello\n"
+
+
+def test_feed_destination_identity_tracks_xml_base_without_raw_url() -> None:
+    previous = normalize_document(
+        Document(
+            b'<rss xml:base="https://a.example/"><channel><link href="item"/>'
+            b"</channel></rss>",
+            "https://example.com/feed.xml",
+            "application/rss+xml",
+        )
+    )
+    current = normalize_document(
+        Document(
+            b'<rss xml:base="https://b.example/"><channel><link href="item"/>'
+            b"</channel></rss>",
+            "https://example.com/feed.xml",
+            "application/rss+xml",
+        )
+    )
+
+    assert previous != current
+    assert "https://a.example/item" not in previous
+    assert "https://b.example/item" not in current
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "https://example.com/item?token=secret",
+        "https://example.com/item?key=secret",
+        "https://example.com/item?safe=1;token=secret",
+        "https://example.com/item?api_token=secret",
+        "https://example.com/item?api-token=secret",
+        (
+            "https://hooks.slack.com/services/"
+            "T00000000/B00000000/"
+            "XXXXXXXXXXXXXXXXXXXXXXXX"
+        ),
+    ],
+    ids=[
+        "query-credential",
+        "key-credential",
+        "semicolon-credential",
+        "underscore-api-token",
+        "hyphen-api-token",
+        "webhook",
+    ],
+)
+def test_feed_rejects_credential_bearing_destinations(destination: str) -> None:
+    body = f'<rss><channel><link href="{destination}"/></channel></rss>'.encode()
+
+    with pytest.raises(monitor.MonitorError, match="credentials"):
+        normalize_document(
+            Document(body, "https://example.com/feed.xml", "application/rss+xml")
+        )
+
+
+def test_feed_text_link_is_hashed_without_raw_url() -> None:
+    destination = "https://example.com/item"
+    body = f"<rss><channel><link>{destination}</link></channel></rss>".encode()
+
+    normalized = normalize_document(
+        Document(body, "https://example.com/feed.xml", "application/rss+xml")
+    )
+
+    assert destination not in normalized
+    assert monitor.hashlib.sha256(destination.encode()).hexdigest() in normalized
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "https://user:pass@example.com/item",
+        "https://example.com/item?token=secret",
+        "https://hooks.slack.com/services/T00000000/B00000000/" + "X" * 24,
+    ],
+    ids=["userinfo", "query-credential", "webhook"],
+)
+def test_html_rejects_credential_bearing_destinations(destination: str) -> None:
+    document = Document(
+        f'<main><a href="{destination}">Link</a></main>'.encode(),
+        "https://example.com/",
+        "text/html",
+    )
+
+    with pytest.raises(monitor.MonitorError, match="credentials"):
+        normalize_document(document)
+
+
+@pytest.mark.parametrize(
+    ("content_type", "template", "before_href", "after_href"),
+    [
+        (
+            "application/rss+xml",
+            (
+                '<rss><channel><item><description><![CDATA[<a href="{href}">'
+                "Apply</a>]]></description></item></channel></rss>"
+            ),
+            "/v1",
+            "/v2",
+        ),
+        (
+            "application/rss+xml",
+            (
+                '<rss><channel><item><description><![CDATA[<a href="{href}">'
+                "Apply</a>]]></description></item></channel></rss>"
+            ),
+            "https://example.com/v1",
+            "https://example.com/v2",
+        ),
+        (
+            "application/atom+xml",
+            (
+                '<feed><entry><id>entry-1</id><content type="xhtml">'
+                '<div xmlns="http://www.w3.org/1999/xhtml"><a href="{href}">'
+                "Apply</a></div></content></entry></feed>"
+            ),
+            "/v1",
+            "/v2",
+        ),
+        (
+            "application/atom+xml",
+            (
+                '<feed><entry><id>entry-1</id><content type="xhtml">'
+                '<div xmlns="http://www.w3.org/1999/xhtml"><a href="{href}">'
+                "Apply</a></div></content></entry></feed>"
+            ),
+            "https://example.com/v1",
+            "https://example.com/v2",
+        ),
+    ],
+    ids=["rss-relative", "rss-absolute", "atom-relative", "atom-absolute"],
+)
+def test_feed_embedded_destination_change_is_detected(
+    content_type: str,
+    template: str,
+    before_href: str,
+    after_href: str,
+) -> None:
+    def make_document(href: str) -> Document:
+        return Document(
+            template.format(href=href).encode(),
+            "https://example.com/feed",
+            content_type,
+        )
+
+    previous = normalize_document(make_document(before_href))
+    current = normalize_document(make_document(after_href))
+
+    assert previous != current
+    assert before_href not in previous
+    assert after_href not in current
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body"),
+    [
+        (
+            "application/rss+xml",
+            (
+                b"<rss><channel><item><description><![CDATA["
+                b'<a href="https://example.com/?token=secret">Apply</a>'
+                b"]]></description></item></channel></rss>"
+            ),
+        ),
+        (
+            "application/atom+xml",
+            (
+                b'<feed><entry><id>entry-1</id><content type="xhtml">'
+                b'<div xmlns="http://www.w3.org/1999/xhtml">'
+                b'<a href="https://example.com/?token=secret">Apply</a>'
+                b"</div></content></entry></feed>"
+            ),
+        ),
+    ],
+    ids=["rss-cdata", "atom-xhtml"],
+)
+def test_feed_embedded_html_rejects_credential_bearing_destination(
+    content_type: str, body: bytes
+) -> None:
+    document = Document(body, "https://example.com/feed", content_type)
+
+    with pytest.raises(MonitorError, match="credentials"):
+        normalize_document(document)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            (
+                b"<rss><channel><item><guid>2</guid><title>B</title></item>"
+                b"<item><guid>1</guid><title>A</title></item></channel></rss>"
+            ),
+            (
+                b"<rss><channel><item><guid>1</guid><title>A</title></item>"
+                b"<item><guid>2</guid><title>B</title></item></channel></rss>"
+            ),
+        ),
+        (
+            (
+                b"<feed><entry><id>2</id><title>B</title></entry>"
+                b"<entry><id>1</id><title>A</title></entry></feed>"
+            ),
+            (
+                b"<feed><entry><id>1</id><title>A</title></entry>"
+                b"<entry><id>2</id><title>B</title></entry></feed>"
+            ),
+        ),
+    ],
+    ids=["rss", "atom"],
+)
+def test_feed_entry_reordering_is_ignored(before: bytes, after: bytes) -> None:
+    previous = normalize_document(
+        Document(before, "https://example.com/feed", "application/rss+xml")
+    )
+    current = normalize_document(
+        Document(after, "https://example.com/feed", "application/rss+xml")
+    )
+
+    assert current == previous
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'<?xml version="1.0"?><root xml:base="' + b"a" * 4_097 + b'"/>',
+        (
+            b'<?xml version="1.0"?><root>'
+            + b'<node xml:base="x">' * 201
+            + b"text"
+            + b"</node>" * 201
+            + b"</root>"
+        ),
+    ],
+    ids=["base-url-length", "nesting-depth"],
+)
+def test_xml_base_processing_is_bounded(body: bytes) -> None:
+    with pytest.raises(monitor.MonitorError, match=r"base URL|nesting"):
+        normalize_document(
+            Document(body, "https://example.com/feed", "application/xml")
+        )
+
+
+@pytest.mark.parametrize(
+    ("old_html", "new_html"),
+    [
+        (
+            b'<a href="/v1">Download</a>',
+            b'<a href="/v2">Download</a>',
+        ),
+        (
+            b'<form action="/v1"><button>Submit</button></form>',
+            b'<form action="/v2"><button>Submit</button></form>',
+        ),
+        (
+            b'<base href="/v1/"><a href="download">Download</a>',
+            b'<base href="/v2/"><a href="download">Download</a>',
+        ),
+    ],
+    ids=["link", "form", "base-relative-link"],
+)
+def test_html_destination_only_change_is_detected(
+    old_html: bytes, new_html: bytes
+) -> None:
+    previous = normalize_document(
+        Document(old_html, "https://example.com/", "text/html")
+    )
+    current = normalize_document(
+        Document(new_html, "https://example.com/", "text/html")
+    )
+
+    assert previous != current
+    assert "/v1" not in previous
+    assert "/v2" not in current
+    result = compare_text(current, previous, max_diff_lines=20)
+    assert result["status"] == "changed"

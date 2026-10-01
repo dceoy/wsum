@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import hashlib
 import io
@@ -10,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import sys
 import tempfile
@@ -24,8 +26,10 @@ import monitor
 
 _TARGETS_FILE = "targets.csv"
 _STATE_DIR = ".wsum"
+_PENDING_RECOVERY_DIR = ".pending-recovery"
 _MAX_CSV_BYTES = 1024 * 1024
 _MAX_SNAPSHOT_BYTES = 40 * 1024 * 1024
+_MAX_RECOVERY_RECORD_BYTES = 3 * _MAX_SNAPSHOT_BYTES + 1024 * 1024
 _REQUIRED_FIELDS = {"name", "url"}
 _ALLOWED_FIELDS = _REQUIRED_FIELDS | {"enabled", "watch_focus"}
 _PENDING_FIELDS = {
@@ -41,6 +45,7 @@ _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{32}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_RECOVERY_RECORD_VERSION = 1
 
 
 class WorkspaceError(RuntimeError):
@@ -76,7 +81,6 @@ def _fsync_directory(path: Path) -> None:
 def _ensure_directory(
     path: Path, description: str, *, sync_parent: bool = False
 ) -> Path:
-    created = False
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -86,8 +90,6 @@ def _ensure_directory(
             pass
         except OSError as exc:
             raise WorkspaceError(f"{description} is unavailable") from exc
-        else:
-            created = True
         try:
             info = path.lstat()
         except OSError as exc:
@@ -96,7 +98,7 @@ def _ensure_directory(
         raise WorkspaceError(f"{description} is unavailable") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         raise WorkspaceError(f"{description} must be a non-symlink directory")
-    if created and sync_parent:
+    if sync_parent:
         try:
             _fsync_directory(path.parent)
         except OSError as exc:
@@ -107,7 +109,11 @@ def _ensure_directory(
 
 
 def _state_dir(workspace: Path) -> Path:
-    return _ensure_directory(workspace / _STATE_DIR, "workspace state directory")
+    return _ensure_directory(
+        workspace / _STATE_DIR,
+        "workspace state directory",
+        sync_parent=True,
+    )
 
 
 def _read_csv(path: Path) -> str:
@@ -236,25 +242,76 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
     return targets
 
 
-def _candidate_path(state: Path, value: str | Path) -> Path:
-    candidates_dir = _ensure_directory(
-        state / "candidates", "workspace state/candidates"
+def _existing_pending_paths(
+    state: Path, target_id: str
+) -> tuple[Path, Path, str] | None:
+    """Resolve existing pending paths without creating a target directory."""
+    target_id = _validate_target_id(target_id)
+    pending = _ensure_directory(
+        state / "pending", "pending directory", sync_parent=True
     )
-    candidate = Path(value)
-    original = Path.cwd() / candidate if not candidate.is_absolute() else candidate
+    target = pending / target_id
     try:
-        info = original.lstat()
+        info = target.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise WorkspaceError("pending target directory is unavailable") from exc
+    else:
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise WorkspaceError("pending target must be a non-symlink directory")
+        return target / "state.json", target / "candidate.txt", "grouped"
+
+    legacy_state = pending / f"{target_id}.json"
+    try:
+        info = legacy_state.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise WorkspaceError("cannot stat pending decision") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise WorkspaceError("pending decision must be a regular non-symlink file")
+
+    candidates = state / "candidates"
+    try:
+        info = candidates.lstat()
+    except FileNotFoundError:
+        raise WorkspaceError("legacy candidate directory is unavailable") from None
+    except OSError as exc:
+        raise WorkspaceError("legacy candidate directory is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise WorkspaceError(
+            "workspace state/candidates must be a non-symlink directory"
+        )
+    return legacy_state, candidates / f"{target_id}.txt", "legacy"
+
+
+def _pending_paths(
+    state: Path, target_id: str, *, create: bool = False
+) -> tuple[Path, Path]:
+    """Resolve pending metadata and candidate paths from one layout."""
+    target_id = _validate_target_id(target_id)
+    existing = _existing_pending_paths(state, target_id)
+    if existing is not None:
+        return existing[0], existing[1]
+    if create:
+        target = _ensure_directory(
+            state / "pending" / target_id,
+            "pending target directory",
+            sync_parent=True,
+        )
+        return target / "state.json", target / "candidate.txt"
+    raise WorkspaceError("no valid pending decision exists for target")
+
+
+def _candidate_path(state: Path, target_id: str) -> Path:
+    _, candidate = _pending_paths(state, target_id)
+    try:
+        info = candidate.lstat()
     except OSError as exc:
         raise WorkspaceError("cannot stat candidate") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise WorkspaceError("candidate must be a regular non-symlink file")
-    candidate = original.resolve()
-    try:
-        candidate.relative_to(candidates_dir.resolve())
-    except ValueError as exc:
-        raise WorkspaceError(
-            "candidate must be under workspace state/candidates"
-        ) from exc
     return candidate
 
 
@@ -381,19 +438,25 @@ def _fsync_snapshot_directory(path: Path) -> None:
 
 def _promote_snapshot(
     state: Path,
-    candidate_path: str | Path,
     *,
     target_id: str,
     expected_sha256: object,
     candidate_sha256: object,
+    candidate_source: Path | None = None,
+    candidate_data: bytes | None = None,
 ) -> dict[str, object]:
     """Atomically promote a candidate when its expected baseline matches."""
     state = _workspace(state)
     target_id = _validate_target_id(target_id)
     expected = _validate_sha256(expected_sha256, "expected_sha256", allow_none=True)
     candidate_digest = _validate_sha256(candidate_sha256, "candidate_sha256")
-    candidate = _candidate_path(state, candidate_path)
-    candidate_data = _read_text_bytes(candidate, "candidate")
+    if candidate_data is None:
+        candidate = (
+            _candidate_path(state, target_id)
+            if candidate_source is None
+            else candidate_source
+        )
+        candidate_data = _read_text_bytes(candidate, "candidate")
     if hashlib.sha256(candidate_data).hexdigest() != candidate_digest:
         raise WorkspaceError("candidate_sha256 does not match candidate")
 
@@ -485,84 +548,851 @@ def _write_report(workspace: Path, run_id: str, target_id: str, report: str) -> 
 def _monitor_target(
     state: Path, target: Mapping[str, object], run_id: str
 ) -> dict[str, object]:
-    target_id = str(target["target_id"])
-    candidates = _ensure_directory(state / "candidates", "candidate directory")
-    snapshots = _ensure_directory(state / "snapshots", "snapshot directory")
-    candidate = candidates / f"{target_id}.txt"
-    previous = snapshots / f"{target_id}.txt"
-    arguments = ["--url", str(target["url"]), "--output", str(candidate)]
-    if previous.exists():
-        arguments.extend(["--previous", str(previous)])
-    namespace = monitor._parser().parse_args(  # pyright: ignore[reportPrivateUsage]
-        arguments
+    target_id = _validate_target_id(target["target_id"])
+    _recover_pending(state, target_id)
+    snapshots = _ensure_directory(
+        state / "snapshots", "snapshot directory", sync_parent=True
     )
-    result = monitor.run(namespace)
-    return _handle_monitor_result(state, target, candidate, result, run_id)
+    previous = snapshots / f"{target_id}.txt"
+    candidate_data: bytes | None = None
+    with tempfile.TemporaryDirectory(prefix=".monitor-", dir=state) as staging:
+        candidate = Path(staging) / "candidate.txt"
+        arguments = ["--url", str(target["url"]), "--output", str(candidate)]
+        if previous.exists():
+            arguments.extend(["--previous", str(previous)])
+        namespace = monitor._parser().parse_args(  # pyright: ignore[reportPrivateUsage]
+            arguments
+        )
+        result = monitor.run(namespace)
+        if result.get("status") in {"baseline", "changed"}:
+            candidate_data = _read_text_bytes(candidate, "candidate")
+    return _handle_monitor_result(
+        state, target, result, run_id, candidate_data=candidate_data
+    )
+
+
+def _optional_lstat(path: Path, description: str) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise WorkspaceError(f"cannot stat {description}") from exc
+
+
+def _pending_cleanup_paths(
+    state: Path, pending: Path, target_id: str
+) -> tuple[Path | None, Path | None, Path | None]:
+    target = pending / target_id
+    target_info = _optional_lstat(target, "pending target")
+    if target_info is not None and (
+        stat.S_ISLNK(target_info.st_mode) or not stat.S_ISDIR(target_info.st_mode)
+    ):
+        raise WorkspaceError("pending target must be a non-symlink directory")
+
+    legacy_state = pending / f"{target_id}.json"
+    state_info = _optional_lstat(legacy_state, "pending decision")
+    if state_info is not None and (
+        stat.S_ISLNK(state_info.st_mode) or not stat.S_ISREG(state_info.st_mode)
+    ):
+        raise WorkspaceError("pending decision must be a regular non-symlink file")
+
+    candidates = state / "candidates"
+    candidates_info = _optional_lstat(candidates, "legacy candidate directory")
+    if candidates_info is not None and (
+        stat.S_ISLNK(candidates_info.st_mode)
+        or not stat.S_ISDIR(candidates_info.st_mode)
+    ):
+        raise WorkspaceError(
+            "workspace state/candidates must be a non-symlink directory"
+        )
+    legacy_candidate = candidates / f"{target_id}.txt"
+    candidate_info = _optional_lstat(legacy_candidate, "candidate")
+    if candidate_info is not None and (
+        stat.S_ISLNK(candidate_info.st_mode) or not stat.S_ISREG(candidate_info.st_mode)
+    ):
+        raise WorkspaceError("candidate must be a regular non-symlink file")
+
+    return (
+        target if target_info is not None else None,
+        legacy_candidate if candidate_info is not None else None,
+        legacy_state if state_info is not None else None,
+    )
 
 
 def _remove_pending(state: Path, target_id: str) -> None:
-    with suppress(OSError):
-        (state / "pending" / f"{target_id}.json").unlink(missing_ok=True)
+    pending = _ensure_directory(
+        state / "pending", "pending directory", sync_parent=True
+    )
+    target_id = _validate_target_id(target_id)
+    grouped_target, legacy_candidate, legacy_state = _pending_cleanup_paths(
+        state, pending, target_id
+    )
 
-
-def _cleanup_candidate(candidate: Path) -> None:
     try:
-        candidate.unlink(missing_ok=True)
+        if legacy_candidate is not None:
+            legacy_candidate.unlink()
+        if legacy_state is not None:
+            legacy_state.unlink()
     except OSError as exc:
-        raise WorkspaceError("cannot remove candidate snapshot") from exc
+        raise WorkspaceError("cannot remove pending transaction") from exc
 
-
-def _write_pending(state: Path, payload: Mapping[str, object]) -> None:
-    pending = _ensure_directory(state / "pending", "pending directory")
-    target_id = str(payload["target_id"])
-    destination = pending / f"{target_id}.json"
-    data = (json.dumps(payload, sort_keys=True) + "\n").encode()
-    temporary_path: Path | None = None
     try:
-        descriptor, name = tempfile.mkstemp(
-            dir=pending, prefix=f".{target_id}.", suffix=".tmp"
-        )
-        temporary_path = Path(name)
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary_path.replace(destination)
-        temporary_path = None
+        if grouped_target is not None:
+            shutil.rmtree(grouped_target)
+    except OSError as exc:
+        raise WorkspaceError("cannot remove pending transaction") from exc
+
+    try:
+        candidates = state / "candidates"
+        candidates_info = _optional_lstat(candidates, "legacy candidate directory")
+        if candidates_info is not None:
+            if stat.S_ISLNK(candidates_info.st_mode) or not stat.S_ISDIR(
+                candidates_info.st_mode
+            ):
+                raise WorkspaceError(
+                    "workspace state/candidates must be a non-symlink directory"
+                )
+            _fsync_directory(candidates)
+        _fsync_directory(pending)
+    except OSError as exc:
+        raise WorkspaceError("cannot fsync pending transaction directories") from exc
+
+
+def _write_pending_file(destination: Path, payload: Mapping[str, object]) -> None:
+    data = (json.dumps(payload, sort_keys=True) + "\n").encode()
+    temporary = _write_temporary_file(destination, data, "pending state")
+    try:
+        temporary.replace(destination)
     except OSError as exc:
         raise WorkspaceError("cannot persist pending decision state") from exc
     finally:
-        if temporary_path is not None:
-            with suppress(OSError):
-                temporary_path.unlink(missing_ok=True)
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+    try:
+        _fsync_directory(destination.parent)
+    except OSError as exc:
+        raise WorkspaceError("cannot fsync pending directory") from exc
+
+
+def _recovery_directory(state: Path, *, create: bool) -> Path | None:
+    path = state / _PENDING_RECOVERY_DIR
+    if create:
+        directory = _ensure_directory(
+            path,
+            "pending recovery directory",
+            sync_parent=True,
+        )
+    else:
+        info = _optional_lstat(path, "pending recovery directory")
+        if info is None:
+            return None
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise WorkspaceError(
+                "pending recovery directory must be a non-symlink directory"
+            )
+        directory = path
+    try:
+        mode = stat.S_IMODE(directory.lstat().st_mode)
+    except OSError as exc:
+        raise WorkspaceError("cannot stat pending recovery directory") from exc
+    if mode & 0o077:
+        raise WorkspaceError("pending recovery directory must be private")
+    return directory
+
+
+def _decode_recovery_backup(value: object) -> bytes | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise WorkspaceError("pending recovery record is invalid")
+    try:
+        data = base64.b64decode(value.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise WorkspaceError("pending recovery record is invalid") from exc
+    if len(data) > _MAX_SNAPSHOT_BYTES:
+        raise WorkspaceError("pending recovery record is too large")
+    return data
+
+
+def _validate_recovery_record(value: object, target_id: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise WorkspaceError("pending recovery record is invalid")
+    record = cast("dict[str, object]", value)
+    if (
+        type(record.get("version")) is not int
+        or record["version"] != _RECOVERY_RECORD_VERSION
+        or record.get("target_id") != target_id
+    ):
+        raise WorkspaceError("pending recovery record is invalid")
+    kind = record.get("kind")
+    if kind == "replace":
+        if set(record) != {
+            "group_dir_existed",
+            "kind",
+            "layout",
+            "old_candidate",
+            "old_state",
+            "target_id",
+            "version",
+        }:
+            raise WorkspaceError("pending recovery record is invalid")
+        layout = record.get("layout")
+        group_dir_existed = record.get("group_dir_existed")
+        if (
+            not isinstance(layout, str)
+            or layout not in {"none", "grouped", "legacy"}
+            or not isinstance(group_dir_existed, bool)
+            or group_dir_existed != (layout == "grouped")
+        ):
+            raise WorkspaceError("pending recovery record is invalid")
+        _decode_recovery_backup(record.get("old_state"))
+        _decode_recovery_backup(record.get("old_candidate"))
+    elif kind == "commit":
+        if set(record) != {"kind", "revision", "target_id", "version"}:
+            raise WorkspaceError("pending recovery record is invalid")
+        if not isinstance(record.get("revision"), str) or not _REVISION_RE.fullmatch(
+            cast("str", record.get("revision"))
+        ):
+            raise WorkspaceError("pending recovery record is invalid")
+    elif kind == "cleanup":
+        if set(record) != {
+            "kind",
+            "material",
+            "purpose",
+            "report_sha256",
+            "revision",
+            "run_id",
+            "target_id",
+            "version",
+        }:
+            raise WorkspaceError("pending recovery record is invalid")
+        purpose = record.get("purpose")
+        if purpose == "discard":
+            if any(
+                record.get(field) is not None
+                for field in ("material", "report_sha256", "revision", "run_id")
+            ):
+                raise WorkspaceError("pending recovery record is invalid")
+        elif purpose == "finalize":
+            revision = record.get("revision")
+            material = record.get("material")
+            report_sha256 = record.get("report_sha256")
+            run_id = record.get("run_id")
+            if (
+                not isinstance(revision, str)
+                or not _REVISION_RE.fullmatch(revision)
+                or not isinstance(material, bool)
+                or not isinstance(run_id, str)
+                or not _RUN_ID_RE.fullmatch(run_id)
+            ):
+                raise WorkspaceError("pending recovery record is invalid")
+            if material:
+                if not isinstance(report_sha256, str) or not _SHA256_RE.fullmatch(
+                    report_sha256
+                ):
+                    raise WorkspaceError("pending recovery record is invalid")
+            elif report_sha256 is not None:
+                raise WorkspaceError("pending recovery record is invalid")
+        else:
+            raise WorkspaceError("pending recovery record is invalid")
+    else:
+        raise WorkspaceError("pending recovery record is invalid")
+    return record
+
+
+def _read_recovery_file(
+    path: Path, target_id: str, description: str
+) -> dict[str, object] | None:
+    info = _optional_lstat(path, description)
+    if info is None:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise WorkspaceError(f"{description} must be a regular non-symlink file")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise WorkspaceError(f"{description} must be private")
+    if info.st_size <= 0 or info.st_size > _MAX_RECOVERY_RECORD_BYTES:
+        raise WorkspaceError(f"{description} size is invalid")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkspaceError(f"{description} is invalid") from exc
+    return _validate_recovery_record(value, target_id)
+
+
+def _recovery_record_path(state: Path, target_id: str) -> Path | None:
+    directory = _recovery_directory(state, create=False)
+    if directory is None:
+        return None
+    return directory / f"{_validate_target_id(target_id)}.json"
+
+
+def _commit_record_path(state: Path, target_id: str) -> Path | None:
+    directory = _recovery_directory(state, create=False)
+    if directory is None:
+        return None
+    # Appending the suffix avoids collisions with another target ID containing dots.
+    return directory / f"{_validate_target_id(target_id)}.json.commit"
+
+
+def _read_recovery_record(state: Path, target_id: str) -> dict[str, object] | None:
+    target_id = _validate_target_id(target_id)
+    path = _recovery_record_path(state, target_id)
+    if path is None:
+        return None
+    return _read_recovery_file(path, target_id, "pending recovery record")
+
+
+def _read_commit_record(state: Path, target_id: str) -> dict[str, object] | None:
+    target_id = _validate_target_id(target_id)
+    path = _commit_record_path(state, target_id)
+    if path is None:
+        return None
+    record = _read_recovery_file(path, target_id, "pending commit record")
+    if record is not None and record.get("kind") != "commit":
+        raise WorkspaceError("pending commit record is invalid")
+    return record
+
+
+def _write_recovery_record_at(
+    state: Path, record: Mapping[str, object], *, commit: bool
+) -> None:
+    target_id = _validate_target_id(record.get("target_id"))
+    normalized = _validate_recovery_record(dict(record), target_id)
+    if commit and normalized.get("kind") != "commit":
+        raise WorkspaceError("pending commit record is invalid")
+    data = (json.dumps(normalized, sort_keys=True) + "\n").encode()
+    if not data or len(data) > _MAX_RECOVERY_RECORD_BYTES:
+        raise WorkspaceError("pending recovery record size is invalid")
+    directory = _recovery_directory(state, create=True)
+    if directory is None:
+        raise WorkspaceError("pending recovery directory is unavailable")
+    path = directory / (f"{target_id}.json.commit" if commit else f"{target_id}.json")
+    description = "pending commit record" if commit else "pending recovery record"
+    current = _optional_lstat(path, description)
+    if current is not None and (
+        stat.S_ISLNK(current.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or stat.S_IMODE(current.st_mode) & 0o077
+    ):
+        raise WorkspaceError(f"{description} is unsafe")
+    temporary = _write_temporary_file(path, data, description)
+    try:
+        temporary.replace(path)
+    except OSError as exc:
+        raise WorkspaceError(f"cannot persist {description}") from exc
+    finally:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+    try:
+        _fsync_directory(directory)
+    except OSError as exc:
+        raise WorkspaceError(f"cannot fsync {description} directory") from exc
+
+
+def _write_recovery_record(state: Path, record: Mapping[str, object]) -> None:
+    _write_recovery_record_at(state, record, commit=False)
+
+
+def _write_commit_record(state: Path, record: Mapping[str, object]) -> None:
+    _write_recovery_record_at(state, record, commit=True)
+
+
+def _retire_recovery_file(
+    state: Path,
+    target_id: str,
+    *,
+    commit: bool,
+    ignore_errors: bool,
+) -> None:
+    directory = _recovery_directory(state, create=False)
+    if directory is None:
+        return
+    target_id = _validate_target_id(target_id)
+    path = directory / (f"{target_id}.json.commit" if commit else f"{target_id}.json")
+    description = "pending commit record" if commit else "pending recovery record"
+    info = _optional_lstat(path, description)
+    if info is None:
+        return
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise WorkspaceError(f"{description} is unsafe")
+    try:
+        path.unlink()
+        _fsync_directory(directory)
+    except OSError as exc:
+        if not ignore_errors:
+            raise WorkspaceError(f"cannot retire {description}") from exc
+
+
+def _retire_recovery_record(
+    state: Path, target_id: str, *, ignore_errors: bool = False
+) -> None:
+    _retire_recovery_file(state, target_id, commit=False, ignore_errors=ignore_errors)
+
+
+def _retire_commit_record(
+    state: Path, target_id: str, *, ignore_errors: bool = False
+) -> None:
+    _retire_recovery_file(state, target_id, commit=True, ignore_errors=ignore_errors)
+
+
+def _read_transaction_backup(path: Path, description: str) -> bytes | None:
+    info = _optional_lstat(path, description)
+    if info is None:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise WorkspaceError(f"{description} must be a regular non-symlink file")
+    return _read_text_bytes(path, description)
+
+
+def _capture_pending_replacement(state: Path, target_id: str) -> dict[str, object]:
+    pending = _ensure_directory(
+        state / "pending", "pending directory", sync_parent=True
+    )
+    existing = _existing_pending_paths(state, target_id)
+    layout = "none" if existing is None else existing[2]
+    if existing is None:
+        old_state = old_candidate = None
+    else:
+        old_state = _read_transaction_backup(existing[0], "pending decision")
+        old_candidate = _read_transaction_backup(existing[1], "candidate")
+    group_dir = pending / target_id
+    group_info = _optional_lstat(group_dir, "pending target")
+    group_dir_existed = group_info is not None
+    if group_dir_existed and (
+        stat.S_ISLNK(group_info.st_mode) or not stat.S_ISDIR(group_info.st_mode)
+    ):
+        raise WorkspaceError("pending target must be a non-symlink directory")
+    return {
+        "group_dir_existed": group_dir_existed,
+        "kind": "replace",
+        "layout": layout,
+        "old_candidate": (
+            None if old_candidate is None else base64.b64encode(old_candidate).decode()
+        ),
+        "old_state": None
+        if old_state is None
+        else base64.b64encode(old_state).decode(),
+        "target_id": target_id,
+        "version": _RECOVERY_RECORD_VERSION,
+    }
+
+
+def _write_pending_candidate(destination: Path, data: bytes) -> None:
+    temporary = _write_temporary_file(destination, data, "pending candidate")
+    try:
+        temporary.replace(destination)
+    except OSError as exc:
+        raise WorkspaceError("cannot persist pending candidate") from exc
+    finally:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+    try:
+        _fsync_directory(destination.parent)
+    except OSError as exc:
+        raise WorkspaceError("cannot fsync pending candidate directory") from exc
+    if _read_text_bytes(destination, "candidate") != data:
+        raise WorkspaceError("pending candidate read-back mismatch")
+
+
+def _restore_transaction_file(path: Path, data: bytes | None, description: str) -> None:
+    info = _optional_lstat(path, description)
+    if data is None:
+        if info is None:
+            return
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise WorkspaceError(f"{description} must be a regular non-symlink file")
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise WorkspaceError(f"cannot restore {description}") from exc
+        return
+    _ensure_directory(path.parent, f"{description} directory", sync_parent=True)
+    if info is not None and (
+        stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+    ):
+        raise WorkspaceError(f"{description} must be a regular non-symlink file")
+    temporary = _write_temporary_file(path, data, description)
+    try:
+        temporary.replace(path)
+    except OSError as exc:
+        raise WorkspaceError(f"cannot restore {description}") from exc
+    finally:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+    try:
+        _fsync_directory(path.parent)
+    except OSError as exc:
+        raise WorkspaceError(f"cannot fsync {description} directory") from exc
+    if _read_text_bytes(path, description) != data:
+        raise WorkspaceError(f"{description} read-back mismatch")
+
+
+def _remove_pending_write_temporaries(directory: Path) -> None:
+    try:
+        entries = tuple(directory.iterdir())
+    except OSError as exc:
+        raise WorkspaceError("cannot inspect pending target directory") from exc
+    prefixes = (".candidate.txt.", ".state.json.")
+    for path in entries:
+        if not path.name.endswith(".tmp") or not path.name.startswith(prefixes):
+            continue
+        info = _optional_lstat(path, "pending temporary file")
+        if info is None:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise WorkspaceError("pending temporary file must be regular")
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise WorkspaceError("cannot remove pending temporary file") from exc
+
+
+def _restore_pending_replacement(state: Path, record: Mapping[str, object]) -> None:
+    target_id = _validate_target_id(record.get("target_id"))
+    pending = _ensure_directory(
+        state / "pending", "pending directory", sync_parent=True
+    )
+    grouped = pending / target_id
+    grouped_info = _optional_lstat(grouped, "pending target")
+    if grouped_info is not None and (
+        stat.S_ISLNK(grouped_info.st_mode) or not stat.S_ISDIR(grouped_info.st_mode)
+    ):
+        raise WorkspaceError("pending target must be a non-symlink directory")
+
+    layout = record.get("layout")
+    old_state = _decode_recovery_backup(record.get("old_state"))
+    old_candidate = _decode_recovery_backup(record.get("old_candidate"))
+    if layout == "grouped":
+        grouped = _ensure_directory(
+            grouped, "pending target directory", sync_parent=True
+        )
+        _remove_pending_write_temporaries(grouped)
+        _restore_transaction_file(grouped / "candidate.txt", old_candidate, "candidate")
+        _restore_transaction_file(grouped / "state.json", old_state, "pending decision")
+    else:
+        if grouped_info is not None:
+            _remove_pending_write_temporaries(grouped)
+            _restore_transaction_file(grouped / "candidate.txt", None, "candidate")
+            _restore_transaction_file(grouped / "state.json", None, "pending decision")
+            try:
+                grouped.rmdir()
+            except OSError as exc:
+                raise WorkspaceError("cannot restore pending target directory") from exc
+        if layout == "legacy":
+            _restore_transaction_file(
+                state / "candidates" / f"{target_id}.txt",
+                old_candidate,
+                "candidate",
+            )
+            _restore_transaction_file(
+                pending / f"{target_id}.json",
+                old_state,
+                "pending decision",
+            )
+
+    candidates = state / "candidates"
+    candidates_info = _optional_lstat(candidates, "legacy candidate directory")
+    try:
+        if candidates_info is not None:
+            if stat.S_ISLNK(candidates_info.st_mode) or not stat.S_ISDIR(
+                candidates_info.st_mode
+            ):
+                raise WorkspaceError(
+                    "workspace state/candidates must be a non-symlink directory"
+                )
+            _fsync_directory(candidates)
+        if layout == "grouped" and grouped_info is not None:
+            _fsync_directory(grouped)
+        _fsync_directory(pending)
+    except OSError as exc:
+        raise WorkspaceError("cannot fsync restored pending transaction") from exc
+
+
+def _finalize_cleanup_record(
+    target_id: str,
+    revision: str,
+    material: bool,
+    report: str | None,
+    run_id: str,
+) -> dict[str, object]:
+    return {
+        "kind": "cleanup",
+        "material": material,
+        "purpose": "finalize",
+        "report_sha256": (
+            None
+            if report is None
+            else hashlib.sha256(report.encode("utf-8")).hexdigest()
+        ),
+        "revision": revision,
+        "run_id": _validate_run_id(run_id),
+        "target_id": _validate_target_id(target_id),
+        "version": _RECOVERY_RECORD_VERSION,
+    }
+
+
+def _complete_cleanup_record(state: Path, record: Mapping[str, object]) -> None:
+    target_id = _validate_target_id(record.get("target_id"))
+    _remove_pending(state, target_id)
+    _retire_recovery_record(state, target_id, ignore_errors=True)
+
+
+def _replacement_matches_commit(
+    state: Path, target_id: str, commit: Mapping[str, object]
+) -> bool:
+    target_id = _validate_target_id(target_id)
+    state_info = _optional_lstat(state, "workspace state directory")
+    if (
+        state_info is None
+        or stat.S_ISLNK(state_info.st_mode)
+        or not stat.S_ISDIR(state_info.st_mode)
+    ):
+        raise WorkspaceError("workspace state must be a non-symlink directory")
+    pending_dir = state / "pending"
+    target_dir = state / "pending" / target_id
+    for directory, description in (
+        (pending_dir, "pending directory"),
+        (target_dir, "pending target directory"),
+    ):
+        info = _optional_lstat(directory, description)
+        if info is None:
+            return False
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise WorkspaceError(f"{description} must be a non-symlink directory")
+    state_path = target_dir / "state.json"
+    candidate_path = target_dir / "candidate.txt"
+    state_info = _optional_lstat(state_path, "pending decision")
+    candidate_info = _optional_lstat(candidate_path, "candidate")
+    if state_info is None or candidate_info is None:
+        return False
+    if stat.S_ISLNK(state_info.st_mode) or not stat.S_ISREG(state_info.st_mode):
+        raise WorkspaceError("pending decision must be a regular non-symlink file")
+    if stat.S_ISLNK(candidate_info.st_mode) or not stat.S_ISREG(candidate_info.st_mode):
+        raise WorkspaceError("candidate must be a regular non-symlink file")
+    try:
+        pending = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(pending, dict):
+        return False
+    pending = cast("dict[str, object]", pending)
+    if set(pending) != _PENDING_FIELDS:
+        return False
+    if pending.get("target_id") != target_id or pending.get("revision") != commit.get(
+        "revision"
+    ):
+        return False
+    run_id = pending.get("run_id")
+    if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
+        return False
+    if type(pending.get("diff_truncated")) is not bool:
+        return False
+    candidate_data = _read_text_bytes(candidate_path, "candidate")
+    try:
+        candidate_sha256 = _validate_sha256(
+            pending.get("candidate_sha256"), "candidate_sha256"
+        )
+        _validate_sha256(
+            pending.get("expected_sha256"), "expected_sha256", allow_none=True
+        )
+    except WorkspaceError:
+        return False
+    return hashlib.sha256(candidate_data).hexdigest() == candidate_sha256
+
+
+def _replacement_previous_revision(record: Mapping[str, object]) -> str | None:
+    old_state = _decode_recovery_backup(record.get("old_state"))
+    if old_state is None:
+        return None
+    try:
+        value = json.loads(old_state.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkspaceError("pending recovery record is invalid") from exc
+    if not isinstance(value, dict):
+        raise WorkspaceError("pending recovery record is invalid")
+    previous = cast("dict[str, object]", value).get("revision")
+    if not isinstance(previous, str) or not _REVISION_RE.fullmatch(previous):
+        raise WorkspaceError("pending recovery record is invalid")
+    return previous
+
+
+def _recover_pending(
+    state: Path, target_id: str, *, revision: str | None = None
+) -> dict[str, object] | None:
+    target_id = _validate_target_id(target_id)
+    record = _read_recovery_record(state, target_id)
+    commit = _read_commit_record(state, target_id)
+    if commit is not None:
+        if record is None:
+            # The undo record is retired only after the commit marker is durable.
+            _retire_commit_record(state, target_id)
+            return None
+        if record.get("kind") != "replace":
+            raise WorkspaceError("pending recovery records conflict")
+        if revision is None:
+            raise WorkspaceError(
+                "pending replacement recovery requires a decision revision"
+            )
+        if revision == commit.get("revision"):
+            if not _replacement_matches_commit(state, target_id, commit):
+                raise WorkspaceError("pending committed replacement is incomplete")
+            _retire_recovery_record(state, target_id)
+            _retire_commit_record(state, target_id)
+            return None
+        if revision != _replacement_previous_revision(record):
+            raise WorkspaceError("decision revision does not match pending replacement")
+        # Remove the commit marker durably before restoring the prior review. If
+        # this fails, leave both records intact so finalize can choose by revision.
+        _retire_commit_record(state, target_id)
+        _restore_pending_replacement(state, record)
+        _retire_recovery_record(state, target_id)
+        return None
+    if record is None:
+        return None
+    kind = record["kind"]
+    if kind == "replace":
+        _restore_pending_replacement(state, record)
+        _retire_recovery_record(state, target_id)
+        return None
+    if kind == "commit":
+        # Compatibility with v1 records written by earlier workspace versions.
+        _retire_recovery_record(state, target_id, ignore_errors=True)
+        return None
+    _complete_cleanup_record(state, record)
+    return record
+
+
+def _install_pending_replacement(
+    state: Path,
+    payload: Mapping[str, object],
+    candidate_data: bytes,
+    undo: Mapping[str, object],
+) -> None:
+    target_id = _validate_target_id(payload.get("target_id"))
+    pending = _ensure_directory(
+        state / "pending", "pending directory", sync_parent=True
+    )
+    target = _ensure_directory(
+        pending / target_id,
+        "pending target directory",
+        sync_parent=True,
+    )
+    _write_pending_candidate(target / "candidate.txt", candidate_data)
+    _write_pending_file(target / "state.json", payload)
+
+    if undo["layout"] == "legacy":
+        old_legacy_candidate = state / "candidates" / f"{target_id}.txt"
+        old_legacy_state = pending / f"{target_id}.json"
+        for path, description in (
+            (old_legacy_candidate, "candidate"),
+            (old_legacy_state, "pending decision"),
+        ):
+            info = _optional_lstat(path, description)
+            if info is not None:
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                    raise WorkspaceError(
+                        f"{description} must be a regular non-symlink file"
+                    )
+                path.unlink()
+        _fsync_directory(state / "candidates")
+        _fsync_directory(pending)
+
+    durable_candidate = _read_text_bytes(target / "candidate.txt", "candidate")
+    if durable_candidate != candidate_data:
+        raise WorkspaceError("pending candidate read-back mismatch")
+    durable_state = _read_pending(state, target_id)
+    if durable_state != dict(payload):
+        raise WorkspaceError("pending decision read-back mismatch")
+
+    _write_commit_record(
+        state,
+        {
+            "kind": "commit",
+            "revision": payload["revision"],
+            "target_id": target_id,
+            "version": _RECOVERY_RECORD_VERSION,
+        },
+    )
+
+
+def _write_pending_transaction(
+    state: Path, payload: Mapping[str, object], candidate_data: bytes
+) -> None:
+    target_id = _validate_target_id(payload.get("target_id"))
+    _recover_pending(state, target_id)
+    undo = _capture_pending_replacement(state, target_id)
+    _write_recovery_record(state, undo)
+    try:
+        _install_pending_replacement(state, payload, candidate_data, undo)
+    except (OSError, WorkspaceError):
+        try:
+            # Keep the undo record untouched until the separate commit marker is
+            # durably removed. A failed rollback can then replay this backup.
+            _retire_commit_record(state, target_id)
+            _restore_pending_replacement(state, undo)
+            _retire_recovery_record(state, target_id)
+        except (OSError, WorkspaceError) as recovery_exc:
+            raise WorkspaceError(
+                "pending update failed and rollback could not be completed"
+            ) from recovery_exc
+        raise
+    try:
+        _retire_recovery_record(state, target_id)
+    except WorkspaceError:
+        # The durable commit marker keeps a returned replacement recoverable if
+        # undo retirement cannot be confirmed.
+        return
+    _retire_commit_record(state, target_id, ignore_errors=True)
+
+
+def _discard_pending(state: Path, target_id: str) -> None:
+    target_id = _validate_target_id(target_id)
+    _recover_pending(state, target_id)
+    record = {
+        "kind": "cleanup",
+        "material": None,
+        "purpose": "discard",
+        "report_sha256": None,
+        "revision": None,
+        "run_id": None,
+        "target_id": target_id,
+        "version": _RECOVERY_RECORD_VERSION,
+    }
+    _write_recovery_record(state, record)
+    _complete_cleanup_record(state, record)
 
 
 def _handle_monitor_result(
     state: Path,
     target: Mapping[str, object],
-    candidate: Path,
     result: Mapping[str, object],
     run_id: str,
+    *,
+    candidate_source: Path | None = None,
+    candidate_data: bytes | None = None,
 ) -> dict[str, object]:
     target_id = str(target["target_id"])
     status = result.get("status")
     if status == "unchanged":
-        _cleanup_candidate(candidate)
-        _remove_pending(state, target_id)
+        _discard_pending(state, target_id)
         return {"action": "unchanged", "target_id": target_id, "name": target["name"]}
     if status == "baseline":
         promoted = _promote_snapshot(
             state,
-            candidate,
             target_id=target_id,
             expected_sha256=None,
             candidate_sha256=result.get("sha256"),
+            candidate_source=candidate_source,
+            candidate_data=candidate_data,
         )
         if promoted.get("action") != "snapshot_promoted":
             return {"action": "snapshot_conflict", "target_id": target_id}
-        _cleanup_candidate(candidate)
-        _remove_pending(state, target_id)
+        _discard_pending(state, target_id)
         return {
             "action": "baseline_created",
             "target_id": target_id,
@@ -579,7 +1409,17 @@ def _handle_monitor_result(
         "candidate_sha256": result.get("sha256"),
         "diff_truncated": result.get("diff_truncated") is True,
     }
-    _write_pending(state, pending)
+    if candidate_data is None:
+        candidate = (
+            _candidate_path(state, target_id)
+            if candidate_source is None
+            else candidate_source
+        )
+        candidate_data = _read_text_bytes(candidate, "candidate")
+    candidate_digest = _validate_sha256(pending["candidate_sha256"], "candidate_sha256")
+    if hashlib.sha256(candidate_data).hexdigest() != candidate_digest:
+        raise WorkspaceError("candidate_sha256 does not match candidate")
+    _write_pending_transaction(state, pending, candidate_data)
     return {
         "action": "review",
         "target_id": target_id,
@@ -620,7 +1460,7 @@ def check(workspace: str | Path) -> dict[str, object]:
 
 
 def _read_pending(state: Path, target_id: str) -> dict[str, object]:
-    path = state / "pending" / f"{target_id}.json"
+    path, _ = _pending_paths(state, target_id)
     try:
         info = path.lstat()
     except OSError as exc:
@@ -637,7 +1477,7 @@ def _read_pending(state: Path, target_id: str) -> dict[str, object]:
     pending = cast("dict[str, object]", value)
     if set(pending) == _PENDING_FIELDS - {"run_id"}:
         pending["run_id"] = _new_run_id()
-        _write_pending(state, pending)
+        _write_pending_file(path, pending)
     elif set(pending) != _PENDING_FIELDS:
         raise WorkspaceError("pending decision is invalid")
     run_id = pending.get("run_id")
@@ -672,12 +1512,59 @@ def _validate_decision(
     return target_id, revision, material, report
 
 
+def _finalize_record_matches(
+    record: Mapping[str, object],
+    revision: str,
+    material: bool,
+    report: str | None,
+) -> bool:
+    report_sha256 = (
+        None if report is None else hashlib.sha256(report.encode("utf-8")).hexdigest()
+    )
+    return (
+        record.get("kind") == "cleanup"
+        and record.get("purpose") == "finalize"
+        and record.get("revision") == revision
+        and record.get("material") is material
+        and record.get("report_sha256") == report_sha256
+    )
+
+
+def _finalized_result(root: Path, record: Mapping[str, object]) -> dict[str, object]:
+    target_id = _validate_target_id(record.get("target_id"))
+    material = record.get("material")
+    result: dict[str, object] = {
+        "action": "finalized",
+        "target_id": target_id,
+        "material": material,
+    }
+    if material is True:
+        run_id = _validate_run_id(record.get("run_id"))
+        result["report_path"] = str(root / "reports" / f"{run_id}.md")
+    return result
+
+
 def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, object]:
     """Apply one semantic decision and safely advance its baseline."""
     target_id, revision, material, report = _validate_decision(payload)
 
     root = _workspace(workspace)
     state = _state_dir(root)
+    commit = _read_commit_record(state, target_id)
+    recovery = _read_recovery_record(state, target_id)
+    if commit is not None:
+        _recover_pending(state, target_id, revision=revision)
+        recovery = _read_recovery_record(state, target_id)
+    if recovery is not None and recovery.get("kind") == "cleanup":
+        if recovery.get("purpose") == "finalize":
+            if not _finalize_record_matches(recovery, revision, material, report):
+                raise WorkspaceError("decision does not match pending cleanup")
+            _complete_cleanup_record(state, recovery)
+            return _finalized_result(root, recovery)
+        _recover_pending(state, target_id)
+    elif recovery is not None:
+        _recover_pending(state, target_id)
+
     pending = _read_pending(state, target_id)
     if pending["target_id"] != target_id:
         raise WorkspaceError("pending decision target does not match")
@@ -686,10 +1573,8 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
     if pending["diff_truncated"] is True and not material:
         return {"action": "manual_review_required", "target_id": target_id}
 
-    candidate = state / "candidates" / f"{target_id}.txt"
     promoted = _promote_snapshot(
         state,
-        candidate,
         target_id=target_id,
         expected_sha256=pending["expected_sha256"],
         candidate_sha256=pending["candidate_sha256"],
@@ -702,15 +1587,18 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
         report_path = str(
             _write_report(root, str(pending["run_id"]), target_id, report)
         )
-    _cleanup_candidate(candidate)
-    _remove_pending(state, target_id)
-    result: dict[str, object] = {
-        "action": "finalized",
-        "target_id": target_id,
-        "material": material,
-    }
-    if report_path is not None:
-        result["report_path"] = report_path
+    cleanup = _finalize_cleanup_record(
+        target_id,
+        revision,
+        material,
+        report,
+        str(pending["run_id"]),
+    )
+    _write_recovery_record(state, cleanup)
+    _complete_cleanup_record(state, cleanup)
+    result = _finalized_result(root, cleanup)
+    if report_path is not None and result.get("report_path") != report_path:
+        raise WorkspaceError("finalized report path mismatch")
     return result
 
 
