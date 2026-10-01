@@ -1440,7 +1440,6 @@ def test_check_syncs_new_state_and_grouped_pending_directories(
     assert (pending / target_id / "state.json").exists()
 
 
-
 def test_check_compact_returns_handles_and_pending_returns_full_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1538,6 +1537,7 @@ def test_pending_target_listing_rejects_hidden_unsafe_entry(tmp_path: Path) -> N
 
     with pytest.raises(WorkspaceError, match="unsafe entry"):
         workspace.pending_reviews(tmp_path)
+
 
 def test_recovery_directory_parent_fsync_retries_after_creation_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
