@@ -860,42 +860,6 @@ def _read_commit_record(state: Path, target_id: str) -> dict[str, object] | None
     return record
 
 
-def _recovery_target_ids(state: Path) -> list[str]:
-    """List target IDs with durable pending recovery records."""
-    directory = _recovery_directory(state, create=False)
-    if directory is None:
-        return []
-
-    target_ids: set[str] = set()
-    try:
-        entries = sorted(directory.iterdir(), key=lambda item: item.name)
-    except OSError as exc:
-        raise WorkspaceError("cannot list pending recovery directory") from exc
-    for entry in entries:
-        try:
-            info = entry.lstat()
-        except OSError as exc:
-            raise WorkspaceError("cannot stat pending recovery entry") from exc
-        if entry.name.startswith("."):
-            if (
-                entry.name.endswith(".tmp")
-                and stat.S_ISREG(info.st_mode)
-                and not stat.S_ISLNK(info.st_mode)
-            ):
-                continue
-            raise WorkspaceError("pending recovery directory contains an unsafe entry")
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise WorkspaceError("pending recovery directory contains an unsafe entry")
-        if entry.name.endswith(".json.commit"):
-            target_id = entry.name[: -len(".json.commit")]
-        elif entry.name.endswith(".json"):
-            target_id = entry.name[: -len(".json")]
-        else:
-            raise WorkspaceError("pending recovery directory contains an unsafe entry")
-        target_ids.add(_validate_target_id(target_id))
-    return sorted(target_ids)
-
-
 def _write_recovery_record_at(
     state: Path, record: Mapping[str, object], *, commit: bool
 ) -> None:
@@ -1723,8 +1687,9 @@ def pending_reviews(
     """Return resumable pending reviews without refetching monitored targets."""
     root = _workspace(workspace)
     state = _state_dir(root)
-    for recovery_target_id in _recovery_target_ids(state):
-        _recover_pending(state, recovery_target_id)
+    target_ids = _pending_target_ids(state)
+    for pending_target_id in target_ids:
+        _recover_pending(state, pending_target_id)
     target_ids = _pending_target_ids(state)
     if target_id is not None:
         target_id = _validate_target_id(target_id)
