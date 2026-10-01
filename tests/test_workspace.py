@@ -1572,9 +1572,9 @@ def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
         "unexpected-file",
     ],
 )
-def test_pending_target_listing_handles_filesystem_edges(  # noqa: C901
+def test_pending_target_listing_handles_filesystem_edges(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
-) -> None:
+) -> None:  # ruff: ignore[complex-structure]
     state = tmp_path / ".wsum"
     state.mkdir()
     pending = state / "pending"
@@ -1647,6 +1647,24 @@ def test_pending_reviews_legacy_without_targets_uses_safe_fallback(
     assert review["name"] == "example"
     assert not review["url"]
     assert not review["watch_focus"]
+
+
+def test_legacy_review_context_falls_back_when_target_is_not_in_csv(
+    tmp_path: Path,
+) -> None:
+    _write_targets(
+        tmp_path / "targets.csv",
+        "Other,https://example.org/,,true\n",
+    )
+
+    assert workspace._legacy_review_context(  # pyright: ignore[reportPrivateUsage]
+        tmp_path,
+        "example",
+    ) == {
+        "name": "example",
+        "url": "",
+        "watch_focus": "",
+    }
 
 
 @pytest.mark.parametrize(
@@ -2743,6 +2761,31 @@ def test_main_success_emits_json(
     assert workspace.main(["--workspace", str(tmp_path), "pending"]) == 0
     captured = capsys.readouterr()
     assert captured.out.strip() == '{"reviews": []}'
+    assert not captured.err
+
+
+def test_main_finalize_dispatches_decision(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    _write_review_transaction(state, "grouped")
+    payload = json.dumps({
+        "target_id": "example",
+        "revision": "a" * 32,
+        "material": False,
+    })
+    monkeypatch.setattr(
+        workspace.sys,
+        "stdin",
+        type("Input", (), {"read": lambda _self: payload})(),
+    )
+
+    assert workspace.main(["--workspace", str(tmp_path), "finalize"]) == 0
+    captured = capsys.readouterr()
+    assert '"action": "finalized"' in captured.out
     assert not captured.err
 
 
