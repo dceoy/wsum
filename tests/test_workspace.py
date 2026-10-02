@@ -936,10 +936,10 @@ def test_check_batches_targets_and_contains_failures(
     ("link_depth", "max_links", "message"),
     [
         (-1, workspace._MAX_LINKS, "link_depth"),
-        (cast("Any", True), workspace._MAX_LINKS, "link_depth"),
+        (cast("Any", "1"), workspace._MAX_LINKS, "link_depth"),
         (workspace._DEFAULT_LINK_DEPTH, 0, "max_links"),
         (workspace._DEFAULT_LINK_DEPTH, workspace._MAX_LINKS + 1, "max_links"),
-        (workspace._DEFAULT_LINK_DEPTH, cast("Any", True), "max_links"),
+        (workspace._DEFAULT_LINK_DEPTH, cast("Any", "1"), "max_links"),
     ],
 )
 def test_check_rejects_invalid_link_options(
