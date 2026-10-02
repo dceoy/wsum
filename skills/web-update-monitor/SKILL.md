@@ -1,6 +1,6 @@
 ---
 name: web-update-monitor
-description: Monitor public HTTP(S) websites, PDFs, and feeds for meaningful changes using local state, CSV target lists, one-hop reading of newly added links, resumable semantic reviews, and one concise Markdown report per run.
+description: Monitor public HTTP(S) websites, PDFs, and feeds for meaningful changes using local state, CSV target lists, configurable-depth reading of newly added links, resumable semantic reviews, and one concise Markdown report per run.
 license: MIT
 compatibility: Requires Python 3.11+ with pypdf >=6.19,<7 and outbound HTTP(S) access to monitored public targets.
 ---
@@ -127,12 +127,13 @@ The full review includes the opaque `revision`, original `run_id`, name, URL, wa
 
 ## Read newly added links
 
-Let `check` automatically fetch newly added HTTP(S) navigation destinations from changed HTML pages and RSS/Atom feeds. This also includes links inside feed descriptions. Keep the existing four-column CSV contract.
+Let `check` automatically fetch newly added HTTP(S) navigation destinations from changed HTML pages and RSS/Atom feeds. This also includes links inside feed descriptions. Keep the existing four-column CSV contract. Link traversal defaults to depth 1 and at most 100 fetched links per target. Override those run-level limits with `check --link-depth <N> --max-links <N>`; use depth 0 to disable linked-document fetching. `--max-links` accepts 1 through 100.
 
 - Create the first parent baseline without fetching its links.
 - Compare current destination hashes with the accepted parent snapshot. Existing hash tokens are compatible with this behavior; no state migration or additional link baseline is required.
 - Strip URL fragments for fetching, deduplicate destinations, and exclude the requested and final parent URL. Do not submit forms, fetch feed enclosures or self links, or follow non-HTTP(S) destinations.
-- Fetch at most 20 new destinations per target, at depth 1. Normalize HTML, feeds, text, and PDFs through the same safe monitor. Never follow links found in a child document.
+- Traverse breadth-first to the configured depth, defaulting to depth 1. Normalize HTML, feeds, text, and PDFs through the same safe monitor. A child document contributes navigation links only when its depth is below the configured limit.
+- Fetch at most the configured number of destinations per target, defaulting to 100 and never exceeding 100. The count applies across all traversal depths.
 - Bound child fetching to 60 seconds total, 30 seconds per request, 2 MiB per document, and 10 MiB total. Failed requests reserve their full byte allowance. Keep at most 8 KiB of normalized text per child and 64 KiB total. Reject navigation URLs larger than 4 KiB.
 - Retain child contents and individual errors in the parent's pending transaction. Resume through `pending --target-id`; never refetch children during semantic review.
 - Include meaningful linked content and its source URL in the parent's report section. Mention failed, truncated, or omitted child evidence when finalizing a material report.
