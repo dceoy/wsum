@@ -587,7 +587,11 @@ def _monitor_target(
             arguments
         )
         result = monitor.run(namespace)
-        if link_depth > 0 and result.get("status") == "changed" and result.get("links"):
+        link_collection = result.get("links")
+        has_links = bool(link_collection) or bool(
+            getattr(link_collection, "omitted_hashes", ())
+        )
+        if link_depth > 0 and result.get("status") == "changed" and has_links:
             result["link_review"] = _follow_added_links(
                 result,
                 _read_snapshot(previous) or b"",
@@ -623,8 +627,10 @@ def _follow_added_links(  # ruff: ignore[too-many-locals, too-many-statements]
     if link_depth == 0:
         return {"documents": [], "omitted": 0, "incomplete": False}
 
-    links = cast("dict[str, str]", result["links"])
+    link_collection = result["links"]
+    links = cast("dict[str, str]", link_collection)
     previous_hashes = set(_NAVIGATION_HASH_RE.findall(previous.decode("utf-8")))
+    omitted_hashes = set(getattr(link_collection, "omitted_hashes", ()))
     existing_urls = {url for digest, url in links.items() if digest in previous_hashes}
     source_urls = {str(result["source_url"]).split("#", 1)[0], source_url}
     added = sorted(set(links.values()) - existing_urls - source_urls)
@@ -633,7 +639,8 @@ def _follow_added_links(  # ruff: ignore[too-many-locals, too-many-statements]
     seen.update(url for url, _depth in queue)
     scheduled = len(queue)
     documents: list[dict[str, object]] = []
-    omitted = max(0, len(added) - max_links)
+    omitted = len(omitted_hashes - previous_hashes)
+    omitted += max(0, len(added) - max_links)
     incomplete = omitted > 0
     deadline = monotonic() + _LINK_TIMEOUT
     remaining_bytes = _MAX_LINK_TOTAL_BYTES
@@ -653,7 +660,7 @@ def _follow_added_links(  # ruff: ignore[too-many-locals, too-many-statements]
             document = monitor.fetch_document(
                 url, timeout=min(remaining_time, 30.0), max_bytes=byte_limit
             )
-            child_links: dict[str, str] | None = {} if depth < link_depth else None
+            child_links = monitor.LinkCollection() if depth < link_depth else None
             text = _linked_document_text(document, links=child_links)
             bounded = monitor._utf8_prefix(  # pyright: ignore[reportPrivateUsage]
                 text, min(review_bytes, _MAX_LINK_TEXT_BYTES)
@@ -668,6 +675,9 @@ def _follow_added_links(  # ruff: ignore[too-many-locals, too-many-statements]
             incomplete = incomplete or truncated
             byte_limit = len(document.body)
             if child_links is not None:
+                child_omitted = len(child_links.omitted_hashes)
+                omitted += child_omitted
+                incomplete = incomplete or child_omitted > 0
                 seen.add(document.source_url.split("#", 1)[0])
                 for nested_url in sorted(set(child_links.values())):
                     if nested_url in seen:
@@ -679,7 +689,7 @@ def _follow_added_links(  # ruff: ignore[too-many-locals, too-many-statements]
                         continue
                     queue.append((nested_url, depth + 1))
                     scheduled += 1
-        except monitor.MonitorError as exc:
+        except (monitor.MonitorError, ValueError) as exc:
             entry["error"] = str(exc)
             incomplete = True
         # Reserve the full allowance for failed requests, actual bytes on success.

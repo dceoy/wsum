@@ -1506,6 +1506,14 @@ def test_feed_embedded_destination_change_is_detected(
             ),
         ),
         (
+            "application/rss+xml",
+            (
+                b"<rss><channel><item><description>"
+                b'&lt;a href="https://example.com/?token=secret"&gt;Apply&lt;/a&gt;'
+                b"</description></item></channel></rss>"
+            ),
+        ),
+        (
             "application/atom+xml",
             (
                 b'<feed><entry><id>entry-1</id><content type="xhtml">'
@@ -1514,8 +1522,16 @@ def test_feed_embedded_destination_change_is_detected(
                 b"</div></content></entry></feed>"
             ),
         ),
+        (
+            "application/atom+xml",
+            (
+                b'<feed><entry><id>entry-1</id><content type="html">'
+                b'&lt;a href="https://example.com/?token=secret"&gt;Apply&lt;/a&gt;'
+                b"</content></entry></feed>"
+            ),
+        ),
     ],
-    ids=["rss-cdata", "atom-xhtml"],
+    ids=["rss-cdata", "rss-escaped-html", "atom-xhtml", "atom-escaped-html"],
 )
 def test_feed_embedded_html_rejects_credential_bearing_destination(
     content_type: str, body: bytes
@@ -3176,9 +3192,36 @@ def test_monitor_cli_success_failure_and_module_entrypoint(
             "application/atom+xml",
             {"https://example.org/article", "https://example.org/detail"},
         ),
+        (
+            (
+                '<rss xml:base="https://example.com/news/"><channel><item>'
+                '<description>See &lt;a href="release"&gt;release'
+                "&lt;/a&gt;</description>"
+                "</item></channel></rss>"
+            ),
+            "application/rss+xml",
+            {"https://example.com/news/release"},
+        ),
+        (
+            (
+                '<feed xmlns="http://www.w3.org/2005/Atom" '
+                'xml:base="https://example.org/news/"><entry><id>x</id>'
+                '<content type="html">See &lt;a href="release"&gt;release&lt;/a&gt;'
+                "</content></entry></feed>"
+            ),
+            "application/atom+xml",
+            {"https://example.org/news/release"},
+        ),
         ("plain text", "text/plain", set[str]()),
     ],
-    ids=["html-navigation-only", "rss-embedded-html", "atom-base-and-rel", "text"],
+    ids=[
+        "html-navigation-only",
+        "rss-embedded-html",
+        "atom-base-and-rel",
+        "rss-escaped-html",
+        "atom-escaped-html",
+        "text",
+    ],
 )
 def test_normalization_collects_navigation_links_without_changing_text(
     body: str, content_type: str, expected: set[str]
@@ -3198,6 +3241,60 @@ def test_embedded_html_normalization_without_link_collection() -> None:
 
 
 @pytest.mark.parametrize(
+    "relation",
+    [None, "nofollow", "noopener noreferrer"],
+    ids=["no-rel", "nofollow", "noopener-noreferrer"],
+)
+def test_feed_xhtml_anchors_collect_navigation_for_all_relations(
+    relation: str | None,
+) -> None:
+    relation_attr = "" if relation is None else f' rel="{relation}"'
+    body = (
+        '<feed xmlns="http://www.w3.org/2005/Atom" '
+        'xml:base="https://example.org/news/"><entry><id>x</id>'
+        '<content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">'
+        f'<a href="release"{relation_attr}>Details</a>'
+        "</div></content></entry></feed>"
+    )
+    destination = "https://example.org/news/release"
+    digest = monitor.hashlib.sha256(destination.encode()).hexdigest()
+    links = monitor.LinkCollection()
+
+    normalized = monitor.normalize_document(
+        Document(body.encode(), "https://example.org/feed", "application/atom+xml"),
+        links=links,
+    )
+
+    assert set(links.values()) == {destination}
+    assert f"sha256:{digest}" in normalized
+    assert destination not in normalized
+
+
+def test_feed_embedded_html_buffer_flushes_before_real_xml_children() -> None:
+    document = Document(
+        (
+            b'<rss><channel><item><description xml:base="https://example.com/news/">'
+            b'before &lt;a href="first"&gt;one&lt;/a&gt;<b>middle</b>'
+            b'after &lt;a href="last"&gt;two&lt;/a&gt;'
+            b"</description></item></channel></rss>"
+        ),
+        "https://example.com/feed",
+        "application/rss+xml",
+    )
+    links = monitor.LinkCollection()
+
+    normalized = monitor.normalize_document(document, links=links)
+
+    assert set(links.values()) == {
+        "https://example.com/news/first",
+        "https://example.com/news/last",
+    }
+    tokens = ["before", "one", "[b:start]", "middle", "[b:end]", "after", "two"]
+    positions = [normalized.index(token) for token in tokens]
+    assert positions == sorted(positions)
+
+
+@pytest.mark.parametrize(
     "url",
     ["http:///", "https://[bad/", "http://example.com:0/", "mailto:a@example.com"],
 )
@@ -3207,8 +3304,59 @@ def test_link_collection_ignores_invalid_or_non_http_destinations(url: str) -> N
     assert not links
 
 
-def test_link_collection_bounds_url_size() -> None:
-    links: dict[str, str] = {}
-    with pytest.raises(monitor.MonitorError, match="navigation URL exceeds"):
-        monitor._collect_link(links, "https://example.com/" + "x" * 4096)
+@pytest.mark.parametrize(
+    "track_omitted", [False, True], ids=["plain-dict", "link-collection"]
+)
+def test_link_collection_bounds_url_size(track_omitted: bool) -> None:
+    destination = "https://example.com/" + "x" * 4096
+    links: dict[str, str] = monitor.LinkCollection() if track_omitted else {}
+    monitor._collect_link(links, destination)
+
     assert not links
+    if isinstance(links, monitor.LinkCollection):
+        assert links.omitted_hashes == {
+            monitor.hashlib.sha256(destination.encode()).hexdigest()
+        }
+
+
+def test_feed_target_bounds_buffered_embedded_text() -> None:
+    target = monitor._FeedTextTarget(  # pyright: ignore[reportPrivateUsage]
+        100, preserve_structure=True, base_url="https://example.com/"
+    )
+    target.start("description", {})
+
+    with pytest.raises(MonitorError, match="size limit"):
+        target.data("x" * 100)
+
+
+@pytest.mark.parametrize(
+    ("content_type", "template"),
+    [
+        ("text/html", '<p>Readable</p><a href="{destination}">long</a>'),
+        (
+            "application/rss+xml",
+            '<rss><channel><link href="{destination}"/></channel></rss>',
+        ),
+    ],
+    ids=["html", "feed"],
+)
+def test_normalization_keeps_oversized_navigation_links_as_omitted_evidence(
+    content_type: str, template: str
+) -> None:
+    destination = "https://example.com/" + "x" * 4096
+    digest = monitor.hashlib.sha256(destination.encode()).hexdigest()
+    links = monitor.LinkCollection()
+
+    normalized = monitor.normalize_document(
+        Document(
+            template.format(destination=destination).encode(),
+            "https://example.com/feed",
+            content_type,
+        ),
+        links=links,
+    )
+
+    assert not links
+    assert links.omitted_hashes == {digest}
+    assert f"sha256:{digest}" in normalized
+    assert destination not in normalized
