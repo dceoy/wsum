@@ -689,7 +689,7 @@ def _follow_added_links(  # ruff: ignore[too-many-locals, too-many-statements]
                         continue
                     queue.append((nested_url, depth + 1))
                     scheduled += 1
-        except (monitor.MonitorError, ValueError) as exc:
+        except (monitor.MonitorError, OSError, ValueError) as exc:
             entry["error"] = str(exc)
             incomplete = True
         # Reserve the full allowance for failed requests, actual bytes on success.

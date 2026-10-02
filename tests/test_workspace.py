@@ -4956,10 +4956,14 @@ def test_follow_links_enforces_budgets_and_preserves_individual_errors(
 
 @pytest.mark.parametrize(
     "failure",
-    [ValueError("invalid host label"), UnicodeError("invalid host label")],
-    ids=["value-error", "unicode-error"],
+    [
+        ValueError("invalid host label"),
+        UnicodeError("invalid host label"),
+        TimeoutError("DNS resolution deadline exceeded"),
+    ],
+    ids=["value-error", "unicode-error", "timeout-error"],
 )
-def test_follow_links_records_url_value_errors_and_continues(
+def test_follow_links_records_fetch_errors_and_continues(
     monkeypatch: pytest.MonkeyPatch, failure: Exception
 ) -> None:
     urls = ["https://example.com/bad", "https://example.com/good"]
