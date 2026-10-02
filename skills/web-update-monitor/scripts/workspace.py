@@ -42,7 +42,8 @@ _PENDING_BASE_FIELDS = {
     "target_id",
 }
 _PENDING_REVIEW_FIELDS = {"diff", "name", "url", "watch_focus"}
-_MAX_LINKS = 20
+_DEFAULT_LINK_DEPTH = 1
+_MAX_LINKS = 100
 _MAX_LINK_BYTES = 2 * 1024 * 1024
 _MAX_LINK_TOTAL_BYTES = 10 * 1024 * 1024
 _MAX_LINK_TEXT_BYTES = 8192
@@ -563,7 +564,12 @@ def _write_report(workspace: Path, run_id: str, target_id: str, report: str) -> 
 
 
 def _monitor_target(
-    state: Path, target: Mapping[str, object], run_id: str
+    state: Path,
+    target: Mapping[str, object],
+    run_id: str,
+    *,
+    link_depth: int = _DEFAULT_LINK_DEPTH,
+    max_links: int = _MAX_LINKS,
 ) -> dict[str, object]:
     target_id = _validate_target_id(target["target_id"])
     _recover_pending(state, target_id)
@@ -581,9 +587,17 @@ def _monitor_target(
             arguments
         )
         result = monitor.run(namespace)
-        if result.get("status") == "changed" and result.get("links"):
+        if (
+            link_depth > 0
+            and result.get("status") == "changed"
+            and result.get("links")
+        ):
             result["link_review"] = _follow_added_links(
-                result, _read_snapshot(previous) or b"", source_url=str(target["url"])
+                result,
+                _read_snapshot(previous) or b"",
+                source_url=str(target["url"]),
+                link_depth=link_depth,
+                max_links=max_links,
             )
         if result.get("status") in {"baseline", "changed"}:
             candidate_data = _read_text_bytes(candidate, "candidate")
@@ -592,34 +606,59 @@ def _monitor_target(
     )
 
 
+def _validate_link_options(link_depth: int, max_links: int) -> None:
+    """Validate configurable link traversal limits."""
+    if type(link_depth) is not int or link_depth < 0:
+        raise WorkspaceError("link_depth must be a non-negative integer")
+    if type(max_links) is not int or not 1 <= max_links <= _MAX_LINKS:
+        raise WorkspaceError(f"max_links must be an integer from 1 to {_MAX_LINKS}")
+
+
 def _follow_added_links(  # ruff: ignore[too-many-locals]
-    result: Mapping[str, object], previous: bytes, *, source_url: str = ""
+    result: Mapping[str, object],
+    previous: bytes,
+    *,
+    source_url: str = "",
+    link_depth: int = _DEFAULT_LINK_DEPTH,
+    max_links: int = _MAX_LINKS,
 ) -> dict[str, object]:
-    """Fetch only newly added navigation links within shared run budgets."""
+    """Fetch newly added navigation links breadth-first within shared budgets."""
+    _validate_link_options(link_depth, max_links)
+    if link_depth == 0:
+        return {"documents": [], "omitted": 0, "incomplete": False}
+
     links = cast("dict[str, str]", result["links"])
     previous_hashes = set(_NAVIGATION_HASH_RE.findall(previous.decode("utf-8")))
     existing_urls = {url for digest, url in links.items() if digest in previous_hashes}
     source_urls = {str(result["source_url"]).split("#", 1)[0], source_url}
     added = sorted(set(links.values()) - existing_urls - source_urls)
+    queue = [(url, 1) for url in added[:max_links]]
+    seen = set(source_urls)
+    seen.update(url for url, _depth in queue)
+    scheduled = len(queue)
     documents: list[dict[str, object]] = []
-    omitted = max(0, len(added) - _MAX_LINKS)
+    omitted = max(0, len(added) - max_links)
     incomplete = omitted > 0
     deadline = monotonic() + _LINK_TIMEOUT
     remaining_bytes = _MAX_LINK_TOTAL_BYTES
     review_bytes = _MAX_LINK_REVIEW_BYTES
-    for index, url in enumerate(added[:_MAX_LINKS]):
+    index = 0
+    while index < len(queue):
         remaining_time = deadline - monotonic()
         if remaining_time <= 0 or remaining_bytes <= 0 or review_bytes <= 0:
-            omitted += min(len(added), _MAX_LINKS) - index
+            omitted += len(queue) - index
             incomplete = True
             break
+        url, depth = queue[index]
+        index += 1
         entry: dict[str, object] = {"url": url}
         byte_limit = min(remaining_bytes, _MAX_LINK_BYTES)
         try:
             document = monitor.fetch_document(
                 url, timeout=min(remaining_time, 30.0), max_bytes=byte_limit
             )
-            text = _linked_document_text(document)
+            child_links: dict[str, str] | None = {} if depth < link_depth else None
+            text = _linked_document_text(document, links=child_links)
             bounded = monitor._utf8_prefix(  # pyright: ignore[reportPrivateUsage]
                 text, min(review_bytes, _MAX_LINK_TEXT_BYTES)
             )
@@ -632,6 +671,18 @@ def _follow_added_links(  # ruff: ignore[too-many-locals]
             review_bytes -= len(bounded.encode("utf-8"))
             incomplete = incomplete or truncated
             byte_limit = len(document.body)
+            if child_links is not None:
+                seen.add(document.source_url.split("#", 1)[0])
+                for nested_url in sorted(set(child_links.values())):
+                    if nested_url in seen:
+                        continue
+                    seen.add(nested_url)
+                    if scheduled >= max_links:
+                        omitted += 1
+                        incomplete = True
+                        continue
+                    queue.append((nested_url, depth + 1))
+                    scheduled += 1
         except monitor.MonitorError as exc:
             entry["error"] = str(exc)
             incomplete = True
@@ -641,9 +692,11 @@ def _follow_added_links(  # ruff: ignore[too-many-locals]
     return {"documents": documents, "omitted": omitted, "incomplete": incomplete}
 
 
-def _linked_document_text(document: monitor.Document) -> str:
+def _linked_document_text(
+    document: monitor.Document, *, links: dict[str, str] | None = None
+) -> str:
     """Normalize child content and reject empty extraction."""
-    text = monitor.normalize_document(document)
+    text = monitor.normalize_document(document, links=links)
     if not text:
         raise monitor.MonitorError("normalization produced empty content")
     return text
@@ -1576,8 +1629,15 @@ def _compact_review(review: Mapping[str, object]) -> dict[str, object]:
     return {key: review[key] for key in keys}
 
 
-def check(workspace: str | Path, *, compact: bool = False) -> dict[str, object]:
+def check(
+    workspace: str | Path,
+    *,
+    compact: bool = False,
+    link_depth: int = _DEFAULT_LINK_DEPTH,
+    max_links: int = _MAX_LINKS,
+) -> dict[str, object]:
     """Check targets without refetching any target that already has a review."""
+    _validate_link_options(link_depth, max_links)
     root = _workspace(workspace)
     targets = load_targets(root)
     targets_by_id = {str(target["target_id"]): target for target in targets}
@@ -1608,7 +1668,13 @@ def check(workspace: str | Path, *, compact: bool = False) -> dict[str, object]:
             })
             continue
         try:
-            outcome = _monitor_target(state, target, run_id)
+            outcome = _monitor_target(
+                state,
+                target,
+                run_id,
+                link_depth=link_depth,
+                max_links=max_links,
+            )
             outcomes.append(
                 _compact_review(outcome)
                 if compact and outcome.get("action") == "review"
@@ -2033,6 +2099,8 @@ def _parser() -> argparse.ArgumentParser:
 
     check_parser = subparsers.add_parser("check")
     check_parser.add_argument("--compact", action="store_true")
+    check_parser.add_argument("--link-depth", type=int, default=_DEFAULT_LINK_DEPTH)
+    check_parser.add_argument("--max-links", type=int, default=_MAX_LINKS)
 
     pending_parser = subparsers.add_parser("pending")
     pending_parser.add_argument("--target-id")
@@ -2049,7 +2117,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "check":
-            result = check(args.workspace, compact=args.compact)
+            result = check(
+                args.workspace,
+                compact=args.compact,
+                link_depth=args.link_depth,
+                max_links=args.max_links,
+            )
         elif args.command == "pending":
             result = pending_reviews(args.workspace, target_id=args.target_id)
         elif args.command == "discard":
