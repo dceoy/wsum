@@ -614,7 +614,7 @@ def _validate_link_options(link_depth: int, max_links: int) -> None:
         raise WorkspaceError(f"max_links must be an integer from 1 to {_MAX_LINKS}")
 
 
-def _follow_added_links(  # ruff: ignore[too-many-locals]
+def _follow_added_links(  # ruff: ignore[too-many-locals, too-many-statements]
     result: Mapping[str, object],
     previous: bytes,
     *,
