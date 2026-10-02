@@ -901,9 +901,16 @@ def test_check_batches_targets_and_contains_failures(
     monkeypatch.setattr(workspace, "_new_run_id", lambda: _RUN_ID)
 
     def fake_monitor(
-        _state: Path, target: dict[str, object], run_id: str
+        _state: Path,
+        target: dict[str, object],
+        run_id: str,
+        *,
+        link_depth: int,
+        max_links: int,
     ) -> dict[str, object]:
         assert run_id == _RUN_ID
+        assert link_depth == workspace._DEFAULT_LINK_DEPTH
+        assert max_links == workspace._MAX_LINKS
         if target["name"] == "Bad":
             raise workspace.monitor.MonitorError
         return {
@@ -923,6 +930,24 @@ def test_check_batches_targets_and_contains_failures(
         "error",
         "skipped",
     ]
+
+
+@pytest.mark.parametrize(
+    ("link_depth", "max_links", "message"),
+    [
+        (-1, workspace._MAX_LINKS, "link_depth"),
+        (cast("Any", True), workspace._MAX_LINKS, "link_depth"),
+        (workspace._DEFAULT_LINK_DEPTH, 0, "max_links"),
+        (workspace._DEFAULT_LINK_DEPTH, workspace._MAX_LINKS + 1, "max_links"),
+        (workspace._DEFAULT_LINK_DEPTH, cast("Any", True), "max_links"),
+    ],
+)
+def test_check_rejects_invalid_link_options(
+    tmp_path: Path, link_depth: int, max_links: int, message: str
+) -> None:
+    _write_targets(tmp_path / "targets.csv", "Example,https://example.com/,,true\n")
+    with pytest.raises(WorkspaceError, match=message):
+        check(tmp_path, link_depth=link_depth, max_links=max_links)
 
 
 def test_check_reuses_pending_target_and_fetches_other_targets(
@@ -4812,12 +4837,68 @@ def test_follow_links_skips_existing_self_and_duplicate_destinations(
 @pytest.mark.parametrize(
     "mode", ["error", "empty", "truncated", "count", "time", "bytes", "review"]
 )
+@pytest.mark.parametrize(
+    ("link_depth", "max_links", "expected_calls", "omitted", "incomplete"),
+    [
+        (0, workspace._MAX_LINKS, [], 0, False),
+        (1, workspace._MAX_LINKS, ["https://example.com/one"], 0, False),
+        (
+            2,
+            workspace._MAX_LINKS,
+            ["https://example.com/one", "https://example.com/two"],
+            0,
+            False,
+        ),
+        (
+            3,
+            2,
+            ["https://example.com/one", "https://example.com/two"],
+            1,
+            True,
+        ),
+    ],
+)
+def test_follow_links_supports_configurable_depth_and_max_links(
+    monkeypatch: pytest.MonkeyPatch,
+    link_depth: int,
+    max_links: int,
+    expected_calls: list[str],
+    omitted: int,
+    incomplete: bool,
+) -> None:
+    pages = {
+        "https://example.com/one": b'<a href="/">root</a><a href="/two">two</a>',
+        "https://example.com/two": b'<a href="/one">one</a><a href="/three">three</a>',
+        "https://example.com/three": b"done",
+    }
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        calls.append(url)
+        return workspace.monitor.Document(pages[url], url, "text/html")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    result = workspace._follow_added_links(
+        _link_result(["https://example.com/one"]),
+        b"",
+        link_depth=link_depth,
+        max_links=max_links,
+    )
+
+    assert calls == expected_calls
+    assert result["omitted"] == omitted
+    assert result["incomplete"] is incomplete
+
+
 def test_follow_links_enforces_budgets_and_preserves_individual_errors(
     monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
     urls = [
         f"https://example.com/{index:02}"
-        for index in range(22 if mode == "count" else 3)
+        for index in range(workspace._MAX_LINKS + 2 if mode == "count" else 3)
     ]
     calls: list[str] = []
 
