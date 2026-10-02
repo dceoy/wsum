@@ -4835,9 +4835,6 @@ def test_follow_links_skips_existing_self_and_duplicate_destinations(
 
 
 @pytest.mark.parametrize(
-    "mode", ["error", "empty", "truncated", "count", "time", "bytes", "review"]
-)
-@pytest.mark.parametrize(
     ("link_depth", "max_links", "expected_calls", "omitted", "incomplete"),
     [
         (0, workspace._MAX_LINKS, [], 0, False),
@@ -4893,6 +4890,9 @@ def test_follow_links_supports_configurable_depth_and_max_links(
     assert result["incomplete"] is incomplete
 
 
+@pytest.mark.parametrize(
+    "mode", ["error", "empty", "truncated", "count", "time", "bytes", "review"]
+)
 def test_follow_links_enforces_budgets_and_preserves_individual_errors(
     monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
@@ -4942,6 +4942,35 @@ def test_follow_links_enforces_budgets_and_preserves_individual_errors(
     else:
         assert documents[0]["truncated"] is True
         assert len(str(documents[0]["text"]).encode()) == workspace._MAX_LINK_TEXT_BYTES
+
+
+def test_check_can_disable_link_following(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_targets(
+        tmp_path / "targets.csv", "Example,https://example.com/,releases,true\n"
+    )
+    parent = b'<p>News</p><a href="/old">old</a>'
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        calls.append(url)
+        return workspace.monitor.Document(parent, url, "text/html")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    assert cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]["action"] == "baseline_created"
+    parent += b'<a href="/new">new</a>'
+    outcome = cast(
+        "list[dict[str, object]]",
+        check(tmp_path, link_depth=0)["targets"],
+    )[0]
+
+    assert outcome["action"] == "review"
+    assert "link_review" not in outcome
+    assert calls == ["https://example.com/", "https://example.com/"]
 
 
 @pytest.mark.parametrize("failed", [False, True], ids=["success", "child-error"])
@@ -5026,7 +5055,11 @@ def test_link_review_transaction_survives_resume_and_promotes_identity_baseline(
             None,
             {},
             {"documents": None, "omitted": 0, "incomplete": False},
-            {"documents": [{}] * 21, "omitted": 0, "incomplete": False},
+            {
+                "documents": [{}] * (workspace._MAX_LINKS + 1),
+                "omitted": 0,
+                "incomplete": False,
+            },
             {"documents": [], "omitted": False, "incomplete": False},
             {"documents": [], "omitted": -1, "incomplete": False},
             {"documents": [], "omitted": 0, "incomplete": 0},
