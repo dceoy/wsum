@@ -4961,7 +4961,8 @@ def test_check_can_disable_link_following(
         return workspace.monitor.Document(parent, url, "text/html")
 
     monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
-    assert cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]["action"] == "baseline_created"
+    baseline = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    assert baseline["action"] == "baseline_created"
     parent += b'<a href="/new">new</a>'
     outcome = cast(
         "list[dict[str, object]]",
