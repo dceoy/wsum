@@ -587,11 +587,7 @@ def _monitor_target(
             arguments
         )
         result = monitor.run(namespace)
-        if (
-            link_depth > 0
-            and result.get("status") == "changed"
-            and result.get("links")
-        ):
+        if link_depth > 0 and result.get("status") == "changed" and result.get("links"):
             result["link_review"] = _follow_added_links(
                 result,
                 _read_snapshot(previous) or b"",
