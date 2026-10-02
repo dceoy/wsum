@@ -385,6 +385,7 @@ class _TextExtractor(HTMLParser):
         self._skip_depth = 0
         self._destination_count = 0
         self.parts: list[str] = []
+        self.links: dict[str, str] = {}
 
     def handle_starttag(  # ruff: ignore[complex-structure]
         self, tag: str, attrs: list[tuple[str, str | None]]
@@ -419,6 +420,8 @@ class _TextExtractor(HTMLParser):
             destination = urljoin(self._base_url, value.strip())
             if _destination_has_credentials(destination):
                 raise MonitorError("HTML destination contains credentials")
+            if tag in {"a", "area"}:
+                _collect_link(self.links, destination)
             digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
             self.parts.append(f"\n[{tag}:{name}:sha256:{digest}]\n")
 
@@ -437,13 +440,34 @@ class _TextExtractor(HTMLParser):
 _EMBEDDED_HTML_RE = re.compile(r"</?[A-Za-z][^>]*>")
 
 
-def _normalize_html_fragment(value: str, base_url: str) -> str:
+def _collect_link(links: dict[str, str], destination: str) -> None:
+    """Collect HTTP(S) navigation identities without fragments or credentials."""
+    try:
+        parsed = urlsplit(destination)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return
+        port = parsed.port
+        if port is not None and port <= 0:
+            return
+    except ValueError:
+        return
+    if len(destination.encode("utf-8")) > _DEFAULT_MAX_XML_BASE_URL_CHARS:
+        raise MonitorError("navigation URL exceeds the size limit")
+    digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
+    links[digest] = parsed._replace(fragment="").geturl()
+
+
+def _normalize_html_fragment(
+    value: str, base_url: str, links: dict[str, str] | None = None
+) -> str:
     """Normalize HTML embedded in an XML text field."""
     if not _EMBEDDED_HTML_RE.search(value):
         return value
     parser = _TextExtractor(base_url)
     parser.feed(value)
     parser.close()
+    if links is not None:
+        links.update(parser.links)
     return "".join(parser.parts)
 
 
@@ -1134,6 +1158,7 @@ class _FeedTextTarget:
         self._entry_marker_added = False
         self._size = 0
         self._parts: list[str] = []
+        self.links: dict[str, str] = {}
 
     def _append(self, value: str) -> None:
         self._size += len(value)
@@ -1220,6 +1245,12 @@ class _FeedTextTarget:
             return
         for name, value in destinations:
             self._append_destination(local_tag, name, value)
+            if (
+                local_tag in {"a", "link"}
+                and attrs.get("rel", "alternate") == "alternate"
+            ):
+                base_url = self._base_stack[-1] if self._base_stack else self._base_url
+                _collect_link(self.links, urljoin(base_url, value.strip()))
 
     def start(self, tag: str, attrs: dict[str, str]) -> None:
         local_tag = _local_name(tag)
@@ -1250,6 +1281,8 @@ class _FeedTextTarget:
             value = "".join(text_destination).strip()
             if value:
                 self._append_destination("link", "href", value)
+                base_url = self._base_stack[-1] if self._base_stack else self._base_url
+                _collect_link(self.links, urljoin(base_url, value))
 
         if self._identity_frames and self._identity_frames[-1][0] == local_tag:
             field, values, attribute_value = self._identity_frames.pop()
@@ -1299,7 +1332,7 @@ class _FeedTextTarget:
             and self._tag_stack[-1] in self._EMBEDDED_TEXT_TAGS
         ):
             base_url = self._base_stack[-1] if self._base_stack else self._base_url
-            data = _normalize_html_fragment(data, base_url)
+            data = _normalize_html_fragment(data, base_url, self.links)
         self._append(data)
 
     def _append_destination(self, tag: str, name: str, value: str) -> None:
@@ -1358,7 +1391,12 @@ def _feed_identity_token(field: str, value: str, base_url: str) -> str:
 
 
 def _normalize_feed(
-    text: str, *, max_chars: int, preserve_structure: bool, base_url: str
+    text: str,
+    *,
+    max_chars: int,
+    preserve_structure: bool,
+    base_url: str,
+    links: dict[str, str] | None = None,
 ) -> str:
     if re.search(r"<!DOCTYPE|<!ENTITY", text, re.IGNORECASE):
         raise MonitorError("DOCTYPE and entity declarations are not supported")
@@ -1375,6 +1413,8 @@ def _normalize_feed(
         raise MonitorError("XML document could not be parsed") from exc
     if not isinstance(parsed, str):
         raise MonitorError("XML parser returned an invalid result")
+    if links is not None:
+        links.update(target.links)
     return _normalize_whitespace(parsed)
 
 
@@ -1728,6 +1768,7 @@ def normalize_document(
     *,
     max_pdf_decompressed_bytes: int = _DEFAULT_MAX_PDF_DECOMPRESSED_BYTES,
     max_pdf_extracted_chars: int = _DEFAULT_MAX_PDF_EXTRACTED_CHARS,
+    links: dict[str, str] | None = None,
 ) -> str:
     """Convert HTML/XML, text, or PDF bytes into stable plain text."""
     if max_pdf_decompressed_bytes <= 0 or max_pdf_extracted_chars <= 0:
@@ -1753,12 +1794,15 @@ def normalize_document(
             max_chars=_DEFAULT_MAX_XML_CHARS,
             preserve_structure=content_type in _FEED_CONTENT_TYPES,
             base_url=document.source_url,
+            links=links,
         )
     if content_type in _HTML_CONTENT_TYPES:
         parser = _TextExtractor(document.source_url)
         parser.feed(text)
         parser.close()
         text = "".join(parser.parts)
+        if links is not None:
+            links.update(parser.links)
     return _normalize_whitespace(text)
 
 
@@ -1981,10 +2025,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             deadline=monotonic() + args.timeout,
         )
     )
+    links: dict[str, str] = {}
     current = normalize_document(
         document,
         max_pdf_decompressed_bytes=max_pdf_decompressed_bytes,
         max_pdf_extracted_chars=max_pdf_extracted_chars,
+        links=links,
     )
     if not current:
         raise MonitorError("normalization produced empty content")
@@ -2012,6 +2058,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     return {
         "source_url": document.source_url,
         "content_type": document.content_type,
+        "links": links,
         **result,
     }
 

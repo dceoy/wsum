@@ -4756,3 +4756,223 @@ def test_module_entry_point_runs_cli(
         runpy.run_path(str(Path(workspace.__file__)), run_name="__main__")
     assert exit_info.value.code == 0
     assert '"action": "skipped"' in capsys.readouterr().out
+
+
+def _link_result(urls: list[str]) -> dict[str, object]:
+    return {
+        "source_url": "https://example.com/",
+        "links": {
+            hashlib.sha256(url.encode()).hexdigest(): url.split("#", 1)[0]
+            for url in urls
+        },
+    }
+
+
+def test_follow_links_skips_existing_self_and_duplicate_destinations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        assert 0 < timeout <= 30
+        assert max_bytes <= workspace._MAX_LINK_BYTES
+        calls.append(url)
+        return workspace.monitor.Document(
+            b'<p>New release</p><a href="/grandchild">more</a>', url, "text/html"
+        )
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    old_url = "https://example.com/old#section"
+    previous = (
+        f"[a:href:sha256:{hashlib.sha256(old_url.encode()).hexdigest()}]\n".encode()
+    )
+    result = workspace._follow_added_links(
+        _link_result([
+            old_url,
+            "https://example.com/old#new",
+            "https://example.com/#top",
+            "https://example.com/new#first",
+            "https://example.com/new#second",
+            "https://example.com/original",
+        ]),
+        previous,
+        source_url="https://example.com/original",
+    )
+    assert calls == ["https://example.com/new"]
+    assert result["omitted"] == 0
+    assert result["incomplete"] is False
+    documents = cast("list[dict[str, object]]", result["documents"])
+    assert documents[0]["url"] == documents[0]["source_url"] == calls[0]
+    assert "New release" in str(documents[0]["text"])
+    assert documents[0]["truncated"] is False
+
+
+@pytest.mark.parametrize(
+    "mode", ["error", "empty", "truncated", "count", "time", "bytes", "review"]
+)
+def test_follow_links_enforces_budgets_and_preserves_individual_errors(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    urls = [
+        f"https://example.com/{index:02}"
+        for index in range(22 if mode == "count" else 3)
+    ]
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        calls.append(url)
+        if mode == "error" and url == urls[0]:
+            message = "URL must resolve to a public IP"
+            raise workspace.monitor.MonitorError(message)
+        body = b" " if mode == "empty" else b"readable article"
+        if mode in {"truncated", "review"}:
+            body = b"x" * (workspace._MAX_LINK_TEXT_BYTES + 1)
+        return workspace.monitor.Document(body, url, "text/plain")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    if mode == "time":
+        ticks = iter([0.0, 1.0, workspace._LINK_TIMEOUT + 1])
+        monkeypatch.setattr(workspace, "monotonic", lambda: next(ticks))
+    elif mode == "bytes":
+        monkeypatch.setattr(
+            workspace, "_MAX_LINK_TOTAL_BYTES", len(b"readable article")
+        )
+    elif mode == "review":
+        monkeypatch.setattr(
+            workspace, "_MAX_LINK_REVIEW_BYTES", workspace._MAX_LINK_TEXT_BYTES
+        )
+    result = workspace._follow_added_links(_link_result(urls), b"")
+    documents = cast("list[dict[str, object]]", result["documents"])
+    assert result["incomplete"] is True
+    if mode in {"time", "bytes", "review"}:
+        assert len(calls) == 1
+        assert result["omitted"] == 2
+    elif mode == "count":
+        assert len(calls) == workspace._MAX_LINKS
+        assert result["omitted"] == 2
+    elif mode in {"error", "empty"}:
+        assert "error" in documents[0]
+        assert len(calls) == 3
+    else:
+        assert documents[0]["truncated"] is True
+        assert len(str(documents[0]["text"]).encode()) == workspace._MAX_LINK_TEXT_BYTES
+
+
+@pytest.mark.parametrize("failed", [False, True], ids=["success", "child-error"])
+def test_link_review_transaction_survives_resume_and_promotes_identity_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed: bool
+) -> None:
+    _write_targets(
+        tmp_path / "targets.csv", "Example,https://example.com/,releases,true\n"
+    )
+    parent = b'<p>News</p><a href="/old">old</a>'
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        calls.append(url)
+        if url == "https://example.com/":
+            return workspace.monitor.Document(parent, url, "text/html")
+        if failed:
+            message = "blocked private IP"
+            raise workspace.monitor.MonitorError(message)
+        return workspace.monitor.Document(b"Release details", url, "text/plain")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    baseline = check(tmp_path)
+    assert (
+        cast("list[dict[str, object]]", baseline["targets"])[0]["action"]
+        == "baseline_created"
+    )
+    assert calls == ["https://example.com/"]
+    parent += b'<a href="/new">new</a>'
+    outcome = cast("list[dict[str, object]]", check(tmp_path, compact=True)["targets"])[
+        0
+    ]
+    assert "link_review" not in outcome
+    assert calls == [
+        "https://example.com/",
+        "https://example.com/",
+        "https://example.com/new",
+    ]
+    target_id = str(outcome["target_id"])
+    review = cast(
+        "list[dict[str, object]]",
+        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+    )[0]
+    context = cast("dict[str, object]", review["link_review"])
+    assert context["incomplete"] is failed
+    assert (
+        "link_review"
+        not in cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    )
+    assert len(calls) == 3
+    decision: dict[str, object] = {
+        "target_id": target_id,
+        "revision": review["revision"],
+        "material": False,
+    }
+    if failed:
+        assert finalize(tmp_path, decision)["action"] == "manual_review_required"
+    decision.update({"material": True, "report": "## Release\n\nRelease details.\n"})
+    assert finalize(tmp_path, decision)["action"] == "finalized"
+    assert (
+        cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]["action"]
+        == "unchanged"
+    )
+    parent += b"<p>Minor page edit</p>"
+    next_review = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    assert next_review["link_review"] == {
+        "documents": [],
+        "omitted": 0,
+        "incomplete": False,
+    }
+    assert calls.count("https://example.com/new") == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    cast(
+        "list[object]",
+        [
+            None,
+            {},
+            {"documents": None, "omitted": 0, "incomplete": False},
+            {"documents": [{}] * 21, "omitted": 0, "incomplete": False},
+            {"documents": [], "omitted": False, "incomplete": False},
+            {"documents": [], "omitted": -1, "incomplete": False},
+            {"documents": [], "omitted": 0, "incomplete": 0},
+            {"documents": [None], "omitted": 0, "incomplete": True},
+            {"documents": [{}], "omitted": 0, "incomplete": True},
+            {
+                "documents": [{"url": "https://example.com/", "error": 1}],
+                "omitted": 0,
+                "incomplete": True,
+            },
+            {
+                "documents": [
+                    {
+                        "url": "https://example.com/",
+                        "source_url": "https://example.com/",
+                        "text": "x",
+                        "truncated": 1,
+                    }
+                ],
+                "omitted": 0,
+                "incomplete": True,
+            },
+        ],
+    ),
+)
+def test_link_review_validation_rejects_invalid_persisted_context(
+    value: object,
+) -> None:
+    with pytest.raises(WorkspaceError, match="pending link review is invalid"):
+        workspace._validate_link_review(value)

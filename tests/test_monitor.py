@@ -3141,3 +3141,74 @@ def test_monitor_cli_success_failure_and_module_entrypoint(
     with pytest.raises(SystemExit) as exit_info:
         runpy.run_path(str(Path(monitor.__file__)), run_name="__main__")
     assert exit_info.value.code == 0
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type", "expected"),
+    [
+        (
+            (
+                '<base href="https://other.example/news/"><a href="item#part">item</a>'
+                '<area href="/pdf"><form action="/submit">'
+                '<button formaction="/do">go</button></form>'
+                '<a href="mailto:a@example.com">mail</a>'
+                '<a href="javascript:void(0)">js</a>'
+                '<a href="https://example.com:bad/x">bad</a><a href="http://example.com:0/">zero</a>'
+            ),
+            "text/html",
+            {"https://other.example/news/item", "https://other.example/pdf"},
+        ),
+        (
+            (
+                "<rss><channel><item><link>https://example.com/article#part</link>"
+                '<description><![CDATA[<a href="/detail">detail</a>]]></description>'
+                '<enclosure url="https://example.com/media"/></item></channel></rss>'
+            ),
+            "application/rss+xml",
+            {"https://example.com/article", "https://example.com/detail"},
+        ),
+        (
+            (
+                '<feed xmlns="http://www.w3.org/2005/Atom" xml:base="https://example.org/">'
+                '<link rel="self" href="feed"/><entry><id>x</id><link href="article"/>'
+                '<link rel="enclosure" href="media"/><a href="detail"/></entry></feed>'
+            ),
+            "application/atom+xml",
+            {"https://example.org/article", "https://example.org/detail"},
+        ),
+        ("plain text", "text/plain", set[str]()),
+    ],
+    ids=["html-navigation-only", "rss-embedded-html", "atom-base-and-rel", "text"],
+)
+def test_normalization_collects_navigation_links_without_changing_text(
+    body: str, content_type: str, expected: set[str]
+) -> None:
+    document = monitor.Document(body.encode(), "https://example.com/", content_type)
+    links: dict[str, str] = {}
+    text = monitor.normalize_document(document, links=links)
+    assert text == monitor.normalize_document(document)
+    assert set(links.values()) == expected
+    assert all(f"sha256:{digest}" in text for digest in links)
+
+
+def test_embedded_html_normalization_without_link_collection() -> None:
+    assert "item" in monitor._normalize_html_fragment(
+        '<a href="/item">item</a>', "https://example.com/"
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http:///", "https://[bad/", "http://example.com:0/", "mailto:a@example.com"],
+)
+def test_link_collection_ignores_invalid_or_non_http_destinations(url: str) -> None:
+    links: dict[str, str] = {}
+    monitor._collect_link(links, url)
+    assert not links
+
+
+def test_link_collection_bounds_url_size() -> None:
+    links: dict[str, str] = {}
+    with pytest.raises(monitor.MonitorError, match="navigation URL exceeds"):
+        monitor._collect_link(links, "https://example.com/" + "x" * 4096)
+    assert not links
