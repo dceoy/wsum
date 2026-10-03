@@ -15,8 +15,8 @@ import shutil
 import stat
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
@@ -32,7 +32,10 @@ _MAX_CSV_BYTES = 1024 * 1024
 _MAX_SNAPSHOT_BYTES = 40 * 1024 * 1024
 _MAX_RECOVERY_RECORD_BYTES = 3 * _MAX_SNAPSHOT_BYTES + 1024 * 1024
 _REQUIRED_FIELDS = {"name", "url"}
-_ALLOWED_FIELDS = _REQUIRED_FIELDS | {"enabled", "watch_focus"}
+_INTEREST_TEXT_FIELDS = {"name", "publisher", "category", "keywords", "criteria"}
+_INTEREST_FIELDS = _INTEREST_TEXT_FIELDS | {"priority", "enabled"}
+_ALLOWED_FIELDS = _REQUIRED_FIELDS | _INTEREST_FIELDS | {"watch_focus"}
+_DITTO_TOKENS = {'"', "〃", "同上", "同左"}
 _PENDING_BASE_FIELDS = {
     "candidate_sha256",
     "diff_truncated",
@@ -57,6 +60,8 @@ _PENDING_FIELD_SETS = (
     frozenset(_PENDING_BASE_FIELDS),
     frozenset(_PENDING_FIELDS),
     frozenset(_PENDING_FIELDS | {"link_review"}),
+    frozenset(_PENDING_FIELDS | {"interests"}),
+    frozenset(_PENDING_FIELDS | {"interests", "link_review"}),
 )
 _TARGET_ID_PART_RE = re.compile(r"[^a-z0-9]+")
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -144,7 +149,11 @@ def _read_csv(path: Path) -> str:
     if info.st_size <= 0 or info.st_size > _MAX_CSV_BYTES:
         raise WorkspaceError(f"{_TARGETS_FILE} size is invalid")
     try:
-        return path.read_bytes().decode("utf-8-sig")
+        with path.open("rb") as stream:
+            data = stream.read(_MAX_CSV_BYTES + 1)
+        if len(data) > _MAX_CSV_BYTES:
+            raise WorkspaceError(f"{_TARGETS_FILE} size is invalid")
+        return data.decode("utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
         raise WorkspaceError(f"{_TARGETS_FILE} must be UTF-8 CSV") from exc
 
@@ -210,11 +219,19 @@ def _new_run_id() -> str:
     return f"{timestamp}-{secrets.token_hex(4)}"
 
 
-def load_targets(workspace: str | Path) -> list[dict[str, object]]:
-    """Load, validate, and normalize all targets from ``targets.csv``."""
-    root = _workspace(workspace)
-    reader = csv.DictReader(io.StringIO(_read_csv(root / _TARGETS_FILE)))
-    fieldnames = reader.fieldnames
+@contextmanager
+def _integer_text_limit() -> Generator[None]:
+    """Allow decimal metadata within the bounded CSV/pending file limits."""
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        yield
+    finally:
+        sys.set_int_max_str_digits(previous)
+
+
+def _validate_target_header(fieldnames: list[str] | None) -> list[str]:
+    """Validate the supported, unambiguous CSV header."""
     if fieldnames is None or len(fieldnames) != len(set(fieldnames)):
         raise WorkspaceError(f"{_TARGETS_FILE} must have a unique header row")
     fields = set(fieldnames)
@@ -222,42 +239,105 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
         raise WorkspaceError(f"{_TARGETS_FILE} requires name and url columns")
     if fields - _ALLOWED_FIELDS:
         raise WorkspaceError(f"{_TARGETS_FILE} contains unsupported columns")
+    if {"criteria", "watch_focus"}.issubset(fields):
+        raise WorkspaceError(f"{_TARGETS_FILE} cannot contain criteria and watch_focus")
+    return fieldnames
 
+
+def _normalize_target_row(
+    fieldnames: list[str], row: Sequence[object], row_number: int
+) -> tuple[str, dict[str, object]] | None:
+    """Validate one interest before grouping, including disabled rows."""
+    if len(row) > len(fieldnames):
+        raise WorkspaceError(f"row {row_number}: too many columns")
+    values: dict[str, str] = {}
+    for key, value in zip(fieldnames, row, strict=False):
+        if not isinstance(value, str):
+            raise WorkspaceError(f"row {row_number}: {key}: invalid CSV value")
+        values[key] = value.strip()
+    if not any(values.values()):
+        return None
+    for field in _INTEREST_TEXT_FIELDS | {"url", "watch_focus"}:
+        if values.get(field) in _DITTO_TOKENS:
+            raise WorkspaceError(
+                f"row {row_number}: {field}: replace ditto with an explicit value"
+            )
+    if not values.get("name"):
+        raise WorkspaceError(f"row {row_number}: name must be non-empty")
+    try:
+        url = _validate_url(values.get("url", ""))
+    except WorkspaceError as exc:
+        raise WorkspaceError(f"row {row_number}: {exc}") from exc
+    priority_text = values.get("priority", "")
+    priority = None
+    if priority_text:
+        if not re.fullmatch(r"[0-9]+", priority_text):
+            raise WorkspaceError(
+                f"row {row_number}: priority must be a positive ASCII decimal integer"
+            )
+        priority = int(priority_text)
+        if priority <= 0:
+            raise WorkspaceError(
+                f"row {row_number}: priority must be a positive ASCII decimal integer"
+            )
+    interest: dict[str, object] = {
+        field: values.get(field, "") for field in _INTEREST_TEXT_FIELDS
+    }
+    interest["criteria"] = values.get("criteria", values.get("watch_focus", ""))
+    interest["priority"] = priority
+    interest["enabled"] = _parse_enabled(values.get("enabled", ""), row_number)
+    return url, interest
+
+
+def _group_target_interests(
+    rows: Sequence[tuple[str, dict[str, object]]],
+) -> list[dict[str, object]]:
+    """Group exact URLs while preserving URL order and every interest row."""
+    groups: dict[str, list[dict[str, object]]] = {}
+    for url, interest in rows:
+        groups.setdefault(url, []).append(interest)
     targets: list[dict[str, object]] = []
     target_ids: set[str] = set()
-    for row_number, row in enumerate(reader, start=2):
-        if None in row:
-            raise WorkspaceError(f"row {row_number}: too many columns")
-        values: dict[str, str] = {}
-        for key in fieldnames:
-            value = row.get(key)
-            if value is not None and not isinstance(value, str):
-                raise WorkspaceError(f"row {row_number}: invalid CSV value")
-            values[key] = (value or "").strip()
-        if not any(values.values()):
-            continue
-
-        name = values.get("name", "")
-        if not name:
-            raise WorkspaceError(f"row {row_number}: name must be non-empty")
-        url = _validate_url(values.get("url", ""))
+    for url, interests in groups.items():
         target_id = _target_id(url)
         if target_id in target_ids:
             raise WorkspaceError("duplicate_target_id")
         target_ids.add(target_id)
-        enabled = _parse_enabled(values.get("enabled", ""), row_number)
+        selected = next((item for item in interests if item["enabled"]), interests[0])
+        enabled = any(item["enabled"] for item in interests)
         targets.append({
             "target_id": target_id,
-            "name": name,
+            "name": selected["name"],
             "url": url,
             "enabled": enabled,
             "action": "monitor" if enabled else "skip_disabled",
-            "watch_focus": values.get("watch_focus", ""),
+            "watch_focus": selected["criteria"],
+            "interests": interests,
         })
-
-    if not targets:
-        raise WorkspaceError(f"{_TARGETS_FILE} contains no targets")
     return targets
+
+
+def load_targets(workspace: str | Path) -> list[dict[str, object]]:
+    """Load, validate, and normalize all interests from ``targets.csv``."""
+    root = _workspace(workspace)
+    previous_limit = csv.field_size_limit(_MAX_CSV_BYTES)
+    row_number = 1
+    try:
+        reader = csv.reader(io.StringIO(_read_csv(root / _TARGETS_FILE)), strict=True)
+        fieldnames = _validate_target_header(next(reader, None))
+        rows: list[tuple[str, dict[str, object]]] = []
+        with _integer_text_limit():
+            for row_number, row in enumerate(reader, start=2):
+                normalized = _normalize_target_row(fieldnames, row, row_number)
+                if normalized is not None:
+                    rows.append(normalized)
+    except csv.Error as exc:
+        raise WorkspaceError(f"CSV record after {row_number}: {exc}") from exc
+    finally:
+        csv.field_size_limit(previous_limit)
+    if not rows:
+        raise WorkspaceError(f"{_TARGETS_FILE} contains no targets")
+    return _group_target_interests(rows)
 
 
 def _existing_pending_paths(
@@ -835,8 +915,18 @@ def _remove_pending(state: Path, target_id: str) -> None:
         raise WorkspaceError("cannot fsync pending transaction directories") from exc
 
 
+def _serialize_pending(payload: Mapping[str, object]) -> bytes:
+    """Preflight the complete escaped transaction against its backup ceiling."""
+    _validate_pending_context(payload)
+    with _integer_text_limit():
+        data = (json.dumps(payload, sort_keys=True) + "\n").encode()
+    if len(data) > _MAX_SNAPSHOT_BYTES:
+        raise WorkspaceError("pending decision size is invalid")
+    return data
+
+
 def _write_pending_file(destination: Path, payload: Mapping[str, object]) -> None:
-    data = (json.dumps(payload, sort_keys=True) + "\n").encode()
+    data = _serialize_pending(payload)
     temporary = _write_temporary_file(destination, data, "pending state")
     try:
         temporary.replace(destination)
@@ -1351,8 +1441,8 @@ def _replacement_matches_commit(
     if stat.S_ISLNK(candidate_info.st_mode) or not stat.S_ISREG(candidate_info.st_mode):
         raise WorkspaceError("candidate must be a regular non-symlink file")
     try:
-        pending = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        pending = _read_pending_json(state_path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, WorkspaceError):
         return False
     if not isinstance(pending, dict):
         return False
@@ -1367,6 +1457,10 @@ def _replacement_matches_commit(
     if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
         return False
     if type(pending.get("diff_truncated")) is not bool:
+        return False
+    try:
+        _validate_pending_context(pending)
+    except WorkspaceError:
         return False
     candidate_data = _read_text_bytes(candidate_path, "candidate")
     try:
@@ -1386,11 +1480,13 @@ def _replacement_previous_revision(record: Mapping[str, object]) -> str | None:
     if old_state is None:
         return None
     try:
-        value = json.loads(old_state.decode("utf-8"))
+        with _integer_text_limit():
+            value = json.loads(old_state.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WorkspaceError("pending recovery record is invalid") from exc
     if not isinstance(value, dict):
         raise WorkspaceError("pending recovery record is invalid")
+    _validate_pending_context(cast("dict[str, object]", value))
     previous = cast("dict[str, object]", value).get("revision")
     if not isinstance(previous, str) or not _REVISION_RE.fullmatch(previous):
         raise WorkspaceError("pending recovery record is invalid")
@@ -1499,6 +1595,7 @@ def _install_pending_replacement(
 def _write_pending_transaction(
     state: Path, payload: Mapping[str, object], candidate_data: bytes
 ) -> None:
+    _serialize_pending(payload)
     target_id = _validate_target_id(payload.get("target_id"))
     _recover_pending(state, target_id)
     undo = _capture_pending_replacement(state, target_id)
@@ -1591,6 +1688,7 @@ def _handle_monitor_result(
         "url": str(target.get("url", "")),
         "watch_focus": str(target.get("watch_focus", "")),
         "diff": diff,
+        "interests": _enabled_interests(target),
     }
     if "link_review" in result:
         link_review = _validate_link_review(result["link_review"])
@@ -1616,6 +1714,7 @@ def _handle_monitor_result(
         "name": target["name"],
         "url": target["url"],
         "watch_focus": target["watch_focus"],
+        "interests": pending["interests"],
         "diff": diff,
         "diff_truncated": pending["diff_truncated"],
         **({"link_review": pending["link_review"]} if "link_review" in pending else {}),
@@ -1647,7 +1746,7 @@ def check(
     root = _workspace(workspace)
     targets = load_targets(root)
     targets_by_id = {str(target["target_id"]): target for target in targets}
-    existing = pending_reviews(root)
+    existing = _collect_pending_reviews(root, _target_review_contexts(targets))
     existing_reviews = cast("list[dict[str, object]]", existing["reviews"])
     retained_reviews: list[dict[str, object]] = []
     pending_ids: set[str] = set()
@@ -1696,6 +1795,58 @@ def check(
     return {"run_id": run_id, "targets": outcomes}
 
 
+def _validate_interests(value: object) -> list[dict[str, object]]:
+    """Validate the authoritative nested interest schema without scalar fallback."""
+    if not isinstance(value, list):
+        raise WorkspaceError("pending interests are invalid")
+    interests: list[dict[str, object]] = []
+    for raw in cast("list[object]", value):
+        if (
+            not isinstance(raw, dict)
+            or set(cast("dict[str, object]", raw)) != _INTEREST_FIELDS
+        ):
+            raise WorkspaceError("pending interests are invalid")
+        interest = cast("dict[str, object]", raw)
+        for field in _INTEREST_TEXT_FIELDS:
+            text = interest[field]
+            if not isinstance(text, str) or text != text.strip():
+                raise WorkspaceError("pending interests are invalid")
+        priority = interest["priority"]
+        if (
+            not interest["name"]
+            or type(interest["enabled"]) is not bool
+            or (priority is not None and (type(priority) is not int or priority <= 0))
+        ):
+            raise WorkspaceError("pending interests are invalid")
+        interests.append(interest)
+    return interests
+
+
+def _validate_pending_context(pending: Mapping[str, object]) -> None:
+    """Apply the same review metadata validation in ordinary reads and recovery."""
+    if _PENDING_REVIEW_FIELDS.issubset(pending):
+        for field in _PENDING_REVIEW_FIELDS:
+            if not isinstance(pending[field], str):
+                raise WorkspaceError("pending decision is invalid")
+    if "interests" in pending:
+        _validate_interests(pending["interests"])
+    if "link_review" in pending:
+        _validate_link_review(pending["link_review"])
+
+
+def _read_pending_json(path: Path) -> object:
+    """Bound both the stated and actual serialized transaction size."""
+    info = path.lstat()
+    if info.st_size <= 0 or info.st_size > _MAX_SNAPSHOT_BYTES:
+        raise WorkspaceError("pending decision size is invalid")
+    with path.open("rb") as stream:
+        data = stream.read(_MAX_SNAPSHOT_BYTES + 1)
+    if len(data) > _MAX_SNAPSHOT_BYTES:
+        raise WorkspaceError("pending decision size is invalid")
+    with _integer_text_limit():
+        return json.loads(data.decode("utf-8"))
+
+
 def _read_pending(state: Path, target_id: str) -> dict[str, object]:
     path, _ = _pending_paths(state, target_id)
     try:
@@ -1705,13 +1856,13 @@ def _read_pending(state: Path, target_id: str) -> dict[str, object]:
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise WorkspaceError("pending decision must be a regular non-symlink file")
     try:
-        data = path.read_text(encoding="utf-8")
-        value = json.loads(data)
+        value = _read_pending_json(path)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WorkspaceError("no valid pending decision exists for target") from exc
     if not isinstance(value, dict):
         raise WorkspaceError("pending decision is invalid")
     pending = cast("dict[str, object]", value)
+    _validate_pending_context(pending)
     fields = frozenset(pending)
     missing_run_sets = tuple(fields_ - {"run_id"} for fields_ in _PENDING_FIELD_SETS)
     if fields in missing_run_sets:
@@ -1725,12 +1876,6 @@ def _read_pending(state: Path, target_id: str) -> dict[str, object]:
         raise WorkspaceError("pending decision is invalid")
     if type(pending.get("diff_truncated")) is not bool:
         raise WorkspaceError("pending decision is invalid")
-    if _PENDING_REVIEW_FIELDS.issubset(pending):
-        for field in _PENDING_REVIEW_FIELDS:
-            if not isinstance(pending.get(field), str):
-                raise WorkspaceError("pending decision is invalid")
-    if "link_review" in pending:
-        _validate_link_review(pending["link_review"])
     return pending
 
 
@@ -1778,27 +1923,62 @@ def _pending_target_ids(state: Path) -> list[str]:
     return sorted(target_ids)
 
 
-def _current_review_contexts(root: Path) -> dict[str, dict[str, str]]:
-    """Return current CSV review context keyed by stable target ID."""
-    try:
-        targets = load_targets(root)
-    except WorkspaceError:
-        return {}
+def _enabled_interests(context: Mapping[str, object]) -> list[dict[str, object]]:
+    """Return active interests, synthesizing legacy scalar review context."""
+    if "interests" in context:
+        return [
+            item
+            for item in _validate_interests(context["interests"])
+            if item["enabled"]
+        ]
+    return [
+        {
+            "name": str(context["name"]),
+            "publisher": "",
+            "category": "",
+            "keywords": "",
+            "criteria": str(context.get("watch_focus", "")),
+            "priority": None,
+            "enabled": True,
+        }
+    ]
+
+
+def _target_review_contexts(
+    targets: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, object]]:
     return {
         str(target["target_id"]): {
-            "name": str(target["name"]),
-            "url": str(target["url"]),
-            "watch_focus": str(target["watch_focus"]),
+            "name": target["name"],
+            "url": target["url"],
+            "watch_focus": target["watch_focus"],
+            "interests": _enabled_interests(target),
         }
         for target in targets
     }
 
 
-def _legacy_review_context(root: Path, target_id: str) -> dict[str, str]:
-    return _current_review_contexts(root).get(
-        target_id,
-        {"name": target_id, "url": "", "watch_focus": ""},
-    )
+def _current_review_contexts(root: Path) -> dict[str, dict[str, object]] | None:
+    """Return current CSV review context keyed by stable target ID."""
+    try:
+        targets = load_targets(root)
+    except WorkspaceError:
+        return None
+    return _target_review_contexts(targets)
+
+
+def _saved_review_context(
+    target_id: str, pending: Mapping[str, object]
+) -> dict[str, object]:
+    if _PENDING_REVIEW_FIELDS.issubset(pending):
+        context: dict[str, object] = {
+            field: pending[field] for field in ("name", "url", "watch_focus")
+        }
+        context["interests"] = _enabled_interests(pending)
+    else:
+        context = {"name": target_id, "url": "", "watch_focus": ""}
+        context["interests"] = _enabled_interests(context)
+    return context
 
 
 def _legacy_pending_diff(
@@ -1837,11 +2017,10 @@ def _legacy_pending_diff(
 
 
 def _pending_review(
-    root: Path,
     state: Path,
     target_id: str,
     *,
-    current_context: Mapping[str, str] | None = None,
+    current_context: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     pending = _read_pending(state, target_id)
     candidate_data = _read_text_bytes(_candidate_path(state, target_id), "candidate")
@@ -1851,14 +2030,12 @@ def _pending_review(
     if hashlib.sha256(candidate_data).hexdigest() != candidate_sha256:
         raise WorkspaceError("candidate_sha256 does not match candidate")
 
-    if current_context is not None:
+    if current_context:
         context = dict(current_context)
-    elif _PENDING_REVIEW_FIELDS.issubset(pending):
-        context = {
-            field: str(pending[field]) for field in ("name", "url", "watch_focus")
-        }
     else:
-        context = _legacy_review_context(root, target_id)
+        context = _saved_review_context(target_id, pending)
+        if current_context == {}:
+            context["interests"] = []
 
     if _PENDING_REVIEW_FIELDS.issubset(pending):
         diff = str(pending["diff"])
@@ -1878,23 +2055,16 @@ def _pending_review(
 
 
 def _pending_review_handle(
-    root: Path,
     state: Path,
     target_id: str,
     *,
-    current_context: Mapping[str, str] | None = None,
+    current_context: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     pending = _read_pending(state, target_id)
-    if current_context is not None:
+    if current_context:
         context = dict(current_context)
-    elif _PENDING_REVIEW_FIELDS.issubset(pending):
-        context = {
-            "name": str(pending["name"]),
-            "url": str(pending["url"]),
-            "watch_focus": str(pending["watch_focus"]),
-        }
     else:
-        context = _legacy_review_context(root, target_id)
+        context = _saved_review_context(target_id, pending)
     return _compact_review({
         "action": "review",
         "run_id": pending["run_id"],
@@ -1922,12 +2092,23 @@ def pending_reviews(
 ) -> dict[str, object]:
     """Return resumable pending reviews without refetching monitored targets."""
     root = _workspace(workspace)
+    return _collect_pending_reviews(
+        root, _current_review_contexts(root), target_id=target_id
+    )
+
+
+def _collect_pending_reviews(
+    root: Path,
+    current_contexts: Mapping[str, Mapping[str, object]] | None,
+    *,
+    target_id: str | None = None,
+) -> dict[str, object]:
+    """Collect reviews against one validated configuration or saved recovery context."""
     state = _state_dir(root)
     target_ids = _pending_target_ids(state)
     for pending_target_id in target_ids:
         _prepare_pending_for_read(state, pending_target_id)
     target_ids = _pending_target_ids(state)
-    current_contexts = _current_review_contexts(root)
     if target_id is not None:
         target_id = _validate_target_id(target_id)
         if target_id not in target_ids:
@@ -1935,10 +2116,13 @@ def pending_reviews(
         return {
             "reviews": [
                 _pending_review(
-                    root,
                     state,
                     target_id,
-                    current_context=current_contexts.get(target_id),
+                    current_context=(
+                        None
+                        if current_contexts is None
+                        else current_contexts.get(target_id, {})
+                    ),
                 )
             ]
         }
@@ -1946,10 +2130,13 @@ def pending_reviews(
     return {
         "reviews": [
             _pending_review_handle(
-                root,
                 state,
                 current,
-                current_context=current_contexts.get(current),
+                current_context=(
+                    None
+                    if current_contexts is None
+                    else current_contexts.get(current, {})
+                ),
             )
             for current in target_ids
         ]
@@ -2138,7 +2325,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except WorkspaceError as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
-    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    with _integer_text_limit():
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 
 
