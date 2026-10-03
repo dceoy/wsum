@@ -1,5 +1,5 @@
 ---
-name: web-update-monitor-google-workspace
+name: web-update-monitor-gws
 description: Compose Google Workspace connectors with web-update-monitor so a Google Sheet supplies targets, Google Drive persists core monitoring state, and completed run reports are published as Google Docs.
 license: MIT
 compatibility: Requires the installed web-update-monitor skill, local scratch storage, Google Sheets connector read access to the source spreadsheet, Google Drive connector read/write access to dedicated state and report folders, and Google Docs connector create/read/edit access for report documents.
