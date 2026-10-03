@@ -376,6 +376,22 @@ class _DeadlineSSLSocket(_DeadlineTrackingMixin, ssl.SSLSocket):
     pass
 
 
+# Keep this a `dict` subtype so monitor results remain directly JSON serializable.
+class LinkCollection(dict[str, str]):  # ruff: ignore[subclass-builtin]
+    """Collect bounded navigation links and hashes of links omitted by size."""
+
+    def __init__(self) -> None:
+        """Create empty link and omission collections."""
+        super().__init__()
+        self.omitted_hashes: set[str] = set()
+
+
+def _merge_link_collection(target: dict[str, str], source: LinkCollection) -> None:
+    target.update(source)
+    if isinstance(target, LinkCollection):
+        target.omitted_hashes.update(source.omitted_hashes)
+
+
 class _TextExtractor(HTMLParser):
     def __init__(self, source_url: str) -> None:
         super().__init__(convert_charrefs=True)
@@ -385,6 +401,7 @@ class _TextExtractor(HTMLParser):
         self._skip_depth = 0
         self._destination_count = 0
         self.parts: list[str] = []
+        self.links = LinkCollection()
 
     def handle_starttag(  # ruff: ignore[complex-structure]
         self, tag: str, attrs: list[tuple[str, str | None]]
@@ -419,6 +436,8 @@ class _TextExtractor(HTMLParser):
             destination = urljoin(self._base_url, value.strip())
             if _destination_has_credentials(destination):
                 raise MonitorError("HTML destination contains credentials")
+            if tag in {"a", "area"}:
+                _collect_link(self.links, destination)
             digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
             self.parts.append(f"\n[{tag}:{name}:sha256:{digest}]\n")
 
@@ -434,16 +453,40 @@ class _TextExtractor(HTMLParser):
             self.parts.append(data)
 
 
-_EMBEDDED_HTML_RE = re.compile(r"</?[A-Za-z][^>]*>")
+_EMBEDDED_HTML_START_RE = re.compile(r"</?[A-Za-z]")
 
 
-def _normalize_html_fragment(value: str, base_url: str) -> str:
+def _collect_link(links: dict[str, str], destination: str) -> None:
+    """Collect HTTP(S) navigation identities without fragments or credentials."""
+    try:
+        parsed = urlsplit(destination)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return
+        port = parsed.port
+        if port is not None and port <= 0:
+            return
+    except ValueError:
+        return
+    digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
+    if len(destination.encode("utf-8")) > _DEFAULT_MAX_XML_BASE_URL_CHARS:
+        if isinstance(links, LinkCollection):
+            links.omitted_hashes.add(digest)
+        return
+    links[digest] = parsed._replace(fragment="").geturl()
+
+
+def _normalize_html_fragment(
+    value: str, base_url: str, links: dict[str, str] | None = None
+) -> str:
     """Normalize HTML embedded in an XML text field."""
-    if not _EMBEDDED_HTML_RE.search(value):
+    tag_start = _EMBEDDED_HTML_START_RE.search(value)
+    if tag_start is None or ">" not in value[tag_start.end() :]:
         return value
     parser = _TextExtractor(base_url)
     parser.feed(value)
     parser.close()
+    if links is not None:
+        _merge_link_collection(links, parser.links)
     return "".join(parser.parts)
 
 
@@ -1134,6 +1177,9 @@ class _FeedTextTarget:
         self._entry_marker_added = False
         self._size = 0
         self._parts: list[str] = []
+        self._embedded_text_frames: list[list[str] | None] = []
+        self._buffered_text_chars = 0
+        self.links = LinkCollection()
 
     def _append(self, value: str) -> None:
         self._size += len(value)
@@ -1200,6 +1246,23 @@ class _FeedTextTarget:
         self._base_stack.append(base_url)
         self._base_stack_bytes += base_size
         self._tag_stack.append(local_tag)
+        self._embedded_text_frames.append(
+            []
+            if self._preserve_structure and local_tag in self._EMBEDDED_TEXT_TAGS
+            else None
+        )
+
+    def _flush_embedded_text(self) -> None:
+        if not self._embedded_text_frames:
+            return
+        parts = self._embedded_text_frames[-1]
+        if parts is None or not parts:
+            return
+        value = "".join(parts)
+        parts.clear()
+        self._buffered_text_chars -= len(value)
+        base_url = self._base_stack[-1] if self._base_stack else self._base_url
+        self._append(_normalize_html_fragment(value, base_url, self.links))
 
     def _append_start(self, local_tag: str, attrs: dict[str, str]) -> None:
         destinations = sorted(
@@ -1220,8 +1283,14 @@ class _FeedTextTarget:
             return
         for name, value in destinations:
             self._append_destination(local_tag, name, value)
+            if local_tag == "a" or (
+                local_tag == "link" and attrs.get("rel", "alternate") == "alternate"
+            ):
+                base_url = self._base_stack[-1] if self._base_stack else self._base_url
+                _collect_link(self.links, urljoin(base_url, value.strip()))
 
     def start(self, tag: str, attrs: dict[str, str]) -> None:
+        self._flush_embedded_text()
         local_tag = _local_name(tag)
         if self._preserve_structure and local_tag in self._ENTRY_TAGS:
             self._start_entry()
@@ -1242,6 +1311,7 @@ class _FeedTextTarget:
             self._append(_feed_identity_token(field, value, self._base_url))
 
     def end(self, tag: str) -> None:
+        self._flush_embedded_text()
         local_tag = _local_name(tag)
         text_destination = (
             self._text_destination_stack.pop() if self._text_destination_stack else None
@@ -1250,6 +1320,8 @@ class _FeedTextTarget:
             value = "".join(text_destination).strip()
             if value:
                 self._append_destination("link", "href", value)
+                base_url = self._base_stack[-1] if self._base_stack else self._base_url
+                _collect_link(self.links, urljoin(base_url, value))
 
         if self._identity_frames and self._identity_frames[-1][0] == local_tag:
             field, values, attribute_value = self._identity_frames.pop()
@@ -1278,6 +1350,8 @@ class _FeedTextTarget:
 
         if self._tag_stack:
             self._tag_stack.pop()
+        if self._embedded_text_frames:
+            self._embedded_text_frames.pop()
         if self._base_stack:
             self._base_stack_bytes -= len(self._base_stack.pop().encode("utf-8"))
 
@@ -1295,11 +1369,14 @@ class _FeedTextTarget:
             return
         if (
             self._preserve_structure
-            and self._tag_stack
-            and self._tag_stack[-1] in self._EMBEDDED_TEXT_TAGS
+            and self._embedded_text_frames
+            and self._embedded_text_frames[-1] is not None
         ):
-            base_url = self._base_stack[-1] if self._base_stack else self._base_url
-            data = _normalize_html_fragment(data, base_url)
+            if self._size + self._buffered_text_chars + len(data) > self._max_chars:
+                raise MonitorError("XML extracted text exceeds the size limit")
+            self._embedded_text_frames[-1].append(data)  # type: ignore[union-attr]
+            self._buffered_text_chars += len(data)
+            return
         self._append(data)
 
     def _append_destination(self, tag: str, name: str, value: str) -> None:
@@ -1358,7 +1435,12 @@ def _feed_identity_token(field: str, value: str, base_url: str) -> str:
 
 
 def _normalize_feed(
-    text: str, *, max_chars: int, preserve_structure: bool, base_url: str
+    text: str,
+    *,
+    max_chars: int,
+    preserve_structure: bool,
+    base_url: str,
+    links: dict[str, str] | None = None,
 ) -> str:
     if re.search(r"<!DOCTYPE|<!ENTITY", text, re.IGNORECASE):
         raise MonitorError("DOCTYPE and entity declarations are not supported")
@@ -1375,6 +1457,8 @@ def _normalize_feed(
         raise MonitorError("XML document could not be parsed") from exc
     if not isinstance(parsed, str):
         raise MonitorError("XML parser returned an invalid result")
+    if links is not None:
+        _merge_link_collection(links, target.links)
     return _normalize_whitespace(parsed)
 
 
@@ -1728,6 +1812,7 @@ def normalize_document(
     *,
     max_pdf_decompressed_bytes: int = _DEFAULT_MAX_PDF_DECOMPRESSED_BYTES,
     max_pdf_extracted_chars: int = _DEFAULT_MAX_PDF_EXTRACTED_CHARS,
+    links: dict[str, str] | None = None,
 ) -> str:
     """Convert HTML/XML, text, or PDF bytes into stable plain text."""
     if max_pdf_decompressed_bytes <= 0 or max_pdf_extracted_chars <= 0:
@@ -1753,12 +1838,15 @@ def normalize_document(
             max_chars=_DEFAULT_MAX_XML_CHARS,
             preserve_structure=content_type in _FEED_CONTENT_TYPES,
             base_url=document.source_url,
+            links=links,
         )
     if content_type in _HTML_CONTENT_TYPES:
         parser = _TextExtractor(document.source_url)
         parser.feed(text)
         parser.close()
         text = "".join(parser.parts)
+        if links is not None:
+            _merge_link_collection(links, parser.links)
     return _normalize_whitespace(text)
 
 
@@ -1981,10 +2069,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             deadline=monotonic() + args.timeout,
         )
     )
+    links = LinkCollection()
     current = normalize_document(
         document,
         max_pdf_decompressed_bytes=max_pdf_decompressed_bytes,
         max_pdf_extracted_chars=max_pdf_extracted_chars,
+        links=links,
     )
     if not current:
         raise MonitorError("normalization produced empty content")
@@ -2012,6 +2102,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     return {
         "source_url": document.source_url,
         "content_type": document.content_type,
+        "links": links,
         **result,
     }
 

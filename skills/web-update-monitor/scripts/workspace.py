@@ -19,6 +19,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -41,10 +42,21 @@ _PENDING_BASE_FIELDS = {
     "target_id",
 }
 _PENDING_REVIEW_FIELDS = {"diff", "name", "url", "watch_focus"}
+_DEFAULT_LINK_DEPTH = 1
+_MAX_LINKS = 100
+_MAX_LINK_BYTES = 2 * 1024 * 1024
+_MAX_LINK_TOTAL_BYTES = 10 * 1024 * 1024
+_MAX_LINK_TEXT_BYTES = 8192
+_MAX_LINK_REVIEW_BYTES = 65_536
+_LINK_TIMEOUT = 60.0
+_NAVIGATION_HASH_RE = re.compile(
+    r"^\[(?:a|area|link):(?:href|url):sha256:([a-f0-9]{64})\]$", re.MULTILINE
+)
 _PENDING_FIELDS = _PENDING_BASE_FIELDS | _PENDING_REVIEW_FIELDS
 _PENDING_FIELD_SETS = (
     frozenset(_PENDING_BASE_FIELDS),
     frozenset(_PENDING_FIELDS),
+    frozenset(_PENDING_FIELDS | {"link_review"}),
 )
 _TARGET_ID_PART_RE = re.compile(r"[^a-z0-9]+")
 _TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -552,7 +564,12 @@ def _write_report(workspace: Path, run_id: str, target_id: str, report: str) -> 
 
 
 def _monitor_target(
-    state: Path, target: Mapping[str, object], run_id: str
+    state: Path,
+    target: Mapping[str, object],
+    run_id: str,
+    *,
+    link_depth: int = _DEFAULT_LINK_DEPTH,
+    max_links: int = _MAX_LINKS,
 ) -> dict[str, object]:
     target_id = _validate_target_id(target["target_id"])
     _recover_pending(state, target_id)
@@ -570,11 +587,164 @@ def _monitor_target(
             arguments
         )
         result = monitor.run(namespace)
+        link_collection = result.get("links")
+        has_links = bool(link_collection) or bool(
+            getattr(link_collection, "omitted_hashes", ())
+        )
+        if link_depth > 0 and result.get("status") == "changed" and has_links:
+            result["link_review"] = _follow_added_links(
+                result,
+                _read_snapshot(previous) or b"",
+                source_url=str(target["url"]),
+                link_depth=link_depth,
+                max_links=max_links,
+            )
         if result.get("status") in {"baseline", "changed"}:
             candidate_data = _read_text_bytes(candidate, "candidate")
     return _handle_monitor_result(
         state, target, result, run_id, candidate_data=candidate_data
     )
+
+
+def _validate_link_options(link_depth: int, max_links: int) -> None:
+    """Validate configurable link traversal limits."""
+    if type(link_depth) is not int or link_depth < 0:
+        raise WorkspaceError("link_depth must be a non-negative integer")
+    if type(max_links) is not int or not 1 <= max_links <= _MAX_LINKS:
+        raise WorkspaceError(f"max_links must be an integer from 1 to {_MAX_LINKS}")
+
+
+def _follow_added_links(  # ruff: ignore[too-many-locals, too-many-statements]
+    result: Mapping[str, object],
+    previous: bytes,
+    *,
+    source_url: str = "",
+    link_depth: int = _DEFAULT_LINK_DEPTH,
+    max_links: int = _MAX_LINKS,
+) -> dict[str, object]:
+    """Fetch newly added navigation links breadth-first within shared budgets."""
+    _validate_link_options(link_depth, max_links)
+    if link_depth == 0:
+        return {"documents": [], "omitted": 0, "incomplete": False}
+
+    link_collection = result["links"]
+    links = cast("dict[str, str]", link_collection)
+    previous_hashes = set(_NAVIGATION_HASH_RE.findall(previous.decode("utf-8")))
+    omitted_hashes = set(getattr(link_collection, "omitted_hashes", ()))
+    existing_urls = {url for digest, url in links.items() if digest in previous_hashes}
+    source_urls = {str(result["source_url"]).split("#", 1)[0], source_url}
+    added = sorted(set(links.values()) - existing_urls - source_urls)
+    queue = [(url, 1) for url in added[:max_links]]
+    seen = set(source_urls)
+    seen.update(url for url, _depth in queue)
+    scheduled = len(queue)
+    documents: list[dict[str, object]] = []
+    omitted = len(omitted_hashes - previous_hashes)
+    omitted += max(0, len(added) - max_links)
+    incomplete = omitted > 0
+    deadline = monotonic() + _LINK_TIMEOUT
+    remaining_bytes = _MAX_LINK_TOTAL_BYTES
+    review_bytes = _MAX_LINK_REVIEW_BYTES
+    index = 0
+    while index < len(queue):
+        remaining_time = deadline - monotonic()
+        if remaining_time <= 0 or remaining_bytes <= 0 or review_bytes <= 0:
+            omitted += len(queue) - index
+            incomplete = True
+            break
+        url, depth = queue[index]
+        index += 1
+        entry: dict[str, object] = {"url": url}
+        byte_limit = min(remaining_bytes, _MAX_LINK_BYTES)
+        try:
+            document = monitor.fetch_document(
+                url, timeout=min(remaining_time, 30.0), max_bytes=byte_limit
+            )
+            child_links = monitor.LinkCollection() if depth < link_depth else None
+            text = _linked_document_text(document, links=child_links)
+            bounded = monitor._utf8_prefix(  # pyright: ignore[reportPrivateUsage]
+                text, min(review_bytes, _MAX_LINK_TEXT_BYTES)
+            )
+            truncated = bounded != text
+            entry.update({
+                "source_url": document.source_url,
+                "text": bounded,
+                "truncated": truncated,
+            })
+            review_bytes -= len(bounded.encode("utf-8"))
+            incomplete = incomplete or truncated
+            byte_limit = len(document.body)
+            if child_links is not None:
+                child_omitted = len(child_links.omitted_hashes)
+                omitted += child_omitted
+                incomplete = incomplete or child_omitted > 0
+                seen.add(document.source_url.split("#", 1)[0])
+                for nested_url in sorted(set(child_links.values())):
+                    if nested_url in seen:
+                        continue
+                    seen.add(nested_url)
+                    if scheduled >= max_links:
+                        omitted += 1
+                        incomplete = True
+                        continue
+                    queue.append((nested_url, depth + 1))
+                    scheduled += 1
+        except (monitor.MonitorError, OSError, ValueError) as exc:
+            entry["error"] = str(exc)
+            incomplete = True
+        # Reserve the full allowance for failed requests, actual bytes on success.
+        remaining_bytes -= byte_limit
+        documents.append(entry)
+    return {"documents": documents, "omitted": omitted, "incomplete": incomplete}
+
+
+def _linked_document_text(
+    document: monitor.Document, *, links: dict[str, str] | None = None
+) -> str:
+    """Normalize child content and reject empty extraction."""
+    text = monitor.normalize_document(document, links=links)
+    if not text:
+        raise monitor.MonitorError("normalization produced empty content")
+    return text
+
+
+def _validate_link_review(value: object) -> dict[str, object]:
+    """Validate the bounded persisted child-document review context."""
+    if not isinstance(value, dict):
+        raise WorkspaceError("pending link review is invalid")
+    review = cast("dict[str, object]", value)
+    if set(review) != {
+        "documents",
+        "omitted",
+        "incomplete",
+    }:
+        raise WorkspaceError("pending link review is invalid")
+    documents = review["documents"]
+    omitted = review["omitted"]
+    if (
+        not isinstance(documents, list)
+        or len(cast("list[object]", documents)) > _MAX_LINKS
+        or type(omitted) is not int
+        or omitted < 0
+        or type(review["incomplete"]) is not bool
+    ):
+        raise WorkspaceError("pending link review is invalid")
+    for entry in cast("list[object]", documents):
+        if not isinstance(entry, dict):
+            raise WorkspaceError("pending link review is invalid")
+        item = cast("dict[str, object]", entry)
+        if set(item) not in (
+            {"url", "error"},
+            {"url", "source_url", "text", "truncated"},
+        ):
+            raise WorkspaceError("pending link review is invalid")
+        for field in set(item) - {"truncated"}:
+            if not isinstance(item[field], str):
+                raise WorkspaceError("pending link review is invalid")
+        _validate_url(str(item["url"]))
+        if "truncated" in item and type(item["truncated"]) is not bool:
+            raise WorkspaceError("pending link review is invalid")
+    return review
 
 
 def _optional_lstat(path: Path, description: str) -> os.stat_result | None:
@@ -1422,6 +1592,11 @@ def _handle_monitor_result(
         "watch_focus": str(target.get("watch_focus", "")),
         "diff": diff,
     }
+    if "link_review" in result:
+        link_review = _validate_link_review(result["link_review"])
+        pending["link_review"] = link_review
+        if link_review["incomplete"]:
+            pending["diff_truncated"] = True
     if candidate_data is None:
         candidate = (
             _candidate_path(state, target_id)
@@ -1443,6 +1618,7 @@ def _handle_monitor_result(
         "watch_focus": target["watch_focus"],
         "diff": diff,
         "diff_truncated": pending["diff_truncated"],
+        **({"link_review": pending["link_review"]} if "link_review" in pending else {}),
     }
 
 
@@ -1459,8 +1635,15 @@ def _compact_review(review: Mapping[str, object]) -> dict[str, object]:
     return {key: review[key] for key in keys}
 
 
-def check(workspace: str | Path, *, compact: bool = False) -> dict[str, object]:
+def check(
+    workspace: str | Path,
+    *,
+    compact: bool = False,
+    link_depth: int = _DEFAULT_LINK_DEPTH,
+    max_links: int = _MAX_LINKS,
+) -> dict[str, object]:
     """Check targets without refetching any target that already has a review."""
+    _validate_link_options(link_depth, max_links)
     root = _workspace(workspace)
     targets = load_targets(root)
     targets_by_id = {str(target["target_id"]): target for target in targets}
@@ -1491,7 +1674,13 @@ def check(workspace: str | Path, *, compact: bool = False) -> dict[str, object]:
             })
             continue
         try:
-            outcome = _monitor_target(state, target, run_id)
+            outcome = _monitor_target(
+                state,
+                target,
+                run_id,
+                link_depth=link_depth,
+                max_links=max_links,
+            )
             outcomes.append(
                 _compact_review(outcome)
                 if compact and outcome.get("action") == "review"
@@ -1540,6 +1729,8 @@ def _read_pending(state: Path, target_id: str) -> dict[str, object]:
         for field in _PENDING_REVIEW_FIELDS:
             if not isinstance(pending.get(field), str):
                 raise WorkspaceError("pending decision is invalid")
+    if "link_review" in pending:
+        _validate_link_review(pending["link_review"])
     return pending
 
 
@@ -1682,6 +1873,7 @@ def _pending_review(
         **context,
         "diff": diff,
         "diff_truncated": pending["diff_truncated"],
+        **({"link_review": pending["link_review"]} if "link_review" in pending else {}),
     }
 
 
@@ -1913,6 +2105,8 @@ def _parser() -> argparse.ArgumentParser:
 
     check_parser = subparsers.add_parser("check")
     check_parser.add_argument("--compact", action="store_true")
+    check_parser.add_argument("--link-depth", type=int, default=_DEFAULT_LINK_DEPTH)
+    check_parser.add_argument("--max-links", type=int, default=_MAX_LINKS)
 
     pending_parser = subparsers.add_parser("pending")
     pending_parser.add_argument("--target-id")
@@ -1929,7 +2123,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "check":
-            result = check(args.workspace, compact=args.compact)
+            result = check(
+                args.workspace,
+                compact=args.compact,
+                link_depth=args.link_depth,
+                max_links=args.max_links,
+            )
         elif args.command == "pending":
             result = pending_reviews(args.workspace, target_id=args.target_id)
         elif args.command == "discard":

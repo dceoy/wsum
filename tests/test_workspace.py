@@ -901,9 +901,16 @@ def test_check_batches_targets_and_contains_failures(
     monkeypatch.setattr(workspace, "_new_run_id", lambda: _RUN_ID)
 
     def fake_monitor(
-        _state: Path, target: dict[str, object], run_id: str
+        _state: Path,
+        target: dict[str, object],
+        run_id: str,
+        *,
+        link_depth: int,
+        max_links: int,
     ) -> dict[str, object]:
         assert run_id == _RUN_ID
+        assert link_depth == workspace._DEFAULT_LINK_DEPTH
+        assert max_links == workspace._MAX_LINKS
         if target["name"] == "Bad":
             raise workspace.monitor.MonitorError
         return {
@@ -923,6 +930,24 @@ def test_check_batches_targets_and_contains_failures(
         "error",
         "skipped",
     ]
+
+
+@pytest.mark.parametrize(
+    ("link_depth", "max_links", "message"),
+    [
+        (-1, workspace._MAX_LINKS, "link_depth"),
+        (cast("Any", "1"), workspace._MAX_LINKS, "link_depth"),
+        (workspace._DEFAULT_LINK_DEPTH, 0, "max_links"),
+        (workspace._DEFAULT_LINK_DEPTH, workspace._MAX_LINKS + 1, "max_links"),
+        (workspace._DEFAULT_LINK_DEPTH, cast("Any", "1"), "max_links"),
+    ],
+)
+def test_check_rejects_invalid_link_options(
+    tmp_path: Path, link_depth: int, max_links: int, message: str
+) -> None:
+    _write_targets(tmp_path / "targets.csv", "Example,https://example.com/,,true\n")
+    with pytest.raises(WorkspaceError, match=message):
+        check(tmp_path, link_depth=link_depth, max_links=max_links)
 
 
 def test_check_reuses_pending_target_and_fetches_other_targets(
@@ -4756,3 +4781,530 @@ def test_module_entry_point_runs_cli(
         runpy.run_path(str(Path(workspace.__file__)), run_name="__main__")
     assert exit_info.value.code == 0
     assert '"action": "skipped"' in capsys.readouterr().out
+
+
+def _link_result(urls: list[str]) -> dict[str, object]:
+    return {
+        "source_url": "https://example.com/",
+        "links": {
+            hashlib.sha256(url.encode()).hexdigest(): url.split("#", 1)[0]
+            for url in urls
+        },
+    }
+
+
+def test_follow_links_skips_existing_self_and_duplicate_destinations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        assert 0 < timeout <= 30
+        assert max_bytes <= workspace._MAX_LINK_BYTES
+        calls.append(url)
+        return workspace.monitor.Document(
+            b'<p>New release</p><a href="/grandchild">more</a>', url, "text/html"
+        )
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    old_url = "https://example.com/old#section"
+    previous = (
+        f"[a:href:sha256:{hashlib.sha256(old_url.encode()).hexdigest()}]\n".encode()
+    )
+    result = workspace._follow_added_links(
+        _link_result([
+            old_url,
+            "https://example.com/old#new",
+            "https://example.com/#top",
+            "https://example.com/new#first",
+            "https://example.com/new#second",
+            "https://example.com/original",
+        ]),
+        previous,
+        source_url="https://example.com/original",
+    )
+    assert calls == ["https://example.com/new"]
+    assert result["omitted"] == 0
+    assert result["incomplete"] is False
+    documents = cast("list[dict[str, object]]", result["documents"])
+    assert documents[0]["url"] == documents[0]["source_url"] == calls[0]
+    assert "New release" in str(documents[0]["text"])
+    assert documents[0]["truncated"] is False
+
+
+@pytest.mark.parametrize(
+    ("link_depth", "max_links", "expected_calls", "omitted", "incomplete"),
+    [
+        (0, workspace._MAX_LINKS, [], 0, False),
+        (1, workspace._MAX_LINKS, ["https://example.com/one"], 0, False),
+        (
+            2,
+            workspace._MAX_LINKS,
+            ["https://example.com/one", "https://example.com/two"],
+            0,
+            False,
+        ),
+        (
+            3,
+            2,
+            ["https://example.com/one", "https://example.com/two"],
+            1,
+            True,
+        ),
+    ],
+)
+def test_follow_links_supports_configurable_depth_and_max_links(
+    monkeypatch: pytest.MonkeyPatch,
+    link_depth: int,
+    max_links: int,
+    expected_calls: list[str],
+    omitted: int,
+    incomplete: bool,
+) -> None:
+    pages = {
+        "https://example.com/one": b'<a href="/">root</a><a href="/two">two</a>',
+        "https://example.com/two": b'<a href="/one">one</a><a href="/three">three</a>',
+        "https://example.com/three": b"done",
+    }
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        calls.append(url)
+        return workspace.monitor.Document(pages[url], url, "text/html")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    result = workspace._follow_added_links(
+        _link_result(["https://example.com/one"]),
+        b"",
+        link_depth=link_depth,
+        max_links=max_links,
+    )
+
+    assert calls == expected_calls
+    assert result["omitted"] == omitted
+    assert result["incomplete"] is incomplete
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "error",
+        "empty",
+        "truncated",
+        "count",
+        "time",
+        "bytes",
+        "review",
+    ],
+    ids=["error", "empty", "truncated", "count", "time", "bytes", "review"],
+)
+def test_follow_links_enforces_budgets_and_preserves_individual_errors(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    urls = [
+        f"https://example.com/{index:02}"
+        for index in range(workspace._MAX_LINKS + 2 if mode == "count" else 3)
+    ]
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        calls.append(url)
+        if mode == "error" and url == urls[0]:
+            message = "URL must resolve to a public IP"
+            raise workspace.monitor.MonitorError(message)
+        body = b" " if mode == "empty" else b"readable article"
+        if mode in {"truncated", "review"}:
+            body = b"x" * (workspace._MAX_LINK_TEXT_BYTES + 1)
+        return workspace.monitor.Document(body, url, "text/plain")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    if mode == "time":
+        ticks = iter([0.0, 1.0, workspace._LINK_TIMEOUT + 1])
+        monkeypatch.setattr(workspace, "monotonic", lambda: next(ticks))
+    elif mode == "bytes":
+        monkeypatch.setattr(
+            workspace, "_MAX_LINK_TOTAL_BYTES", len(b"readable article")
+        )
+    elif mode == "review":
+        monkeypatch.setattr(
+            workspace, "_MAX_LINK_REVIEW_BYTES", workspace._MAX_LINK_TEXT_BYTES
+        )
+    result = workspace._follow_added_links(_link_result(urls), b"")
+    documents = cast("list[dict[str, object]]", result["documents"])
+    assert result["incomplete"] is True
+    if mode in {"time", "bytes", "review"}:
+        assert len(calls) == 1
+        assert result["omitted"] == 2
+    elif mode == "count":
+        assert len(calls) == workspace._MAX_LINKS
+        assert result["omitted"] == 2
+    elif mode in {"error", "empty"}:
+        assert "error" in documents[0]
+        assert len(calls) == 3
+    else:
+        assert documents[0]["truncated"] is True
+        assert len(str(documents[0]["text"]).encode()) == workspace._MAX_LINK_TEXT_BYTES
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ValueError("invalid host label"),
+        UnicodeError("invalid host label"),
+        TimeoutError("DNS resolution deadline exceeded"),
+    ],
+    ids=["value-error", "unicode-error", "timeout-error"],
+)
+def test_follow_links_records_fetch_errors_and_continues(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    urls = ["https://example.com/bad", "https://example.com/good"]
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        calls.append(url)
+        if url == urls[0]:
+            raise failure
+        return workspace.monitor.Document(b"good article", url, "text/plain")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    result = workspace._follow_added_links(_link_result(urls), b"")
+
+    documents = cast("list[dict[str, object]]", result["documents"])
+    assert result["incomplete"] is True
+    assert calls == urls
+    assert documents[0]["error"] == str(failure)
+    assert documents[1]["text"] == "good article\n"
+
+
+def test_follow_links_records_malformed_child_href_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    urls = ["https://example.com/bad", "https://example.com/good"]
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        calls.append(url)
+        body = (
+            b'<a href="http://[::1/evil">bad link</a>'
+            if url == urls[0]
+            else b"good article"
+        )
+        return workspace.monitor.Document(body, url, "text/plain")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    result = workspace._follow_added_links(_link_result(urls), b"")
+
+    documents = cast("list[dict[str, object]]", result["documents"])
+    assert result["incomplete"] is True
+    assert calls == urls
+    assert "Invalid IPv6 URL" in str(documents[0]["error"])
+    assert documents[1]["text"] == "good article\n"
+
+
+def test_check_can_disable_link_following(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_targets(
+        tmp_path / "targets.csv", "Example,https://example.com/,releases,true\n"
+    )
+    parent = b'<p>News</p><a href="/old">old</a>'
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        calls.append(url)
+        return workspace.monitor.Document(parent, url, "text/html")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    baseline = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    assert baseline["action"] == "baseline_created"
+    parent += b'<a href="/new">new</a>'
+    outcome = cast(
+        "list[dict[str, object]]",
+        check(tmp_path, link_depth=0)["targets"],
+    )[0]
+
+    assert outcome["action"] == "review"
+    assert "link_review" not in outcome
+    assert calls == ["https://example.com/", "https://example.com/"]
+
+
+@pytest.mark.parametrize(
+    "relation",
+    ["nofollow", "noopener noreferrer"],
+    ids=["nofollow", "noopener-noreferrer"],
+)
+def test_check_follows_new_atom_xhtml_anchors_with_html_relations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relation: str
+) -> None:
+    _write_targets(
+        tmp_path / "targets.csv", "Example,https://example.com/feed,releases,true\n"
+    )
+    feed = (
+        b'<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>release</id>'
+        b"</entry></feed>"
+    )
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        calls.append(url)
+        if url == "https://example.com/feed":
+            return workspace.monitor.Document(feed, url, "application/atom+xml")
+        return workspace.monitor.Document(b"Release details", url, "text/plain")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    baseline = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    assert baseline["action"] == "baseline_created"
+    assert calls == ["https://example.com/feed"]
+
+    feed = (
+        '<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>release</id>'
+        '<content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">'
+        f'<a href="/release" rel="{relation}">Details</a>'
+        "</div></content></entry></feed>"
+    ).encode()
+    outcome = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+
+    assert outcome["action"] == "review"
+    assert calls == [
+        "https://example.com/feed",
+        "https://example.com/feed",
+        "https://example.com/release",
+    ]
+    link_review = cast("dict[str, object]", outcome["link_review"])
+    documents = cast("list[dict[str, object]]", link_review["documents"])
+    assert documents[0]["url"] == "https://example.com/release"
+    assert documents[0]["text"] == "Release details\n"
+
+
+def test_check_records_new_oversized_link_as_incomplete_review_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_targets(
+        tmp_path / "targets.csv", "Example,https://example.com/,releases,true\n"
+    )
+    parent = b"<p>News</p>"
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        calls.append(url)
+        return workspace.monitor.Document(parent, url, "text/html")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    baseline = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    assert baseline["action"] == "baseline_created"
+    parent += b'<a href="https://example.com/' + b"x" * 4096 + b'">long</a>'
+
+    outcome = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+
+    assert outcome["action"] == "review"
+    assert calls == ["https://example.com/", "https://example.com/"]
+    review = cast(
+        "list[dict[str, object]]",
+        workspace.pending_reviews(tmp_path, target_id=str(outcome["target_id"]))[
+            "reviews"
+        ],
+    )[0]
+    link_review = cast("dict[str, object]", review["link_review"])
+    assert link_review == {"documents": [], "omitted": 1, "incomplete": True}
+    assert (
+        finalize(
+            tmp_path,
+            {
+                "target_id": review["target_id"],
+                "revision": review["revision"],
+                "material": False,
+            },
+        )["action"]
+        == "manual_review_required"
+    )
+
+
+def test_follow_links_marks_oversized_child_destinations_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = "https://example.com/one"
+    oversized = "x" * 4096
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        body = f'<a href="{oversized}">deep link</a>'.encode()
+        return workspace.monitor.Document(body, url, "text/html")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    result = workspace._follow_added_links(_link_result([root]), b"", link_depth=2)
+
+    assert result["incomplete"] is True
+    assert result["omitted"] == 1
+    documents = cast("list[dict[str, object]]", result["documents"])
+    assert len(documents) == 1
+    assert "error" not in documents[0]
+
+
+@pytest.mark.parametrize(
+    ("failed", "material"),
+    [
+        (False, False),
+        (False, True),
+        (True, False),
+        (True, True),
+    ],
+    ids=[
+        "complete-nonmaterial",
+        "complete-material",
+        "incomplete-nonmaterial-refused",
+        "incomplete-material",
+    ],
+)
+def test_link_review_transaction_survives_resume_and_promotes_identity_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed: bool, material: bool
+) -> None:
+    _write_targets(
+        tmp_path / "targets.csv", "Example,https://example.com/,releases,true\n"
+    )
+    parent = b'<p>News</p><a href="/old">old</a>'
+    calls: list[str] = []
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        calls.append(url)
+        if url == "https://example.com/":
+            return workspace.monitor.Document(parent, url, "text/html")
+        if failed:
+            message = "blocked private IP"
+            raise workspace.monitor.MonitorError(message)
+        return workspace.monitor.Document(b"Release details", url, "text/plain")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    baseline = check(tmp_path)
+    assert (
+        cast("list[dict[str, object]]", baseline["targets"])[0]["action"]
+        == "baseline_created"
+    )
+    assert calls == ["https://example.com/"]
+    parent += b'<a href="/new">new</a>'
+    outcome = cast("list[dict[str, object]]", check(tmp_path, compact=True)["targets"])[
+        0
+    ]
+    assert "link_review" not in outcome
+    assert calls == [
+        "https://example.com/",
+        "https://example.com/",
+        "https://example.com/new",
+    ]
+    target_id = str(outcome["target_id"])
+    review = cast(
+        "list[dict[str, object]]",
+        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+    )[0]
+    context = cast("dict[str, object]", review["link_review"])
+    assert context["incomplete"] is failed
+    assert (
+        "link_review"
+        not in cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    )
+    assert len(calls) == 3
+    decision: dict[str, object] = {
+        "target_id": target_id,
+        "revision": review["revision"],
+        "material": material,
+    }
+    if material:
+        decision["report"] = "## Release\n\nRelease details.\n"
+    expected_action = (
+        "manual_review_required" if failed and not material else "finalized"
+    )
+    assert finalize(tmp_path, decision)["action"] == expected_action
+    if expected_action == "manual_review_required":
+        decision.update({
+            "material": True,
+            "report": "## Release\n\nRelease details.\n",
+        })
+        assert finalize(tmp_path, decision)["action"] == "finalized"
+    if not failed and not material:
+        assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+        assert not list((tmp_path / "reports").glob("*.md"))
+    assert (
+        cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]["action"]
+        == "unchanged"
+    )
+    parent += b"<p>Minor page edit</p>"
+    next_review = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    assert next_review["link_review"] == {
+        "documents": [],
+        "omitted": 0,
+        "incomplete": False,
+    }
+    assert calls.count("https://example.com/new") == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    cast(
+        "list[object]",
+        [
+            None,
+            {},
+            {"documents": None, "omitted": 0, "incomplete": False},
+            {
+                "documents": [{}] * (workspace._MAX_LINKS + 1),
+                "omitted": 0,
+                "incomplete": False,
+            },
+            {"documents": [], "omitted": False, "incomplete": False},
+            {"documents": [], "omitted": -1, "incomplete": False},
+            {"documents": [], "omitted": 0, "incomplete": 0},
+            {"documents": [None], "omitted": 0, "incomplete": True},
+            {"documents": [{}], "omitted": 0, "incomplete": True},
+            {
+                "documents": [{"url": "https://example.com/", "error": 1}],
+                "omitted": 0,
+                "incomplete": True,
+            },
+            {
+                "documents": [
+                    {
+                        "url": "https://example.com/",
+                        "source_url": "https://example.com/",
+                        "text": "x",
+                        "truncated": 1,
+                    }
+                ],
+                "omitted": 0,
+                "incomplete": True,
+            },
+        ],
+    ),
+)
+def test_link_review_validation_rejects_invalid_persisted_context(
+    value: object,
+) -> None:
+    with pytest.raises(WorkspaceError, match="pending link review is invalid"):
+        workspace._validate_link_review(value)

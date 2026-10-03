@@ -146,15 +146,15 @@ Use the compact core interface:
 python "$WEB_UPDATE_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSPACE" check --compact
 ```
 
-The core returns compact review handles instead of embedding every diff in the batch response. If a target already has a pending review, that target is not refetched; its existing handle is returned while unrelated targets continue to be checked.
+The core returns compact review handles instead of embedding every diff in the batch response. If a target already has a pending review, that target is not refetched; its existing handle is returned while unrelated targets continue to be checked. Link traversal defaults to `--link-depth 1 --max-links 100`; append either option to the core `check` invocation when the workflow needs a different run-level limit. Depth 0 disables linked-document fetching, and `--max-links` accepts 1 through 100.
 
-For each `review` handle, call `pending --target-id`, judge the bounded diff, and call `finalize`.
+For each `review` handle, call `pending --target-id`, judge the bounded parent diff and any `link_review` evidence together under the current watch focus, and call `finalize`. Preserve linked-document context with the rest of `.wsum/`; it requires no additional connector state or Spreadsheet columns.
 
 This keeps the connector/composite boundary small:
 
 - CSV is the only monitoring configuration input
 - compact JSON handles cross the orchestration boundary
-- one bounded diff is loaded only when actually reviewed
+- one bounded parent diff plus linked-document evidence is loaded only when actually reviewed
 - `.wsum/` remains the only core transaction/state representation
 - Markdown report files remain the canonical core output
 - Google Docs exists only at the Google Workspace delivery boundary
