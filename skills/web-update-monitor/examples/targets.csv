@@ -1,5 +1,5 @@
-name,url,watch_focus,enabled
-IANA Reserved Domains,https://www.iana.org/domains/reserved,Changes to reserved-domain policy or listings,true
-Cloudflare Changelog,https://developers.cloudflare.com/changelog/,Important Cloudflare product and platform updates,true
-Python Downloads,https://www.python.org/downloads/,New Python releases and supported-version changes,true
-Workers SDK Releases,https://github.com/cloudflare/workers-sdk/releases,New Wrangler and Workers SDK releases,true
+name,url,publisher,category,keywords,criteria,priority,enabled
+Subscription updates,https://vendor.example/updates,Example Vendor,Product,subscription plans,Report changes to plan availability and limits,1,true
+Integration updates,https://vendor.example/updates,Example Vendor,Product,API integrations,Report breaking integration changes,2,true
+Service notices,https://operator.example/notices,Example Operator,Operations,,Report changes to maintenance schedules,2,true
+Technical publications,https://institute.example/publications,Example Institute,Research,technical reports,,,false

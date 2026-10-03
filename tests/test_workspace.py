@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import base64
+import csv
 import hashlib
+import io
 import json
 import os
 import runpy
@@ -19,7 +21,7 @@ from workspace import WorkspaceError, check, finalize, load_targets
 
 if TYPE_CHECKING:
     import argparse
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 
 _RUN_ID = "20261001T000000Z-deadbeef"
@@ -125,18 +127,12 @@ def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) ->
             ",https://example.com/,,true\n",
             "name must be non-empty",
         ),
-        (
-            "name,url,watch_focus,enabled\n",
-            "One,https://example.com/,,true\nTwo,https://example.com/,,true\n",
-            "duplicate_target_id",
-        ),
     ],
     ids=[
         "missing-required-column",
         "unsupported-column",
         "invalid-enabled",
         "empty-name",
-        "duplicate-url",
     ],
 )
 def test_load_targets_rejects_invalid_csv(
@@ -1820,13 +1816,14 @@ def test_legacy_review_context_falls_back_when_target_is_not_in_csv(
         "Other,https://example.org/,,true\n",
     )
 
-    assert workspace._legacy_review_context(  # pyright: ignore[reportPrivateUsage]
-        tmp_path,
+    assert workspace._saved_review_context(
         "example",
+        {},
     ) == {
         "name": "example",
         "url": "",
         "watch_focus": "",
+        "interests": [_interest("example")],
     }
 
 
@@ -2593,15 +2590,10 @@ def test_identifier_validators_reject_malformed_values(
 @pytest.mark.parametrize(
     ("header", "rows", "message"),
     [
-        (
-            "name,url,enabled\n",
-            "A,https://example.com/\nB,https://example.com/\n",
-            "duplicate_target_id",
-        ),
         ("name,url\n", "A,http://[::1\n", "url is invalid"),
         ("name,url\n", "A,https://example.com/#frag\n", "fragment"),
     ],
-    ids=["duplicate-url", "malformed-url", "url-fragment"],
+    ids=["malformed-url", "url-fragment"],
 )
 def test_load_targets_rejects_duplicate_and_malformed_rows(
     tmp_path: Path, header: str, rows: str, message: str
@@ -4293,13 +4285,11 @@ def test_load_targets_rejects_non_string_csv_values(
 ) -> None:
     (tmp_path / "targets.csv").write_text("name,url\n", encoding="utf-8")
 
-    class StubReader:
-        fieldnames = ("name", "url")
+    def fake_reader(_stream: object, **_options: object) -> Iterator[list[object]]:
+        rows: list[list[object]] = [["name", "url"], [object(), "https://example.com/"]]
+        return iter(rows)
 
-        def __iter__(self) -> Any:  # ruff: ignore[any-type]
-            return iter([{"name": object(), "url": "https://example.com/"}])
-
-    monkeypatch.setattr(workspace.csv, "DictReader", lambda _stream: StubReader())  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+    monkeypatch.setattr(workspace.csv, "reader", fake_reader)
     with pytest.raises(WorkspaceError, match="invalid CSV value"):
         workspace.load_targets(tmp_path)
 
@@ -5308,3 +5298,726 @@ def test_link_review_validation_rejects_invalid_persisted_context(
 ) -> None:
     with pytest.raises(WorkspaceError, match="pending link review is invalid"):
         workspace._validate_link_review(value)
+
+
+_ENRICHED_HEADER = "name,url,publisher,category,keywords,criteria,priority,enabled\n"
+
+
+def _interest(name: object = "Example", **changes: object) -> dict[str, object]:
+    result: dict[str, object] = {
+        "name": name,
+        "publisher": "",
+        "category": "",
+        "keywords": "",
+        "criteria": "",
+        "priority": None,
+        "enabled": True,
+    }
+    result.update(changes)
+    return result
+
+
+def _create_interest_review(tmp_path: Path) -> tuple[str, Path, Path, Path]:
+    (tmp_path / "targets.csv").write_text(
+        _ENRICHED_HEADER
+        + "First,https://vendor.example/updates,Vendor,Product,plans,Limits,01,true\n"
+        + "Second,https://vendor.example/updates,Vendor,Product,API,"
+        "Breaking changes,2,true\n"
+        + "Disabled,https://vendor.example/updates,,,,,3,false\n",
+        encoding="utf-8",
+    )
+    target = load_targets(tmp_path)[0]
+    target_id = str(target["target_id"])
+    state = tmp_path / ".wsum"
+    snapshots = state / "snapshots"
+    snapshots.mkdir(parents=True)
+    snapshot = snapshots / f"{target_id}.txt"
+    snapshot.write_text("old\n", encoding="utf-8")
+    workspace._handle_monitor_result(
+        state,
+        target,
+        {
+            **_changed_result(),
+            "link_review": {"documents": [], "omitted": 0, "incomplete": False},
+        },
+        _RUN_ID,
+        candidate_data=b"new\n",
+    )
+    metadata, candidate = _transaction_paths(state, target_id, "grouped")
+    return target_id, metadata, candidate, snapshot
+
+
+@pytest.mark.parametrize(
+    ("csv_text", "expected"),
+    [
+        ("name,url\n Example , https://example.com/ \n", _interest()),
+        (
+            (
+                "url,enabled,name,watch_focus\n"
+                "https://example.com/, TrUe ,Example, pricing \n"
+            ),
+            _interest(criteria="pricing"),
+        ),
+        (
+            (
+                "\ufeffname,url,criteria,priority,enabled\n"
+                "Example,https://example.com/, pricing ,0002, FALSE \n"
+            ),
+            _interest(criteria="pricing", priority=2, enabled=False),
+        ),
+        (_ENRICHED_HEADER + "Example,https://example.com/\n", _interest()),
+        (
+            (
+                "name,url,publisher,category,keywords,criteria,priority\n"
+                "Example,https://example.com/, Publisher , Category ,"
+                '"a, b / c","first\nsecond",1\n'
+            ),
+            _interest(
+                publisher="Publisher",
+                category="Category",
+                keywords="a, b / c",
+                criteria="first\nsecond",
+                priority=1,
+            ),
+        ),
+        (
+            (
+                "name,url,keywords,criteria\n"
+                "\n,,,\nExample,https://example.com/,,mentions 同上 and 〃\n"
+            ),
+            _interest(criteria="mentions 同上 and 〃"),
+        ),
+    ],
+    ids=[
+        "minimal",
+        "legacy-reordered",
+        "bom-case-priority",
+        "short-optional",
+        "quoted",
+        "blank-and-embedded",
+    ],
+)
+def test_interest_csv_normalization(
+    tmp_path: Path, csv_text: str, expected: dict[str, object]
+) -> None:
+    (tmp_path / "targets.csv").write_text(csv_text, encoding="utf-8")
+    target = load_targets(tmp_path)[0]
+    assert target["interests"] == [expected]
+    assert target["target_id"] == workspace._target_id("https://example.com/")
+    assert target["watch_focus"] == expected["criteria"]
+    assert target["enabled"] is expected["enabled"]
+
+
+@pytest.mark.parametrize(
+    "priority", ["0", "00", "-1", "+1", "1.0", "1e2", "one", "\u0661", "\uff11"]
+)
+def test_invalid_priority_in_later_disabled_row_prevents_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, priority: str
+) -> None:
+    target_id, metadata, candidate, snapshot = _create_interest_review(tmp_path)
+    before = [path.read_bytes() for path in (metadata, candidate, snapshot)]
+    (tmp_path / "targets.csv").write_text(
+        "name,url,priority,enabled\nOther,https://other.example/,1,true\n"
+        f"Disabled,https://vendor.example/updates,{priority},false\n",
+        encoding="utf-8",
+    )
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("invalid configuration must not fetch or discard")
+
+    monkeypatch.setattr(workspace.monitor, "run", forbidden)
+    monkeypatch.setattr(workspace, "discard_pending", forbidden)
+    with pytest.raises(WorkspaceError, match="row 3: priority"):
+        check(tmp_path)
+    assert [path.read_bytes() for path in (metadata, candidate, snapshot)] == before
+    review = cast(
+        "list[dict[str, object]]",
+        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+    )[0]
+    assert [
+        item["name"] for item in cast("list[dict[str, object]]", review["interests"])
+    ] == ["First", "Second"]
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["name", "url", "publisher", "category", "keywords", "criteria", "watch_focus"],
+)
+@pytest.mark.parametrize("token", ['"', "〃", "同上", "同左"])
+def test_ditto_cells_rejected_with_record_and_field(
+    tmp_path: Path, field: str, token: str
+) -> None:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        ["name", "url", field] if field not in {"name", "url"} else ["name", "url"]
+    )
+    writer.writerow([])
+    values = {"name": "Example", "url": "https://example.com/", field: f" {token} "}
+    writer.writerow([
+        values[key]
+        for key in (
+            ["name", "url", field] if field not in {"name", "url"} else ["name", "url"]
+        )
+    ])
+    (tmp_path / "targets.csv").write_text(output.getvalue(), encoding="utf-8")
+    with pytest.raises(WorkspaceError, match=f"row 3: {field}: replace ditto"):
+        load_targets(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("csv_text", "message"),
+    [
+        (
+            "name,url,criteria,watch_focus\nExample,https://example.com/,,\n",
+            "criteria and watch_focus",
+        ),
+        ("name,url,target_id\nExample,https://example.com/,custom\n", "unsupported"),
+        ("name,url\nExample\n", "row 2: url"),
+        ('name,url,keywords\nExample,https://example.com/,"unterminated', "CSV record"),
+        ("name,url\n\n\n", "no targets"),
+        ("name,url\n", "no targets"),
+    ],
+    ids=[
+        "ambiguous",
+        "supplied-id",
+        "missing-url",
+        "malformed-quote",
+        "blank",
+        "header-only",
+    ],
+)
+def test_enriched_csv_errors(tmp_path: Path, csv_text: str, message: str) -> None:
+    (tmp_path / "targets.csv").write_text(csv_text, encoding="utf-8")
+    with pytest.raises(WorkspaceError, match=message):
+        load_targets(tmp_path)
+
+
+@pytest.mark.parametrize("field", ["keywords", "watch_focus"])
+def test_large_csv_text_and_serialized_expansion(tmp_path: Path, field: str) -> None:
+    text = "〃x" * 160_000
+    (tmp_path / "targets.csv").write_text(
+        f"name,url,{field}\nExample,https://example.com/,{text}\n",
+        encoding="utf-8",
+    )
+    previous_limit = workspace.csv.field_size_limit()
+    target = load_targets(tmp_path)[0]
+    assert workspace.csv.field_size_limit() == previous_limit
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    workspace._handle_monitor_result(
+        state, target, _changed_result(), _RUN_ID, candidate_data=b"new\n"
+    )
+    metadata = state / "pending" / str(target["target_id"]) / "state.json"
+    assert metadata.stat().st_size > 1024 * 1024
+    review = cast(
+        "list[dict[str, object]]",
+        workspace.pending_reviews(tmp_path, target_id=str(target["target_id"]))[
+            "reviews"
+        ],
+    )[0]
+    assert (
+        cast("list[dict[str, object]]", review["interests"])[0][
+            "criteria" if field == "watch_focus" else field
+        ]
+        == text
+    )
+
+
+def test_priority_exceeding_python_decimal_limit_round_trips(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    digits = "1" + "0" * 5000
+    (tmp_path / "targets.csv").write_text(
+        f"name,url,priority\nExample,https://example.com/,{digits}\n",
+        encoding="utf-8",
+    )
+    target = load_targets(tmp_path)[0]
+    state = tmp_path / ".wsum"
+    state.mkdir()
+    workspace._handle_monitor_result(
+        state, target, _changed_result(), _RUN_ID, candidate_data=b"new\n"
+    )
+    pending = workspace._read_pending(state, str(target["target_id"]))
+    assert (
+        cast("list[dict[str, object]]", pending["interests"])[0]["priority"] == 10**5000
+    )
+    undo = workspace._capture_pending_replacement(state, str(target["target_id"]))
+    assert workspace._replacement_previous_revision(undo) == pending["revision"]
+    assert (
+        workspace.main([
+            "--workspace",
+            str(tmp_path),
+            "pending",
+            "--target-id",
+            str(target["target_id"]),
+        ])
+        == 0
+    )
+    assert digits in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_repeated_urls_preserve_order_and_display(
+    tmp_path: Path, enabled: bool
+) -> None:
+    (tmp_path / "targets.csv").write_text(
+        "name,url,criteria,enabled\nFirst,https://example.com/,first,false\n"
+        "Other,https://other.example/,,false\n"
+        f"Second, https://example.com/ ,second,{str(enabled).lower()}\n"
+        f"Second,https://example.com/,second,{str(enabled).lower()}\n",
+        encoding="utf-8",
+    )
+    targets = load_targets(tmp_path)
+    assert [item["url"] for item in targets] == [
+        "https://example.com/",
+        "https://other.example/",
+    ]
+    assert targets[0]["interests"] == [
+        _interest("First", criteria="first", enabled=False),
+        _interest("Second", criteria="second", enabled=enabled),
+        _interest("Second", criteria="second", enabled=enabled),
+    ]
+    assert targets[0]["name"] == ("Second" if enabled else "First")
+    assert targets[0]["watch_focus"] == ("second" if enabled else "first")
+    assert targets[0]["enabled"] is enabled
+
+
+def test_distinct_urls_with_colliding_ids_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "targets.csv").write_text(
+        "name,url\nA,https://a.example/\nB,https://b.example/\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(workspace, "_target_id", lambda _url: "collision")  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+    with pytest.raises(WorkspaceError, match="duplicate_target_id"):
+        check(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected_names"),
+    [
+        (
+            (
+                "First,https://vendor.example/updates,,,,New rules,5,true\n"
+                "Second,https://vendor.example/updates,,,,API,2,true\nThird,https://vendor.example/updates,,,,Third,3,true\n"
+            ),
+            ["First", "Second", "Third"],
+        ),
+        (
+            "Edited,https://vendor.example/updates,New,Other,new hints,Edited,4,true\n",
+            ["Edited"],
+        ),
+        ("Second,https://vendor.example/updates,,,,API,2,true\n", ["Second"]),
+        (
+            (
+                "First,https://vendor.example/updates,,,,First,1,false\n"
+                "Second,https://vendor.example/updates,,,,API,2,true\n"
+            ),
+            ["Second"],
+        ),
+        (
+            (
+                "Second,https://vendor.example/updates,,,,API,2,true\n"
+                "First,https://vendor.example/updates,,,,First,1,true\n"
+            ),
+            ["Second", "First"],
+        ),
+    ],
+    ids=["add", "edit", "remove", "disable", "reorder"],
+)
+def test_metadata_changes_replace_context_without_rewriting_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rows: str,
+    expected_names: list[str],
+) -> None:
+    target_id, metadata, candidate, snapshot = _create_interest_review(tmp_path)
+    before = [path.read_bytes() for path in (metadata, candidate, snapshot)]
+    stored = workspace._read_pending(tmp_path / ".wsum", target_id)
+    (tmp_path / "targets.csv").write_text(_ENRICHED_HEADER + rows, encoding="utf-8")
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("pending targets must not be refetched")
+
+    monkeypatch.setattr(workspace.monitor, "run", forbidden)
+    handle = cast("list[dict[str, object]]", check(tmp_path, compact=True)["targets"])[
+        0
+    ]
+    assert set(handle) == {
+        "action",
+        "run_id",
+        "target_id",
+        "revision",
+        "name",
+        "diff_truncated",
+    }
+    review = cast(
+        "list[dict[str, object]]",
+        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+    )[0]
+    interests = cast("list[dict[str, object]]", review["interests"])
+    assert [item["name"] for item in interests] == expected_names
+    assert interests == workspace._enabled_interests(load_targets(tmp_path)[0])
+    assert review["name"] == expected_names[0]
+    for key in ("revision", "run_id", "diff", "diff_truncated", "link_review"):
+        assert review[key] == stored[key]
+    assert [path.read_bytes() for path in (metadata, candidate, snapshot)] == before
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        "Other,https://other.example/,,,,,,false\n",
+        "Disabled,https://vendor.example/updates,,,,,,false\n",
+    ],
+    ids=["removed", "all-disabled"],
+)
+def test_valid_inactive_configuration_has_no_interests_and_check_discards(
+    tmp_path: Path, rows: str
+) -> None:
+    target_id, metadata, candidate, snapshot = _create_interest_review(tmp_path)
+    (tmp_path / "targets.csv").write_text(_ENRICHED_HEADER + rows, encoding="utf-8")
+    review = cast(
+        "list[dict[str, object]]",
+        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+    )[0]
+    assert review["interests"] == []
+    assert metadata.exists()
+    check(tmp_path)
+    assert not metadata.exists()
+    assert not candidate.exists()
+    assert snapshot.read_bytes() == b"old\n"
+
+
+@pytest.mark.parametrize("configuration", [None, "name,url,criteria,watch_focus\n"])
+def test_unavailable_configuration_keeps_saved_review_and_direct_finalize(
+    tmp_path: Path, configuration: str | None
+) -> None:
+    target_id, metadata, candidate, snapshot = _create_interest_review(tmp_path)
+    before = [path.read_bytes() for path in (metadata, candidate, snapshot)]
+    path = tmp_path / "targets.csv"
+    if configuration is None:
+        path.unlink()
+    else:
+        path.write_text(configuration, encoding="utf-8")
+    with pytest.raises(WorkspaceError):
+        check(tmp_path)
+    review = cast(
+        "list[dict[str, object]]",
+        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+    )[0]
+    assert [
+        item["name"] for item in cast("list[dict[str, object]]", review["interests"])
+    ] == ["First", "Second"]
+    assert [path.read_bytes() for path in (metadata, candidate, snapshot)] == before
+    assert (
+        finalize(
+            tmp_path,
+            {"target_id": target_id, "revision": review["revision"], "material": False},
+        )["action"]
+        == "finalized"
+    )
+
+
+@pytest.mark.parametrize("layout", ["legacy", "grouped"])
+@pytest.mark.parametrize("links", [True, False])
+def test_legacy_scalar_review_synthesizes_interest(
+    tmp_path: Path, layout: str, links: bool
+) -> None:
+    state = tmp_path / ".wsum"
+    metadata, _, _ = _write_review_transaction(state, layout)
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    payload.update({
+        "name": "Saved",
+        "url": "https://example.com/",
+        "watch_focus": "rules",
+        "diff": "diff",
+    })
+    if links:
+        payload["link_review"] = {"documents": [], "omitted": 0, "incomplete": False}
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    review = cast(
+        "list[dict[str, object]]",
+        workspace.pending_reviews(tmp_path, target_id="example")["reviews"],
+    )[0]
+    assert review["interests"] == [_interest("Saved", criteria="rules")]
+    assert (
+        finalize(
+            tmp_path,
+            {"target_id": "example", "revision": review["revision"], "material": False},
+        )["action"]
+        == "finalized"
+    )
+
+
+@pytest.mark.parametrize(
+    "interests",
+    [
+        None,
+        {},
+        [None],
+        [{}],
+        [_interest(extra="x")],
+        [_interest(name=1)],
+        [_interest(name="")],
+        [_interest(publisher=None)],
+        [_interest(criteria=" untrimmed ")],
+        [_interest(enabled=1)],
+        [_interest(priority=True)],
+        [_interest(priority=0)],
+        [_interest(priority=-1)],
+        [_interest(priority="1")],
+        [_interest(priority=1.5)],
+    ],
+    ids=[
+        "null",
+        "object",
+        "null-item",
+        "missing-keys",
+        "extra-keys",
+        "name-type",
+        "empty-name",
+        "text-type",
+        "untrimmed",
+        "enabled-type",
+        "boolean-priority",
+        "zero-priority",
+        "negative-priority",
+        "string-priority",
+        "float-priority",
+    ],
+)
+def test_malformed_interests_fail_reads_backfill_and_committed_recovery(
+    tmp_path: Path, interests: object
+) -> None:
+    target_id, metadata, _, _ = _create_interest_review(tmp_path)
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    payload["interests"] = interests
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(WorkspaceError, match="interests are invalid"):
+        workspace._read_pending(tmp_path / ".wsum", target_id)
+    assert not workspace._replacement_matches_commit(
+        tmp_path / ".wsum", target_id, {"revision": payload["revision"]}
+    )
+    payload.pop("run_id")
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    before = metadata.read_bytes()
+    with pytest.raises(WorkspaceError, match="interests are invalid"):
+        workspace._read_pending(tmp_path / ".wsum", target_id)
+    assert metadata.read_bytes() == before
+
+
+@pytest.mark.parametrize("links", [True, False])
+def test_new_interests_pending_backfill_and_replacement_matching(
+    tmp_path: Path, links: bool
+) -> None:
+    target_id, metadata, _, _ = _create_interest_review(tmp_path)
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    if not links:
+        payload.pop("link_review")
+    payload.pop("run_id")
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    pending = workspace._read_pending(tmp_path / ".wsum", target_id)
+    assert pending["interests"] == payload["interests"]
+    assert workspace._replacement_matches_commit(
+        tmp_path / ".wsum", target_id, {"revision": pending["revision"]}
+    )
+
+
+@pytest.mark.parametrize("extra_bytes", [0, 1])
+def test_pending_serialized_size_boundary_preserves_existing_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra_bytes: int
+) -> None:
+    target_id, metadata, candidate, snapshot = _create_interest_review(tmp_path)
+    payload = workspace._read_pending(tmp_path / ".wsum", target_id)
+    size = len(workspace._serialize_pending(payload))
+    before = [path.read_bytes() for path in (metadata, candidate, snapshot)]
+    monkeypatch.setattr(workspace, "_MAX_SNAPSHOT_BYTES", size - extra_bytes)
+    if extra_bytes:
+        with pytest.raises(WorkspaceError, match="pending decision size"):
+            workspace._write_pending_transaction(tmp_path / ".wsum", payload, b"new\n")
+        with pytest.raises(WorkspaceError, match="pending decision size"):
+            workspace._read_pending(tmp_path / ".wsum", target_id)
+        assert not workspace._replacement_matches_commit(
+            tmp_path / ".wsum", target_id, {"revision": payload["revision"]}
+        )
+        assert [path.read_bytes() for path in (metadata, candidate, snapshot)] == before
+    else:
+        assert workspace._serialize_pending(payload) == metadata.read_bytes()
+        assert workspace._read_pending(tmp_path / ".wsum", target_id) == payload
+
+
+@pytest.mark.parametrize(
+    ("limit", "reader"),
+    [("_MAX_SNAPSHOT_BYTES", "_read_pending_json"), ("_MAX_CSV_BYTES", "_read_csv")],
+    ids=["pending", "csv"],
+)
+def test_read_bounds_actual_bytes_after_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: str, reader: str
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_bytes(b"x" * 101)
+    monkeypatch.setattr(workspace, limit, 100)
+    original_lstat = Path.lstat
+
+    def small_stat(self: Path) -> os.stat_result:
+        info = list(original_lstat(self))
+        info[6] = 1
+        return os.stat_result(info)
+
+    monkeypatch.setattr(Path, "lstat", small_stat)
+    with pytest.raises(WorkspaceError, match="size is invalid"):
+        getattr(workspace, reader)(path)
+
+
+def test_shared_url_fetch_and_finalization_use_one_transaction_and_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "targets.csv").write_text(
+        _ENRICHED_HEADER
+        + "Plans,https://vendor.example/updates,Vendor,Product,plans,Limits,1,true\n"
+        + "API,https://vendor.example/updates,Vendor,Product,API,Breaking,2,true\n"
+        + "Disabled,https://vendor.example/updates,,,,,,false\n"
+        + "Other,https://other.example/,,,,,,false\n",
+        encoding="utf-8",
+    )
+    parent = b"old\n"
+    calls: list[str] = []
+
+    def fetch(url: str, **_kwargs: object) -> workspace.monitor.Document:
+        calls.append(url)
+        return workspace.monitor.Document(parent, url, "text/plain")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    assert (
+        cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]["action"]
+        == "baseline_created"
+    )
+    parent = b"Breaking API change\n"
+    review = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    assert calls == ["https://vendor.example/updates"] * 2
+    assert review["interests"] == [
+        _interest(
+            "Plans",
+            publisher="Vendor",
+            category="Product",
+            keywords="plans",
+            criteria="Limits",
+            priority=1,
+        ),
+        _interest(
+            "API",
+            publisher="Vendor",
+            category="Product",
+            keywords="API",
+            criteria="Breaking",
+            priority=2,
+        ),
+    ]
+    assert len(list((tmp_path / ".wsum" / "pending").iterdir())) == 1
+    decision = {
+        "target_id": review["target_id"],
+        "revision": review["revision"],
+        "material": True,
+        "report": "## API\n\nBreaking API change affects the API interest.\n",
+    }
+    result = finalize(tmp_path, decision)
+    report = Path(str(result["report_path"])).read_text(encoding="utf-8")
+    assert report.count("## API") == 1
+    assert report.count(":start -->") == 1
+    assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+
+
+@pytest.mark.parametrize(
+    "choose_previous", [False, True], ids=["committed", "previous"]
+)
+def test_enriched_replacement_recovery_keeps_both_revision_choices(
+    tmp_path: Path, choose_previous: bool
+) -> None:
+    target_id, metadata, candidate, snapshot = _create_interest_review(tmp_path)
+    state = tmp_path / ".wsum"
+    previous = workspace._read_pending(state, target_id)
+    undo = workspace._capture_pending_replacement(state, target_id)
+    replacement = {
+        **previous,
+        "revision": "b" * 32,
+        "name": "Replacement",
+        "watch_focus": "new rules",
+        "interests": [_interest("Replacement", criteria="new rules")],
+    }
+    workspace._write_recovery_record(state, undo)
+    workspace._write_pending_file(metadata, replacement)
+    workspace._write_commit_record(
+        state, _commit_record(target_id=target_id, revision=replacement["revision"])
+    )
+    (tmp_path / "targets.csv").unlink()
+    review = cast(
+        "list[dict[str, object]]",
+        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+    )[0]
+    assert review["interests"] == replacement["interests"]
+    assert (state / ".pending-recovery" / f"{target_id}.json").exists()
+    chosen = previous if choose_previous else replacement
+    assert (
+        finalize(
+            tmp_path,
+            {"target_id": target_id, "revision": chosen["revision"], "material": False},
+        )["action"]
+        == "finalized"
+    )
+    assert snapshot.read_bytes() == b"new\n"
+    assert not candidate.exists()
+    assert not metadata.exists()
+    assert not list((state / ".pending-recovery").iterdir())
+
+
+@pytest.mark.parametrize("corruption", ["interests", "link_review", "diff"])
+def test_enriched_committed_recovery_rejects_malformed_review_metadata(
+    tmp_path: Path, corruption: str
+) -> None:
+    target_id, metadata, candidate, snapshot = _create_interest_review(tmp_path)
+    state = tmp_path / ".wsum"
+    payload = workspace._read_pending(state, target_id)
+    payload[corruption] = False
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    before = [path.read_bytes() for path in (metadata, candidate, snapshot)]
+    workspace._write_recovery_record(state, _replace_record(target_id=target_id))
+    workspace._write_commit_record(
+        state, _commit_record(target_id=target_id, revision=payload["revision"])
+    )
+    with pytest.raises(WorkspaceError, match="committed replacement is incomplete"):
+        workspace.pending_reviews(tmp_path, target_id=target_id)
+    with pytest.raises(WorkspaceError, match="committed replacement is incomplete"):
+        finalize(
+            tmp_path,
+            {
+                "target_id": target_id,
+                "revision": payload["revision"],
+                "material": False,
+            },
+        )
+    assert [path.read_bytes() for path in (metadata, candidate, snapshot)] == before
+
+
+def test_check_reconciliation_uses_one_configuration_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / ".wsum"
+    _write_review_transaction(state, "legacy")
+    _write_targets(tmp_path / "targets.csv", "Other,https://other.example/,,false\n")
+    original = workspace.load_targets
+    calls = 0
+
+    def load_once(path: str | Path) -> list[dict[str, object]]:
+        nonlocal calls
+        calls += 1
+        assert calls == 1
+        return original(path)
+
+    monkeypatch.setattr(workspace, "load_targets", load_once)
+    assert (
+        cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]["action"]
+        == "skipped"
+    )
+    assert calls == 1

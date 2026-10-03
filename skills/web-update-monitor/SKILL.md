@@ -60,21 +60,32 @@ Treat each pending target directory as one uncommitted review transaction. It su
 
 Legacy pending layouts remain finalizable. New pending transactions use the grouped directory layout above and persist their review context directly so `pending` can reproduce the original bounded review without another network fetch.
 
-The CSV schema is:
+The canonical enriched CSV schema is:
 
 ```csv
-name,url,watch_focus,enabled
-Example,https://example.com/,Important product or pricing changes,true
+name,url,publisher,category,keywords,criteria,priority,enabled
+Subscription updates,https://vendor.example/updates,Example Vendor,Product,subscription plans,Report changes to plan availability and limits,1,true
+Integration updates,https://vendor.example/updates,Example Vendor,Product,API integrations,Report breaking integration changes,2,true
+Service notices,https://operator.example/notices,Example Operator,Operations,,Report changes to maintenance schedules,2,true
+Technical publications,https://institute.example/publications,Example Institute,Research,technical reports,,,false
 ```
+
+These synthetic reserved example-domain URLs illustrate four interests and three URL targets; they are not monitoring recommendations. Fetch two enabled URL targets once each and retain both enabled interests on the shared URL for review.
 
 Rules:
 
-- `name` and `url` are required.
-- `watch_focus` is optional natural language describing what matters.
-- `enabled` is optional and defaults to `true`; accepted values are `true` and `false`.
-- Do not add a `target_id` column. The helper derives a stable ID from the URL.
-- Do not add credentials, cookies, tokens, or secrets to URLs or CSV cells.
-- Duplicate URLs are invalid because they share the same canonical snapshot.
+- `name` and `url` are required: a display name and absolute HTTP(S) URL without credentials or fragments. The helper derives `target_id` from the exact trimmed URL; do not supply an ID column.
+- `publisher` and `category` are optional organization and classification metadata.
+- `keywords` is optional free text providing semantic relevance hints, including spaces or slashes. Blank keywords are valid. Keywords supplement criteria; they never filter fetching, link traversal, or materiality by exact match.
+- `criteria` is optional natural language deciding which changes deserve a report. Legacy `watch_focus` maps to `criteria`; reject a header containing both, even if either column is blank. Do not introduce alternate column names.
+- `priority` is optional: blank becomes `null`; otherwise accept only an ASCII decimal integer greater than zero. Leading zeros normalize to an integer. Reject signs, fractions, exponents, and nonnumeric text. Lower numbers indicate higher priority for display only; priority does not change fetch order, cadence, limits, or materiality.
+- `enabled` is optional and applies to each interest: trimmed, case-insensitive `true` or `false`; omitted or blank defaults to true.
+- Accept supported optional-column subsets and any column order with `name,url` present, including the legacy `name,url,watch_focus,enabled` shape. Reject duplicate or unknown runtime CSV headers.
+- Retain UTF-8/BOM support, standard CSV quoting (including commas and newlines), and the 1 MiB file limit. Trim cell whitespace, pad missing trailing optional cells with blank, and skip completely blank records. Reject missing required values, surplus cells, and files with no targets. Validate every nonblank row, including disabled interests, before fetching or configuration-driven state changes. Row errors identify the CSV record (header is record 1) and field.
+- In `name,url,publisher,category,keywords,criteria` and legacy `watch_focus`, reject a whole trimmed cell equal to `"` (U+0022), `〃` (U+3003), `同上`, or `同左`. Replace it with the intended explicit value; optional text may instead be blank. Embedded tokens are valid. Never inherit values from earlier rows.
+- Repeated exact trimmed URLs are supported. Each row is an interest; each distinct URL is one fetch/snapshot/review target. Preserve URL first-occurrence order and all row interests, including identical or disabled rows. Distinct URLs with colliding derived IDs fail.
+- A URL is enabled when any interest is enabled. Review only enabled interests. The scalar display name and compatibility `watch_focus` use the first enabled interest (or first interest when all are disabled); the full `interests` collection is authoritative.
+- Never put credentials, cookies, tokens, or secrets in URLs or CSV cells.
 
 If the user asks to add, remove, enable, disable, or change monitoring targets, edit `targets.csv` directly. If it does not exist and the user supplied enough target information, create it instead of asking them to author CSV manually.
 
@@ -92,14 +103,14 @@ For agent orchestration, use:
 python scripts/workspace.py --workspace "$WORKSPACE" check --compact
 ```
 
-The facade validates the complete CSV before fetching any new target.
+The facade validates the complete CSV before fetching any new target or performing configuration-driven reconciliation. Current metadata replaces returned review context without rewriting pending transactions or refetching pending targets. Compact handles retain exactly `action,run_id,target_id,revision,name,diff_truncated`.
 
 For each target:
 
 - existing pending review: return its compact review handle and do not refetch it
 - `baseline_created`: store the first observation; no report
 - `unchanged`: no content change; no report
-- `skipped`: disabled row
+- `skipped`: URL group with all interests disabled
 - `error`: concise per-target failure; continue other targets
 - `review`: compact handle for a changed target
 - `snapshot_conflict`: stop that target and rerun it from the current baseline
@@ -123,11 +134,15 @@ python scripts/workspace.py --workspace "$WORKSPACE" pending \
   --target-id "<returned-target-id>"
 ```
 
-The full review includes the opaque `revision`, original `run_id`, name, URL, watch focus, bounded diff, and truncation flag. When navigation links are present in a changed HTML page or feed, it also includes `link_review`: bounded child document contents or individual errors, an omitted-link count, and an incompleteness flag. Review the parent diff and all returned linked documents together under the target's `watch_focus`. Pass the exact revision to `finalize`.
+The full review includes the opaque `revision`, original `run_id`, scalar name, URL, compatibility `watch_focus`, complete enabled `interests`, bounded diff, and truncation flag. Each interest has exactly `name,publisher,category,keywords,criteria,priority,enabled`: trimmed text, blank unspecified text, integer or null priority, and Boolean enabled. New pending records save enabled interests; legacy scalar records normalize to one enabled interest with blank optional metadata and null priority, retaining the safe target-ID fallback when no scalar context exists. Malformed nested interests fail rather than falling back to scalars. Serialized pending metadata, including JSON escaping and object overhead, is bounded by the existing 40 MiB transaction-backup ceiling, without a separate serialized-interest cap. When navigation links are present in a changed HTML page or feed, it also includes `link_review`: bounded child document contents or individual errors, an omitted-link count, and an incompleteness flag. Review the parent diff and all returned linked documents together for each enabled interest under its `criteria`, supplemented semantically by its `keywords`. Material for any enabled interest means material for the URL. Pass the exact revision to one URL-scoped `finalize`; do not create per-interest decisions.
+
+Before semantic judgment or automated finalization, obtain valid current configuration through `load_targets()` or a successful `check`. Full pending review context uses only the complete current enabled-interest collection for the exact URL. Adding, editing, removing, disabling, or reordering interests replaces that collection; never merge back saved, removed, or disabled interests. Metadata-only edits leave the stored candidate bytes/hash, expected hash, diff/link evidence, revision, and original run ID untouched.
+
+For a URL absent from valid configuration or with all interests disabled, `pending` may still expose a recovery handle, but the full review has `interests=[]`. Discard it through the core `discard` API before judgment; `check` performs that cleanup through the existing recovery-safe path. Valid absence must never restore saved interests. Missing or invalid configuration makes `check` fail before fetching or configuration-driven discards/context updates. Keep `pending` inspection/recovery using saved context and legacy direct finalization available, but automated workflows must stop until valid configuration is obtained. Do not migrate snapshots, revisions, candidate hashes, or run IDs solely for metadata changes.
 
 ## Read newly added links
 
-Let `check` automatically fetch newly added HTTP(S) navigation destinations from changed HTML pages and RSS/Atom feeds. This also includes links inside feed descriptions. Keep the existing four-column CSV contract. Link traversal defaults to depth 1 and at most 100 fetched links per target. Override those run-level limits with `check --link-depth <N> --max-links <N>`; use depth 0 to disable linked-document fetching. `--max-links` accepts 1 through 100.
+Let `check` automatically fetch newly added HTTP(S) navigation destinations from changed HTML pages and RSS/Atom feeds. This also includes links inside feed descriptions. Use the same CSV interest contract; link traversal remains URL-scoped and independent of keywords and priority. Link traversal defaults to depth 1 and at most 100 fetched links per target. Override those run-level limits with `check --link-depth <N> --max-links <N>`; use depth 0 to disable linked-document fetching. `--max-links` accepts 1 through 100.
 
 - Create the first parent baseline without fetching its links.
 - Compare current destination hashes with the accepted parent snapshot. Existing hash tokens are compatible with this behavior; no state migration or additional link baseline is required.
@@ -148,9 +163,9 @@ This is the recovery API for persistent or composite runtimes. Do not read or re
 
 For a material change, compose a concise Markdown section beginning with a level-two heading and containing:
 
-- target name and source URL
-- watch focus, when present
-- a short summary of the meaningful change
+- source URL and names of affected enabled interests
+- relevant criteria and optional metadata where useful
+- one concise summary of the meaningful change without repeating it across interests
 
 Then pass an internal decision object:
 
@@ -163,7 +178,7 @@ Then pass an internal decision object:
 }
 ```
 
-For a non-material change, omit `report` and set `material` to `false`.
+Write one managed report section per URL and finalize once. For a change non-material to every enabled interest, omit `report` and set `material` to `false`.
 
 Run:
 
