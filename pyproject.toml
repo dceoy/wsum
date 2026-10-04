@@ -119,6 +119,17 @@ ignore = [
   "magic-value-comparison", # protocol constants such as HTTP ports are self-explanatory
   "print",    # CLI writes its JSON result to stdout/stderr
 ]
+"skills/web-update-monitor-llm-wiki/scripts/wiki.py" = [
+  "docstring-missing-returns",  # concise helper docstrings are sufficient here
+  "docstring-missing-exception",  # errors are represented by WikiError messages
+  "f-string-in-exception",  # evidence and draft errors are intentionally contextual
+  "implicit-namespace-package",  # skill scripts are executable helpers, not a package
+  "magic-value-comparison",  # explicit size and count limits stay visible
+  "raise-vanilla-args",  # WikiError messages are defined at the decision site
+  "raw-string-in-exception",  # CLI errors are intentionally direct literal messages
+  "too-many-locals",  # draft validation keeps related checks together
+  "print",  # CLI writes its JSON result to stdout/stderr
+]
 "tests/**/*.py" = [
   "undocumented-public-function",    # test names describe their behavior
   "implicit-namespace-package",  # tests do not need to be a Python package
@@ -141,7 +152,10 @@ exclude = [
   ".agents",
   ".claude",
 ]
-extraPaths = ["skills/web-update-monitor/scripts"]
+extraPaths = [
+  "skills/web-update-monitor/scripts",
+  "skills/web-update-monitor-llm-wiki/scripts",
+]
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "strict"
@@ -149,6 +163,7 @@ typeCheckingMode = "strict"
 [tool.pytest.ini_options]
 addopts = [
   "--cov=skills/web-update-monitor/scripts",
+  "--cov=skills/web-update-monitor-llm-wiki/scripts",
   "--cov-branch",
   "--capture=no",
 ]
@@ -157,7 +172,10 @@ testpaths = ["tests"]
 python_functions = ["test_*"]
 
 [tool.coverage.run]
-source = ["skills/web-update-monitor/scripts"]
+source = [
+  "skills/web-update-monitor/scripts",
+  "skills/web-update-monitor-llm-wiki/scripts",
+]
 
 [tool.coverage.report]
 show_missing = true
