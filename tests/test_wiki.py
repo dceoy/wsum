@@ -322,18 +322,18 @@ def test_list_paginates_and_validates_page_parameters(env: _Env) -> None:
             wiki.pages(env.root, **kwargs)
 
 
-def test_list_reports_invalid_bundles_and_ignores_other_names(env: _Env) -> None:
+def test_list_reports_invalid_bundles_and_skips_uncommitted_ones(env: _Env) -> None:
     good = env.commit("good\n")
     bad = env.commit("bad\n", when="2026-10-01T00:00:05+00:00")
     (env.bundle(bad) / "parent.txt").write_text("tampered\n")
     (env.root / "evidence" / "notes.txt").write_text("not a bundle")
+    # A staged core transaction has no receipt yet; it is not corruption.
     (env.root / "evidence" / ("f" * 64)).mkdir()
 
     listed = wiki.list_ingestions(env.root)
 
     assert [item["ingestion_id"] for item in listed["eligible"]] == [good]
-    invalid = {item["ingestion_id"] for item in listed["invalid"]}
-    assert invalid == {bad, "f" * 64}
+    assert {item["ingestion_id"] for item in listed["invalid"]} == {bad}
 
 
 def test_list_ignores_processed_and_shows_blocked(env: _Env) -> None:
@@ -355,7 +355,7 @@ def test_list_reports_unreadable_evidence_directory(
     env.commit("one\n")
     original = Path.iterdir
 
-    def failing_iterdir(self: Path) -> Any:  # noqa: ANN401
+    def failing_iterdir(self: Path) -> Any:  # ruff: ignore[any-type]
         if self.name == "evidence":
             message = "iterdir failed"
             raise OSError(message)
@@ -639,7 +639,7 @@ def test_pages_reports_unreadable_directory(
 ) -> None:
     original = Path.iterdir
 
-    def failing_iterdir(self: Path) -> Any:  # noqa: ANN401
+    def failing_iterdir(self: Path) -> Any:  # ruff: ignore[any-type]
         if self.name == "pages":
             message = "iterdir failed"
             raise OSError(message)
@@ -707,6 +707,8 @@ def test_apply_renders_citations_and_records_the_ledger(env: _Env) -> None:
     entry = result["entry"]
     assert entry["outcome"] == "compiled"
     assert entry["pages"] == ["pages/other.md", "pages/plans.md"]
+    assert entry["page_hashes"]["pages/plans.md"] == _sha(page)
+    assert set(entry["page_hashes"]) == {"index.md", "pages/other.md", "pages/plans.md"}
     assert not (env.knowledge / ".compiler" / "transaction.json").exists()
     assert wiki.list_ingestions(env.root)["eligible"] == []
     assert wiki.status(env.root) == {"blocked": 0, "processed": 1, "transaction": None}
@@ -1132,7 +1134,7 @@ def test_crash_before_journal_cleanup_preserves_later_user_edits(
     draft = env.draft(ingestion, [_page()])
     original = Path.unlink
 
-    def failing_unlink(self: Path, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+    def failing_unlink(self: Path, *args: Any, **kwargs: Any) -> None:  # ruff: ignore[any-type]
         if self.name == "transaction.json":
             message = "unlink failed"
             raise OSError(message)
@@ -1239,7 +1241,7 @@ def test_ledger_and_transaction_mismatch_fails_closed(
     assert transaction.exists()
 
 
-def _edit_transaction(path: Path, update: Any) -> None:  # noqa: ANN401
+def _edit_transaction(path: Path, update: Any) -> None:  # ruff: ignore[any-type]
     record = json.loads(path.read_text(encoding="utf-8"))
     update(record)
     path.write_text(json.dumps(record), encoding="utf-8")
@@ -1309,7 +1311,7 @@ def _break_old(record: dict[str, Any]) -> None:
 def test_corrupt_transaction_fails_closed(
     env: _Env,
     monkeypatch: pytest.MonkeyPatch,
-    update: Any,  # noqa: ANN401
+    update: Any,  # ruff: ignore[any-type]
 ) -> None:
     transaction = _break_transaction(env, monkeypatch)
     _edit_transaction(transaction, update)
@@ -1433,7 +1435,7 @@ def test_file_helpers_detect_growth_after_stat(
 
     real_open = Path.open
 
-    def growing(self: Path, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+    def growing(self: Path, *args: Any, **kwargs: Any) -> Any:  # ruff: ignore[any-type]
         if self == path:
             return io.BytesIO(b"abcdefgh")
         return cast("Any", real_open(self, *args, **kwargs))

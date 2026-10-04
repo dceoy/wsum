@@ -827,7 +827,7 @@ def test_resume_rejects_pending_that_differs_from_frozen_evidence(
     _prepare_blocked(review, monkeypatch)
     pending_file = review.pending / "state.json"
     record = json.loads(pending_file.read_text())
-    record["diff"] = "different diff"
+    record["link_review"] = {"documents": [], "omitted": 5, "incomplete": True}
     pending_file.write_text(json.dumps(record))
 
     with pytest.raises(WorkspaceError, match="does not match the archive"):
@@ -954,7 +954,7 @@ def test_read_helpers_detect_growth_after_stat(
 
     real_open = Path.open
 
-    def growing(self: Path, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+    def growing(self: Path, *args: Any, **kwargs: Any) -> Any:  # ruff: ignore[any-type]
         if self == path:
             return io.BytesIO(b"abcdefgh")
         return cast("Any", real_open(self, *args, **kwargs))
@@ -1023,6 +1023,8 @@ def test_large_but_bounded_diff_is_archived(tmp_path: Path) -> None:
         {"candidate_sha256": "bad"},
         {"expected_sha256": "bad"},
         {"archived_at": 1},
+        {"diff": 1},
+        {"diff": "tampered"},
         {"report": 1},
         {"metadata": 1},
     ],
@@ -1041,6 +1043,8 @@ def test_large_but_bounded_diff_is_archived(tmp_path: Path) -> None:
         "candidate",
         "expected",
         "archived-at",
+        "diff-type",
+        "diff-digest",
         "report-type",
         "metadata-type",
     ],
@@ -1133,3 +1137,46 @@ def test_receipt_must_match_the_prepared_transaction(
         finalize(tmp_path, review.decision(report=other))
 
     assert review.intent.exists()
+
+
+def _legacy_review(root: Path) -> _Review:
+    # A pending record with only the base fields has no stored diff.
+    _targets(root)
+    target_id = str(workspace.load_targets(root)[0]["target_id"])
+    state = root / ".wsum"
+    snapshots = state / "snapshots"
+    snapshots.mkdir(parents=True)
+    (snapshots / f"{target_id}.txt").write_text("old\n", encoding="utf-8")
+    revision = "d" * 32
+    workspace._write_pending_transaction(
+        state,
+        {
+            "target_id": target_id,
+            "run_id": _RUN_ID,
+            "revision": revision,
+            "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
+            "candidate_sha256": hashlib.sha256(b"new\n").hexdigest(),
+            "diff_truncated": False,
+        },
+        b"new\n",
+    )
+    return _Review(root, target_id, revision)
+
+
+def test_legacy_pending_record_recovers_after_promotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    review = _legacy_review(tmp_path)
+    _fail_once(monkeypatch, "_write_report")
+    with pytest.raises(WorkspaceError, match="injected"):
+        review.finalize()
+    assert review.snapshot.read_text() == "new\n"
+    assert review.intent.exists()
+
+    result = finalize(tmp_path, review.decision())
+
+    assert result["ingestion_id"] == review.ingestion_id
+    assert (review.bundle / "diff.txt").read_text().startswith("--- ")
+    assert (review.bundle / "committed.json").exists()
+    assert not review.pending.exists()
+    assert not review.intent.exists()

@@ -224,7 +224,7 @@ Call this **captured evidence**, not a raw source archive: preserve its complete
 
 Commit protocol (extends the existing recoverable finalization; it does not claim multi-file atomicity):
 
-1. **Prepare:** validate current configuration (the URL must still have an enabled interest), revision, candidate digest, and snapshot compatibility, then durably save a versioned archive intent in `.wsum/.pending-recovery/<target-id>.json` freezing the decision, interests, archive timestamp, exact report-section bytes, and payload digests. Intent version 2 makes older helpers fail closed instead of discarding the pending evidence.
+1. **Prepare:** validate current configuration (the URL must still have an enabled interest), revision, candidate digest, and snapshot compatibility, then durably save a versioned archive intent in `.wsum/.pending-recovery/<target-id>.json` freezing the decision, interests, archive timestamp, exact report-section bytes, the retained diff, and payload digests (so a legacy pending record that cannot recompute its diff after promotion still resumes). Intent version 2 makes older helpers fail closed instead of discarding the pending evidence.
 2. **Stage:** install and verify the bundle files atomically; identical files are reused and conflicting files fail closed. No snapshot is promoted before all payloads are durable.
 3. **Apply:** promote the snapshot and write the report section idempotently. If the snapshot matches neither the expected baseline nor the candidate the transaction stops with a conflict and preserves the intent and staged evidence.
 4. **Commit:** publish `committed.json` after snapshot and report are durable, then replace the intent with the ordinary cleanup record and remove pending state.

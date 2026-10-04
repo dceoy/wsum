@@ -87,6 +87,7 @@ _MAX_ARCHIVE_RECEIPT_BYTES = 64 * 1024
 _INTENT_FIELDS = frozenset({
     "archived_at",
     "candidate_sha256",
+    "diff",
     "expected_sha256",
     "ingestion_id",
     "kind",
@@ -2425,8 +2426,10 @@ def _validate_archive_metadata(
 def _validate_archive_intent(record: dict[str, object]) -> dict[str, object]:
     report = record.get("report")
     metadata_text = record.get("metadata")
+    diff = record.get("diff")
     valid = (
         frozenset(record) == _INTENT_FIELDS
+        and isinstance(diff, str)
         and isinstance(report, str)
         and 0 < len(report.encode("utf-8")) <= _MAX_ARCHIVE_REPORT_BYTES
         and isinstance(metadata_text, str)
@@ -2448,7 +2451,13 @@ def _validate_archive_intent(record: dict[str, object]) -> dict[str, object]:
     _validate_sha256(record["candidate_sha256"], "candidate_sha256")
     _validate_sha256(record["expected_sha256"], "expected_sha256", allow_none=True)
     metadata = _json_object(cast("str", metadata_text).encode("utf-8"), "metadata")
-    _validate_archive_metadata(metadata, cast("str", record["ingestion_id"]))
+    frozen = _validate_archive_metadata(metadata, cast("str", record["ingestion_id"]))
+    diff_bytes = cast("str", diff).encode("utf-8")
+    _require(
+        frozen["diff.txt"]["bytes"] == len(diff_bytes)
+        and frozen["diff.txt"]["sha256"] == hashlib.sha256(diff_bytes).hexdigest(),
+        "pending recovery record is invalid",
+    )
     return record
 
 
@@ -2592,21 +2601,25 @@ def _complete_archive(
     existing = _read_receipt(root, str(intent["ingestion_id"]))
     if existing is None:
         try:
-            review = _pending_review(state, target_id)
+            pending = _read_pending(state, target_id)
             candidate = _read_text_bytes(_candidate_path(state, target_id), "candidate")
         except WorkspaceError as exc:
             raise WorkspaceError(
                 f"archive transaction cannot resume without pending evidence: {exc}"
             ) from exc
+        # The diff is frozen in the intent: a legacy record without a stored diff
+        # could only recompute it against the pre-promotion baseline.
+        review = {**pending, "diff": intent["diff"]}
         payloads = _archive_payloads(review, candidate)
         frozen = _validate_archive_metadata(
             _json_object(str(intent["metadata"]).encode("utf-8"), "metadata"),
             str(intent["ingestion_id"]),
         )
         _require(
-            review["revision"] == intent["revision"]
-            and review["run_id"] == intent["run_id"]
+            pending["revision"] == intent["revision"]
+            and pending["run_id"] == intent["run_id"]
             and hashlib.sha256(candidate).hexdigest() == intent["candidate_sha256"]
+            and pending["candidate_sha256"] == intent["candidate_sha256"]
             and all(
                 len(data) == frozen[name]["bytes"]
                 and hashlib.sha256(data).hexdigest() == frozen[name]["sha256"]
@@ -2642,7 +2655,7 @@ def _complete_archive(
     cleanup = _finalize_cleanup_record(
         target_id,
         str(intent["revision"]),
-        True,  # noqa: FBT003
+        True,  # ruff: ignore[boolean-positional-value-in-call]
         str(intent["report"]),
         str(intent["run_id"]),
     )
@@ -2699,6 +2712,7 @@ def _prepare_archive(
     intent: dict[str, object] = {
         "archived_at": json.loads(metadata)["archived_at"],
         "candidate_sha256": pending["candidate_sha256"],
+        "diff": review["diff"],
         "expected_sha256": pending["expected_sha256"],
         "ingestion_id": ingestion_id,
         "kind": "archive",

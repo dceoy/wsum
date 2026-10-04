@@ -508,6 +508,7 @@ def _ledger_entry(txn: Mapping[str, Any]) -> dict[str, Any]:
         "manifest_sha256": txn["manifest_sha256"],
         "outcome": "noop" if txn["noop"] is not None else "compiled",
         "pages": sorted(path for path in paths if path != _INDEX_FILE),
+        "page_hashes": {item["path"]: item["new_sha256"] for item in txn["files"]},
         "reason": txn["noop"],
         "schema_sha256": txn["schema_sha256"],
         "transaction_sha256": txn["transaction_sha256"],
@@ -876,6 +877,8 @@ def list_ingestions(
     for name in names:
         if name in ledger["processed"] or not _HASH_RE.fullmatch(name):
             continue
+        if _lstat(ws.evidence / name / "committed.json") is None:
+            continue  # staged or blocked core transaction, not an accepted update
         try:
             summary = _summary(_load_bundle(ws, name))
         except WikiError as exc:
