@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Mapping, Sequence
+    from collections.abc import Callable, Collection, Generator, Mapping, Sequence
     from types import ModuleType
 
 # flock exists only on POSIX; locking fails explicitly elsewhere.
@@ -81,7 +81,7 @@ _INDEX_LINK_RE = re.compile(r"^pages/([a-z0-9][a-z0-9-]{0,63})\.md(?:#[^\s]*)?$"
 _PAGE_NAME_RE = re.compile(r"^([a-z0-9][a-z0-9-]{0,63})\.md$")
 _PAGE_FILE_RE = re.compile(r"^pages/([a-z0-9][a-z0-9-]{0,63})\.md$")
 _EVIDENCE_LINK_RE = re.compile(
-    r"^\.\./\.\./evidence/([0-9a-f]{64})/(?:parent\.txt|diff\.txt|links\.json)$"
+    r"^\.\./\.\./evidence/([0-9a-f]{64})/(parent\.txt|diff\.txt|links\.json)$"
 )
 _ENTRY_RE = re.compile(r"^link-([1-9][0-9]*)$")
 
@@ -262,6 +262,8 @@ class _Workspace:
         self.ledger = self.compiler / _LEDGER_FILE
         self.transaction = self.compiler / _TRANSACTION_FILE
         self.evidence = self.root / _EVIDENCE
+        # (ingestion id, payload file) pairs already digest-verified in this process.
+        self.verified: set[tuple[str, str]] = set()
 
     def require_initialized(self) -> None:
         for path in (self.knowledge, self.pages, self.compiler):
@@ -279,8 +281,14 @@ class _Workspace:
 # --------------------------------------------------------------------------
 
 
-def _load_bundle(ws: _Workspace, ingestion_id: str) -> dict[str, Any]:
-    """Return digest-verified metadata for one committed evidence bundle."""
+def _load_bundle(
+    ws: _Workspace, ingestion_id: str, files: Collection[str] = _PAYLOADS
+) -> dict[str, Any]:
+    """Return verified metadata for one committed evidence bundle.
+
+    The receipt and manifest are always verified; only the payload files named in
+    ``files`` are digest-hashed, and each is hashed at most once per process.
+    """
     _require(_HASH_RE.fullmatch(ingestion_id), "ingestion_id is invalid")
     info = _lstat(ws.evidence)
     _require(
@@ -336,6 +344,8 @@ def _load_bundle(ws: _Workspace, ingestion_id: str) -> dict[str, Any]:
         "evidence receipt is invalid",
     )
     for name, entry in cast("dict[str, Any]", payloads).items():
+        if name not in files or (ingestion_id, name) in ws.verified:
+            continue
         item = cast("dict[str, Any]", entry if isinstance(entry, dict) else {})
         size, digest = _hash_file(
             bundle / name, _PAYLOAD_LIMITS[name], f"evidence {name}"
@@ -346,6 +356,7 @@ def _load_bundle(ws: _Workspace, ingestion_id: str) -> dict[str, Any]:
             and digest == item.get("sha256"),
             f"evidence {name} does not match its digest",
         )
+        ws.verified.add((ingestion_id, name))
     metadata["_manifest_sha256"] = receipt["manifest_sha256"]
     return metadata
 
@@ -675,7 +686,7 @@ def _check_links(
         if evidence is not None:
             # Previously rendered citations survive redrafting only while the
             # evidence they point at still verifies.
-            _load_bundle(ws, evidence.group(1))
+            _load_bundle(ws, evidence.group(1), (evidence.group(2),))
             continue
         match = link_re.fullmatch(target)
         _require(
@@ -725,7 +736,7 @@ def _validate_citations(
         )
         if ingestion_id not in bundles:
             bundles[cast("str", ingestion_id)] = _load_bundle(
-                ws, cast("str", ingestion_id)
+                ws, cast("str", ingestion_id), (cast("str", file),)
             )
         metadata = bundles[cast("str", ingestion_id)]
         cache_key = (
@@ -763,7 +774,7 @@ def _plan(
         and draft["ingestion_id"] == ingestion_id,
         "draft must have exactly the supported fields for this ingestion",
     )
-    metadata = _load_bundle(ws, ingestion_id)
+    metadata = _load_bundle(ws, ingestion_id, ())
     schema = _optional_file(ws.schema, MAX_PAGE_BYTES, "schema")
     _require(
         schema is not None and draft["schema_sha256"] == _sha256(schema),
@@ -1016,7 +1027,7 @@ def read_lines(
 ) -> dict[str, Any]:
     """Return a bounded 1-based line range from verified evidence text."""
     ws = _Workspace(workspace)
-    _load_bundle(ws, ingestion_id)
+    _load_bundle(ws, ingestion_id, (file,))
     _require(
         1 <= start <= end and end - start + 1 <= MAX_READ_LINES,
         f"line range must be ascending and at most {MAX_READ_LINES} lines",
@@ -1163,7 +1174,7 @@ def block(workspace: str | Path, ingestion_id: str, reason: str) -> dict[str, An
     ws = _Workspace(workspace)
     with _locked(ws):
         _recover(ws)
-        _load_bundle(ws, ingestion_id)
+        _load_bundle(ws, ingestion_id, ())
         ledger = _read_ledger(ws)
         _require(
             ingestion_id not in ledger["processed"], "ingestion is already compiled"
@@ -1287,7 +1298,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         result = _dispatch(args)
-    except WikiError as exc:
+    except (WikiError, OSError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))

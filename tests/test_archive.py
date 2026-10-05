@@ -1180,3 +1180,20 @@ def test_legacy_pending_record_recovers_after_promotion(
     assert (review.bundle / "committed.json").exists()
     assert not review.pending.exists()
     assert not review.intent.exists()
+
+
+def test_main_reports_unexpected_io_errors_as_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def failing(*_args: object, **_kwargs: object) -> dict[str, object]:
+        message = "disk exploded"
+        raise OSError(message)
+
+    monkeypatch.setattr(workspace, "check", failing)
+
+    status = workspace.main(["--workspace", str(tmp_path), "check"])
+
+    assert status == 2
+    assert json.loads(capsys.readouterr().err) == {"error": "disk exploded"}

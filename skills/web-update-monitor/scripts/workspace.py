@@ -2973,7 +2973,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _read_decision(),
                 archive_evidence=args.archive_evidence,
             )
-    except WorkspaceError as exc:
+    except (WorkspaceError, OSError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
     with _integer_text_limit():

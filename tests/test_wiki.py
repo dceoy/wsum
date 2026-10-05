@@ -1908,3 +1908,50 @@ def test_rendered_page_size_is_checked_after_citation_expansion(env: _Env) -> No
 
     assert not list((env.knowledge / "pages").glob("*.md"))
     assert wiki.status(env.root)["transaction"] is None
+
+
+def test_read_verifies_only_the_requested_payload(env: _Env) -> None:
+    ingestion = env.commit("alpha\nbeta\n")
+    (env.bundle(ingestion) / "diff.txt").write_text("tampered diff\n")
+
+    assert wiki.read_lines(env.root, ingestion, "parent.txt")["text"] == "alpha\nbeta"
+    with pytest.raises(WikiError, match="does not match its digest"):
+        wiki.read_lines(env.root, ingestion, "diff.txt")
+    with pytest.raises(WikiError, match="does not match its digest"):
+        wiki.show(env.root, ingestion)
+
+
+def test_payloads_are_hashed_at_most_once_per_process(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ingestion = env.commit("alpha\nbeta\n")
+    calls: list[str] = []
+    original = wiki._hash_file
+
+    def counting(path: Path, limit: int, description: str) -> tuple[int, str]:
+        calls.append(path.name)
+        return original(path, limit, description)
+
+    monkeypatch.setattr(wiki, "_hash_file", counting)
+    ws = wiki._Workspace(env.root)
+
+    wiki._load_bundle(ws, ingestion, ("parent.txt",))
+    wiki._load_bundle(ws, ingestion, ("parent.txt", "diff.txt"))
+    wiki._load_bundle(ws, ingestion)
+
+    assert calls == ["parent.txt", "diff.txt", "links.json"]
+
+
+def test_cli_reports_unexpected_io_errors_as_json(
+    env: _Env, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing(_args: object) -> dict[str, Any]:
+        message = "disk exploded"
+        raise OSError(message)
+
+    monkeypatch.setattr(wiki, "_dispatch", failing)
+
+    status = wiki.main(["--workspace", str(env.root), "status"])
+
+    assert status == 2
+    assert json.loads(capsys.readouterr().err) == {"error": "disk exploded"}
