@@ -1227,15 +1227,22 @@ def test_ledger_and_transaction_mismatch_fails_closed(
 ) -> None:
     transaction = _break_transaction(env, monkeypatch)
     txn = json.loads(transaction.read_text())
+    entry = {
+        "ingestion_id": txn["ingestion_id"],
+        "manifest_sha256": txn["manifest_sha256"],
+        "outcome": "compiled",
+        "page_hashes": {
+            "index.md": "1" * 64,
+            "pages/plans.md": "2" * 64,
+        },
+        "pages": ["pages/plans.md"],
+        "reason": None,
+        "schema_sha256": txn["schema_sha256"],
+        "transaction_sha256": "0" * 64,
+    }
     ledger = {
         "version": 1,
-        "processed": {
-            txn["ingestion_id"]: {
-                "transaction_sha256": "0" * 64,
-                "manifest_sha256": txn["manifest_sha256"],
-                "schema_sha256": txn["schema_sha256"],
-            }
-        },
+        "processed": {txn["ingestion_id"]: entry},
         "blocked": {},
     }
     (env.knowledge / ".compiler" / "ledger.json").write_text(json.dumps(ledger))
@@ -1817,3 +1824,74 @@ def test_replay_checks_ledger_capacity_before_replacing_pages(
         wiki.recover(env.root)
 
     assert not (env.knowledge / "pages" / "plans.md").exists()
+
+
+_LEDGER_ENTRY_TAMPERS: dict[str, dict[str, object]] = {
+    "empty": {"__replace__": {}},
+    "not-object": {"__replace__": 1},
+    "key-mismatch": {"ingestion_id": "0" * 64},
+    "extra-field": {"extra": 1},
+    "manifest": {"manifest_sha256": "bad"},
+    "schema": {"schema_sha256": 1},
+    "transaction": {"transaction_sha256": "bad"},
+    "outcome": {"outcome": "other"},
+    "compiled-reason": {"reason": "why"},
+    "compiled-without-pages": {"pages": [], "page_hashes": {"index.md": "1" * 64}},
+    "noop-without-reason": {"outcome": "noop", "reason": None},
+    "pages-type": {"pages": "x"},
+    "hashes-type": {"page_hashes": []},
+    "page-path": {"pages": ["../x.md"], "page_hashes": {"index.md": "1" * 64}},
+    "hash-missing-page": {"page_hashes": {"index.md": "1" * 64}},
+    "hash-extra-key": {
+        "page_hashes": {
+            "index.md": "1" * 64,
+            "pages/plans.md": "2" * 64,
+            "pages/ghost.md": "3" * 64,
+        }
+    },
+    "hash-value": {"page_hashes": {"index.md": "bad", "pages/plans.md": "2" * 64}},
+}
+
+
+@pytest.mark.parametrize("name", sorted(_LEDGER_ENTRY_TAMPERS))
+def test_malformed_processed_entries_fail_closed(env: _Env, name: str) -> None:
+    ingestion = env.commit("alpha\n")
+    _apply(env, env.draft(ingestion, [_page()]))
+    ledger_path = env.knowledge / ".compiler" / "ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    changes = dict(_LEDGER_ENTRY_TAMPERS[name])
+    if "__replace__" in changes:
+        ledger["processed"][ingestion] = changes["__replace__"]
+    else:
+        ledger["processed"][ingestion].update(changes)
+    ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+
+    for call in (
+        lambda: wiki.status(env.root),
+        lambda: wiki.list_ingestions(env.root),
+        lambda: _apply(env, env.draft(ingestion, [_page("other", title="Other")])),
+    ):
+        with pytest.raises(WikiError, match="compiler ledger is invalid"):
+            call()
+
+
+def test_processed_and_blocked_keys_must_be_ingestion_ids(env: _Env) -> None:
+    ingestion = env.commit("alpha\n")
+    _apply(env, env.draft(ingestion, [_page()]))
+    ledger_path = env.knowledge / ".compiler" / "ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    ledger["processed"]["not-a-hash"] = ledger["processed"].pop(ingestion)
+    ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+    with pytest.raises(WikiError, match="compiler ledger is invalid"):
+        wiki.status(env.root)
+
+    ledger_path.write_text(
+        json.dumps({
+            "version": 1,
+            "processed": {},
+            "blocked": {"not-a-hash": {"reason": "x"}},
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(WikiError, match="compiler ledger is invalid"):
+        wiki.status(env.root)

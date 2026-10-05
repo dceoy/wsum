@@ -17,6 +17,7 @@ import stat
 import sys
 import tempfile
 from contextlib import contextmanager, suppress
+from itertools import starmap
 from operator import itemgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -60,6 +61,16 @@ MAX_LEDGER_BYTES = 8 * 1024 * 1024
 MAX_CITATIONS = 200
 MAX_REASON_CHARS = 1000
 
+_ENTRY_FIELDS = frozenset({
+    "ingestion_id",
+    "manifest_sha256",
+    "outcome",
+    "page_hashes",
+    "pages",
+    "reason",
+    "schema_sha256",
+    "transaction_sha256",
+})
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _PAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _CITE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
@@ -400,19 +411,53 @@ def _flock(descriptor: int) -> None:
         raise WikiError("another compiler invocation holds the lock") from exc
 
 
-def _is_dict(value: object) -> bool:
-    return isinstance(value, dict)
+def _is_hash(value: object) -> bool:
+    return isinstance(value, str) and _HASH_RE.fullmatch(value) is not None
 
 
-def _has_reason(value: object) -> bool:
-    return isinstance(value, dict) and isinstance(
-        cast("dict[str, object]", value).get("reason"), str
+def _has_reason(key: str, value: object) -> bool:
+    return (
+        _is_hash(key)
+        and isinstance(value, dict)
+        and isinstance(cast("dict[str, object]", value).get("reason"), str)
     )
 
 
-def _all_values(value: object, predicate: Callable[[object], bool]) -> bool:
+def _valid_entry(key: str, value: object) -> bool:
+    """Check a processed entry against the exact schema `_ledger_entry` writes."""
+    entry = cast("dict[str, Any]", value if isinstance(value, dict) else {})
+    pages = entry.get("pages")
+    hashes = entry.get("page_hashes")
+    reason = entry.get("reason")
+    outcome = entry.get("outcome")
+    if not (isinstance(pages, list) and isinstance(hashes, dict)):
+        return False
+    paths = cast("list[object]", pages)
+    page_hashes = cast("dict[object, object]", hashes)
+    expected: set[object] = set(paths)
+    if outcome == "compiled":
+        expected.add(_INDEX_FILE)
+    return (
+        _is_hash(key)
+        and frozenset(entry) == _ENTRY_FIELDS
+        and entry["ingestion_id"] == key
+        and all(
+            _is_hash(entry[name])
+            for name in ("manifest_sha256", "schema_sha256", "transaction_sha256")
+        )
+        and (
+            (outcome == "compiled" and reason is None and bool(paths))
+            or (outcome == "noop" and isinstance(reason, str) and bool(reason))
+        )
+        and all(isinstance(p, str) and _PAGE_FILE_RE.fullmatch(p) for p in paths)
+        and set(page_hashes) == expected
+        and all(_is_hash(digest) for digest in page_hashes.values())
+    )
+
+
+def _all_items(value: object, predicate: Callable[[str, object], bool]) -> bool:
     return isinstance(value, dict) and all(
-        predicate(item) for item in cast("dict[str, object]", value).values()
+        starmap(predicate, cast("dict[str, object]", value).items())
     )
 
 
@@ -424,8 +469,8 @@ def _read_ledger(ws: _Workspace) -> dict[str, Any]:
     _require(
         set(ledger) == {"version", "processed", "blocked"}
         and ledger["version"] == 1
-        and _all_values(ledger["processed"], _is_dict)
-        and _all_values(ledger["blocked"], _has_reason),
+        and _all_items(ledger["processed"], _valid_entry)
+        and _all_items(ledger["blocked"], _has_reason),
         "compiler ledger is invalid",
     )
     return ledger
