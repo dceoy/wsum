@@ -1895,3 +1895,16 @@ def test_processed_and_blocked_keys_must_be_ingestion_ids(env: _Env) -> None:
     )
     with pytest.raises(WikiError, match="compiler ledger is invalid"):
         wiki.status(env.root)
+
+
+def test_rendered_page_size_is_checked_after_citation_expansion(env: _Env) -> None:
+    ingestion = env.commit("alpha\n")
+    body = "x" * (wiki.MAX_PAGE_BYTES - 20) + " [[cite:c1]]"
+    assert len(body.encode()) <= wiki.MAX_PAGE_BYTES
+    draft = env.draft(ingestion, [_page(body=body)])
+
+    with pytest.raises(WikiError, match="after citation rendering"):
+        _apply(env, draft)
+
+    assert not list((env.knowledge / "pages").glob("*.md"))
+    assert wiki.status(env.root)["transaction"] is None

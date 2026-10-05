@@ -861,6 +861,10 @@ def _plan_files(ws: _Workspace, draft: Mapping[str, Any]) -> list[dict[str, Any]
             lambda match: citations[match.group(1)]["markdown"], body
         )
         content = f"# {title}\n\n{rendered.strip()}\n"
+        _require(
+            len(content.encode("utf-8")) <= MAX_PAGE_BYTES,
+            f"page {page_id} exceeds the page size limit after citation rendering",
+        )
         files.append(_file_entry(f"{_PAGES}/{page_id}.md", current, content))
     index_current = _current_sha(ws.index, "index")
     _require(
