@@ -199,6 +199,42 @@ python scripts/workspace.py --workspace "$WORKSPACE" discard \
 
 Do not use `discard` as a shortcut for an ordinary semantic decision.
 
+## Archive captured evidence (optional)
+
+Pass `--archive-evidence` to `finalize` when a downstream consumer needs durable source-backed evidence for material decisions:
+
+```bash
+python scripts/workspace.py --workspace "$WORKSPACE" finalize --archive-evidence < decision.json
+```
+
+The decision payload is unchanged and ordinary `finalize` is byte-for-byte unchanged. Only a **material** decision is archived; baselines, unchanged observations, non-material decisions, discards, and snapshot conflicts produce no committed evidence. A successful archived finalize additionally returns `ingestion_id` and `evidence_path`.
+
+Output is a supported artifact outside `.wsum/`; consumers never read internal pending files:
+
+```text
+evidence/<ingestion-id>/
+  metadata.json   versioned manifest (schema wsum.evidence/1)
+  parent.txt      complete normalized parent candidate as retained by the core
+  diff.txt        original bounded parent diff
+  links.json      exactly the retained linked-document excerpts, errors, omitted counts, and incompleteness flags
+  committed.json  commit receipt, written last
+```
+
+Call this **captured evidence**, not a raw source archive: preserve its completeness flags and never present excerpts as complete documents. `ingestion_id` is the SHA-256 of a canonical versioned tuple of `target_id` and the opaque `revision`; it identifies one accepted transaction, not URL or content. `metadata.json` records all current enabled interests used for the decision, byte lengths and SHA-256 digests for every payload, the retained diff truncation flag (also set when linked evidence was incomplete), and an `archived_at` time meaning when the bundle was prepared. Source fetch and publication times are recorded as unavailable rather than fabricated. The receipt binds the accepted revision, the manifest digest, and the digest of the exact report section (not the whole run report). Hashes prove integrity, not authenticity or factual truth. Unknown schema versions, partial writes, and digest mismatches fail closed. Only a bundle with a valid receipt is an accepted update.
+
+Commit protocol (extends the existing recoverable finalization; it does not claim multi-file atomicity):
+
+1. **Prepare:** validate current configuration (the URL must still have an enabled interest), revision, candidate digest, and snapshot compatibility, then durably save a versioned archive intent in `.wsum/.pending-recovery/<target-id>.json` freezing the decision, interests, archive timestamp, exact report-section bytes, the retained diff, and payload digests (so a legacy pending record that cannot recompute its diff after promotion still resumes). Intent version 2 makes older helpers fail closed instead of discarding the pending evidence.
+2. **Stage:** install and verify the bundle files atomically; identical files are reused and conflicting files fail closed. No snapshot is promoted before all payloads are durable.
+3. **Apply:** promote the snapshot and write the report section idempotently. If the snapshot matches neither the expected baseline nor the candidate the transaction stops with a conflict and preserves the intent and staged evidence.
+4. **Commit:** publish `committed.json` after snapshot and report are durable, then replace the intent with the ordinary cleanup record and remove pending state.
+
+Recovery runs automatically before `check` reconciliation, `discard`, pending replacement, or another finalization can touch that target, using the frozen intent even when the CSV later changes or disappears, and it applies even when the caller omits the option. Version 1 has no cancellation of a prepared intent: `discard` reports a transaction-in-progress error until recovery finishes, a blocked archive keeps that target out of `pending` listings (reported under `blocked`) and makes `check` report a per-target error while other targets continue.
+
+After cleanup, retrying the same decision returns the same receipt-based result before any pending state is required, even without `--archive-evidence`; a changed materiality or report, or any corrupt artifact, is rejected. A newer pending revision for the URL is never touched. Adopting archival after a transaction already completed without evidence is unsupported and returns an error rather than refetching or fabricating evidence.
+
+Published limits: `parent.txt` at most 40 MiB (the snapshot bound), `diff.txt` and `links.json` at most 1 MiB each, `metadata.json` at most 2 MiB, the report section at most 1 MiB, the intent at most 4 MiB, and `committed.json` at most 64 KiB; the whole bundle therefore stays under 44 MiB. Exceeding a limit rejects the archived finalize before any intent is written and leaves the pending review intact. Evidence is not pruned automatically; surface storage growth to the user and defer retention policy.
+
 ## Report aggregation
 
 All material targets from the same original `check` run share one `reports/<run-id>.md`. Because pending reviews retain their original run ID, a review resumed after an interruption still appends to the same run-level report when the existing report file is available.

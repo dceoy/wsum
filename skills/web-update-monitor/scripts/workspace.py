@@ -20,7 +20,7 @@ from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import cast
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import monitor
@@ -69,6 +69,48 @@ _RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{32}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RECOVERY_RECORD_VERSION = 1
+_ARCHIVE_DIR = "evidence"
+_ARCHIVE_INTENT_VERSION = 2
+_EVIDENCE_SCHEMA = "wsum.evidence/1"
+_LINKS_SCHEMA = "wsum.evidence.links/1"
+# Per-file ceilings: parent reuses the snapshot bound; the others allow generous
+# headroom over the 64 KiB diff and 64 KiB linked-review text the core retains.
+_ARCHIVE_PAYLOAD_LIMITS = {
+    "parent.txt": _MAX_SNAPSHOT_BYTES,
+    "diff.txt": 1024 * 1024,
+    "links.json": 1024 * 1024,
+}
+_MAX_ARCHIVE_METADATA_BYTES = 2 * 1024 * 1024
+_MAX_ARCHIVE_REPORT_BYTES = 1024 * 1024
+_MAX_ARCHIVE_INTENT_BYTES = 4 * 1024 * 1024
+_MAX_ARCHIVE_RECEIPT_BYTES = 64 * 1024
+_INTENT_FIELDS = frozenset({
+    "archived_at",
+    "candidate_sha256",
+    "diff",
+    "expected_sha256",
+    "ingestion_id",
+    "kind",
+    "metadata",
+    "metadata_sha256",
+    "report",
+    "report_sha256",
+    "revision",
+    "run_id",
+    "target_id",
+    "version",
+})
+_RECEIPT_FIELDS = frozenset({
+    "archived_at",
+    "ingestion_id",
+    "manifest_sha256",
+    "material",
+    "report_section_sha256",
+    "revision",
+    "run_id",
+    "schema",
+    "target_id",
+})
 
 
 class WorkspaceError(RuntimeError):
@@ -985,13 +1027,20 @@ def _validate_recovery_record(value: object, target_id: str) -> dict[str, object
     if not isinstance(value, dict):
         raise WorkspaceError("pending recovery record is invalid")
     record = cast("dict[str, object]", value)
+    kind = record.get("kind")
+    if kind == "archive":
+        if (
+            record.get("version") != _ARCHIVE_INTENT_VERSION
+            or record.get("target_id") != target_id
+        ):
+            raise WorkspaceError("pending recovery record is invalid")
+        return _validate_archive_intent(record)
     if (
         type(record.get("version")) is not int
         or record["version"] != _RECOVERY_RECORD_VERSION
         or record.get("target_id") != target_id
     ):
         raise WorkspaceError("pending recovery record is invalid")
-    kind = record.get("kind")
     if kind == "replace":
         if set(record) != {
             "group_dir_existed",
@@ -1498,6 +1547,11 @@ def _recover_pending(
 ) -> dict[str, object] | None:
     target_id = _validate_target_id(target_id)
     record = _read_recovery_record(state, target_id)
+    if record is not None and record["kind"] == "archive":
+        # An archive obligation completes (or stays blocked) before any other
+        # recovery, discard, or replacement may touch the pending evidence.
+        _complete_archive(state.parent, state, record)
+        return None
     commit = _read_commit_record(state, target_id)
     if commit is not None:
         if record is None:
@@ -2106,9 +2160,18 @@ def _collect_pending_reviews(
     """Collect reviews against one validated configuration or saved recovery context."""
     state = _state_dir(root)
     target_ids = _pending_target_ids(state)
+    blocked: dict[str, str] = {}
     for pending_target_id in target_ids:
-        _prepare_pending_for_read(state, pending_target_id)
-    target_ids = _pending_target_ids(state)
+        try:
+            _prepare_pending_for_read(state, pending_target_id)
+        except WorkspaceError as exc:
+            record = _read_recovery_record(state, pending_target_id)
+            if record is None or record["kind"] != "archive":
+                raise
+            if pending_target_id == target_id:
+                raise
+            blocked[pending_target_id] = str(exc)
+    target_ids = [item for item in _pending_target_ids(state) if item not in blocked]
     if target_id is not None:
         target_id = _validate_target_id(target_id)
         if target_id not in target_ids:
@@ -2127,7 +2190,7 @@ def _collect_pending_reviews(
             ]
         }
 
-    return {
+    result: dict[str, object] = {
         "reviews": [
             _pending_review_handle(
                 state,
@@ -2141,12 +2204,30 @@ def _collect_pending_reviews(
             for current in target_ids
         ]
     }
+    if blocked:
+        result["blocked"] = [
+            {"error": error, "target_id": blocked_id}
+            for blocked_id, error in sorted(blocked.items())
+        ]
+    return result
 
 
 def discard_pending(workspace: str | Path, target_id: str) -> dict[str, object]:
     """Discard one pending review so a conflicted target can be checked again."""
     root = _workspace(workspace)
     state = _state_dir(root)
+    intent = _read_recovery_record(state, target_id)
+    if intent is not None and intent["kind"] == "archive":
+        try:
+            _complete_archive(root, state, intent)
+        except WorkspaceError as exc:
+            raise WorkspaceError(
+                f"evidence archival transaction is in progress and blocked: {exc}"
+            ) from exc
+        raise WorkspaceError(
+            "evidence archival transaction was completed during recovery; "
+            "nothing remains to discard"
+        )
     _prepare_pending_for_read(state, target_id)
     pending = _read_pending(state, target_id)
     run_id = str(pending["run_id"])
@@ -2157,6 +2238,542 @@ def discard_pending(workspace: str | Path, target_id: str) -> dict[str, object]:
         "run_id": run_id,
         "target_id": target_id,
     }
+
+
+def _require(condition: object, message: str) -> None:
+    if not condition:
+        raise WorkspaceError(message)
+
+
+def _json_text(value: object) -> str:
+    with _integer_text_limit():
+        return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def _text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _ingestion_id(target_id: str, revision: str) -> str:
+    """Identify one accepted revision transaction, not URL or content."""
+    canonical = json.dumps(
+        ["wsum-ingestion", 1, target_id, revision], separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _read_limited(path: Path, limit: int, description: str) -> bytes:
+    info = _optional_lstat(path, description)
+    if info is None or not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+        raise WorkspaceError(f"{description} is missing or invalid")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise WorkspaceError(f"cannot read {description}") from exc
+    _require(len(data) <= limit, f"{description} is missing or invalid")
+    return data
+
+
+def _json_object(data: bytes, description: str) -> dict[str, Any]:
+    try:
+        with _integer_text_limit():
+            value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkspaceError(f"{description} is invalid") from exc
+    _require(isinstance(value, dict), f"{description} is invalid")
+    return cast("dict[str, Any]", value)
+
+
+def _hash_file(path: Path, limit: int, description: str) -> tuple[int, str]:
+    info = _optional_lstat(path, description)
+    if info is None or not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+        raise WorkspaceError(f"{description} is missing or invalid")
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                size += len(chunk)
+                digest.update(chunk)
+    except OSError as exc:
+        raise WorkspaceError(f"cannot read {description}") from exc
+    _require(size <= limit, f"{description} is missing or invalid")
+    return size, digest.hexdigest()
+
+
+def _archive_links_text(link_review: object) -> str:
+    if link_review is None:
+        body: dict[str, object] = {
+            "available": False,
+            "documents": [],
+            "incomplete": False,
+            "note": "No linked-document review was retained for this revision.",
+            "omitted": 0,
+            "schema": _LINKS_SCHEMA,
+        }
+    else:
+        review = cast("dict[str, Any]", link_review)
+        body = {
+            "available": True,
+            "documents": [
+                {"entry_id": f"link-{index}", **cast("dict[str, Any]", document)}
+                for index, document in enumerate(review["documents"], start=1)
+            ],
+            "incomplete": review["incomplete"],
+            "omitted": review["omitted"],
+            "schema": _LINKS_SCHEMA,
+        }
+    return _json_text(body)
+
+
+def _archive_payloads(
+    review: Mapping[str, object], candidate: bytes
+) -> dict[str, bytes]:
+    return {
+        "parent.txt": candidate,
+        "diff.txt": str(review["diff"]).encode("utf-8"),
+        "links.json": _archive_links_text(review.get("link_review")).encode("utf-8"),
+    }
+
+
+def _archive_metadata(
+    *,
+    ingestion_id: str,
+    review: Mapping[str, object],
+    interests: object,
+    payloads: Mapping[str, bytes],
+    pending: Mapping[str, object],
+    archived_at: str,
+    report_sha256: str,
+) -> str:
+    links = json.loads(payloads["links.json"])
+    return _json_text({
+        "archived_at": archived_at,
+        "candidate_sha256": pending["candidate_sha256"],
+        "decision": {"material": True, "report_sha256": report_sha256},
+        "diff_truncated": review["diff_truncated"],
+        "diff_truncated_note": (
+            "Retained flag; also true when linked evidence was incomplete."
+        ),
+        "expected_sha256": pending["expected_sha256"],
+        "ingestion_id": ingestion_id,
+        "interests": interests,
+        "payloads": {
+            name: {
+                "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                **_payload_flags(name, links),
+            }
+            for name, data in payloads.items()
+        },
+        "provenance": {
+            "archived_at_meaning": "time this bundle was prepared, not source time",
+            "source_fetched_at": None,
+            "source_published_at": None,
+            "unavailable": ["source_fetched_at", "source_published_at"],
+        },
+        "revision": review["revision"],
+        "run_id": review["run_id"],
+        "schema": _EVIDENCE_SCHEMA,
+        "target_id": review["target_id"],
+        "url": review["url"],
+    })
+
+
+def _payload_flags(name: str, links: Mapping[str, object]) -> dict[str, object]:
+    if name == "parent.txt":
+        return {"complete_normalized_candidate": True}
+    if name == "links.json":
+        return {
+            "available": links["available"],
+            "incomplete": links["incomplete"],
+            "omitted": links["omitted"],
+        }
+    return {}
+
+
+def _validate_archive_metadata(
+    metadata: Mapping[str, Any], ingestion_id: str
+) -> dict[str, dict[str, Any]]:
+    payloads = metadata.get("payloads")
+    valid = (
+        metadata.get("schema") == _EVIDENCE_SCHEMA
+        and metadata.get("ingestion_id") == ingestion_id
+        and isinstance(metadata.get("target_id"), str)
+        and isinstance(metadata.get("revision"), str)
+        and isinstance(payloads, dict)
+        and set(cast("dict[str, Any]", payloads)) == set(_ARCHIVE_PAYLOAD_LIMITS)
+    )
+    _require(valid, "evidence metadata is invalid")
+    _require(
+        _ingestion_id(str(metadata["target_id"]), str(metadata["revision"]))
+        == ingestion_id,
+        "evidence metadata is invalid",
+    )
+    entries = cast("dict[str, object]", payloads)
+    for name, raw in entries.items():
+        entry = cast("dict[str, Any]", raw if isinstance(raw, dict) else {})
+        _require(
+            type(entry.get("bytes")) is int
+            and 0 <= entry["bytes"] <= _ARCHIVE_PAYLOAD_LIMITS[name]
+            and isinstance(entry.get("sha256"), str)
+            and _SHA256_RE.fullmatch(entry["sha256"]) is not None,
+            "evidence metadata is invalid",
+        )
+    return cast("dict[str, dict[str, Any]]", entries)
+
+
+def _validate_archive_intent(record: dict[str, object]) -> dict[str, object]:
+    report = record.get("report")
+    metadata_text = record.get("metadata")
+    diff = record.get("diff")
+    valid = (
+        frozenset(record) == _INTENT_FIELDS
+        and isinstance(diff, str)
+        and isinstance(report, str)
+        and 0 < len(report.encode("utf-8")) <= _MAX_ARCHIVE_REPORT_BYTES
+        and isinstance(metadata_text, str)
+        and len(metadata_text.encode("utf-8")) <= _MAX_ARCHIVE_METADATA_BYTES
+        and isinstance(record.get("archived_at"), str)
+        and isinstance(record.get("revision"), str)
+        and _REVISION_RE.fullmatch(cast("str", record["revision"])) is not None
+        and isinstance(record.get("run_id"), str)
+        and _RUN_ID_RE.fullmatch(cast("str", record["run_id"])) is not None
+    )
+    _require(valid, "pending recovery record is invalid")
+    _require(
+        record["report_sha256"] == _text_sha256(cast("str", report))
+        and record["metadata_sha256"] == _text_sha256(cast("str", metadata_text))
+        and record["ingestion_id"]
+        == _ingestion_id(str(record["target_id"]), str(record["revision"])),
+        "pending recovery record is invalid",
+    )
+    _validate_sha256(record["candidate_sha256"], "candidate_sha256")
+    _validate_sha256(record["expected_sha256"], "expected_sha256", allow_none=True)
+    metadata = _json_object(cast("str", metadata_text).encode("utf-8"), "metadata")
+    frozen = _validate_archive_metadata(metadata, cast("str", record["ingestion_id"]))
+    diff_bytes = cast("str", diff).encode("utf-8")
+    _require(
+        frozen["diff.txt"]["bytes"] == len(diff_bytes)
+        and frozen["diff.txt"]["sha256"] == hashlib.sha256(diff_bytes).hexdigest(),
+        "pending recovery record is invalid",
+    )
+    return record
+
+
+def _evidence_directory(root: Path, *, create: bool) -> Path | None:
+    path = root / _ARCHIVE_DIR
+    if create:
+        return _ensure_directory(path, "evidence directory", sync_parent=True)
+    info = _optional_lstat(path, "evidence directory")
+    if info is None:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise WorkspaceError("evidence directory must be a non-symlink directory")
+    return path
+
+
+def _read_receipt(
+    root: Path, ingestion_id: str
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return a digest-verified committed bundle, or None when not committed."""
+    evidence = _evidence_directory(root, create=False)
+    if evidence is None:
+        return None
+    bundle = evidence / ingestion_id
+    info = _optional_lstat(bundle, "evidence bundle")
+    if info is None:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise WorkspaceError("evidence bundle must be a non-symlink directory")
+    if _optional_lstat(bundle / "committed.json", "evidence receipt") is None:
+        return None  # staged evidence without a receipt is never an accepted update
+    receipt = _json_object(
+        _read_limited(
+            bundle / "committed.json", _MAX_ARCHIVE_RECEIPT_BYTES, "evidence receipt"
+        ),
+        "evidence receipt",
+    )
+    metadata_bytes = _read_limited(
+        bundle / "metadata.json", _MAX_ARCHIVE_METADATA_BYTES, "evidence metadata"
+    )
+    metadata = _json_object(metadata_bytes, "evidence metadata")
+    payloads = _validate_archive_metadata(metadata, ingestion_id)
+    decision = metadata.get("decision")
+    _require(
+        frozenset(receipt) == _RECEIPT_FIELDS
+        and receipt["schema"] == _EVIDENCE_SCHEMA
+        and receipt["ingestion_id"] == ingestion_id
+        and receipt["material"] is True
+        and receipt["manifest_sha256"] == hashlib.sha256(metadata_bytes).hexdigest()
+        and isinstance(decision, dict)
+        and receipt["report_section_sha256"]
+        == cast("dict[str, Any]", decision).get("report_sha256")
+        and receipt["target_id"] == metadata["target_id"]
+        and receipt["revision"] == metadata["revision"]
+        and receipt["run_id"] == metadata.get("run_id")
+        and receipt["archived_at"] == metadata.get("archived_at"),
+        "evidence receipt is invalid",
+    )
+    for name, entry in payloads.items():
+        size, digest = _hash_file(
+            bundle / name, _ARCHIVE_PAYLOAD_LIMITS[name], f"evidence {name}"
+        )
+        _require(
+            size == entry["bytes"] and digest == entry["sha256"],
+            f"evidence {name} does not match its digest",
+        )
+    return metadata, receipt
+
+
+def _install_evidence_file(path: Path, data: bytes, description: str) -> None:
+    """Install one bundle file atomically, reusing identical bytes."""
+    info = _optional_lstat(path, description)
+    if info is not None:
+        _require(
+            stat.S_ISREG(info.st_mode)
+            and info.st_size == len(data)
+            and path.read_bytes() == data,
+            f"{description} conflicts with existing evidence",
+        )
+        return
+    temporary = _write_temporary_file(path, data, description)
+    try:
+        temporary.replace(path)
+    except OSError as exc:
+        raise WorkspaceError(f"cannot install {description}") from exc
+    finally:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+    try:
+        _fsync_directory(path.parent)
+    except OSError as exc:
+        raise WorkspaceError(f"cannot fsync {description} directory") from exc
+    _require(path.read_bytes() == data, f"{description} read-back mismatch")
+
+
+def _stage_evidence(
+    root: Path, intent: Mapping[str, object], payloads: Mapping[str, bytes]
+) -> Path:
+    evidence = cast("Path", _evidence_directory(root, create=True))
+    bundle = _ensure_directory(
+        evidence / str(intent["ingestion_id"]),
+        "evidence bundle directory",
+        sync_parent=True,
+    )
+    files = {**payloads, "metadata.json": str(intent["metadata"]).encode("utf-8")}
+    for name, data in files.items():
+        _install_evidence_file(bundle / name, data, f"evidence {name}")
+    return bundle
+
+
+def _archive_receipt_text(intent: Mapping[str, object]) -> str:
+    return _json_text({
+        "archived_at": intent["archived_at"],
+        "ingestion_id": intent["ingestion_id"],
+        "manifest_sha256": intent["metadata_sha256"],
+        "material": True,
+        "report_section_sha256": intent["report_sha256"],
+        "revision": intent["revision"],
+        "run_id": intent["run_id"],
+        "schema": _EVIDENCE_SCHEMA,
+        "target_id": intent["target_id"],
+    })
+
+
+def _archive_result(root: Path, source: Mapping[str, object]) -> dict[str, object]:
+    ingestion_id = str(source["ingestion_id"])
+    return {
+        "action": "finalized",
+        "evidence_path": str(root / _ARCHIVE_DIR / ingestion_id),
+        "ingestion_id": ingestion_id,
+        "material": True,
+        "report_path": str(root / "reports" / f"{source['run_id']}.md"),
+        "target_id": source["target_id"],
+    }
+
+
+def _complete_archive(
+    root: Path, state: Path, intent: Mapping[str, object]
+) -> dict[str, object]:
+    """Resume or finish a prepared archive transaction from its frozen intent."""
+    target_id = str(intent["target_id"])
+    existing = _read_receipt(root, str(intent["ingestion_id"]))
+    if existing is None:
+        try:
+            pending = _read_pending(state, target_id)
+            candidate = _read_text_bytes(_candidate_path(state, target_id), "candidate")
+        except WorkspaceError as exc:
+            raise WorkspaceError(
+                f"archive transaction cannot resume without pending evidence: {exc}"
+            ) from exc
+        # The diff is frozen in the intent: a legacy record without a stored diff
+        # could only recompute it against the pre-promotion baseline.
+        review = {**pending, "diff": intent["diff"]}
+        payloads = _archive_payloads(review, candidate)
+        frozen = _validate_archive_metadata(
+            _json_object(str(intent["metadata"]).encode("utf-8"), "metadata"),
+            str(intent["ingestion_id"]),
+        )
+        _require(
+            pending["revision"] == intent["revision"]
+            and pending["run_id"] == intent["run_id"]
+            and hashlib.sha256(candidate).hexdigest() == intent["candidate_sha256"]
+            and pending["candidate_sha256"] == intent["candidate_sha256"]
+            and all(
+                len(data) == frozen[name]["bytes"]
+                and hashlib.sha256(data).hexdigest() == frozen[name]["sha256"]
+                for name, data in payloads.items()
+            ),
+            "pending review does not match the archive transaction",
+        )
+        bundle = _stage_evidence(root, intent, payloads)
+        promoted = _promote_snapshot(
+            state,
+            target_id=target_id,
+            expected_sha256=intent["expected_sha256"],
+            candidate_sha256=intent["candidate_sha256"],
+            candidate_data=candidate,
+        )
+        _require(
+            promoted.get("action") == "snapshot_promoted",
+            "snapshot conflict; archive transaction preserved",
+        )
+        _write_report(root, str(intent["run_id"]), target_id, str(intent["report"]))
+        _install_evidence_file(
+            bundle / "committed.json",
+            _archive_receipt_text(intent).encode("utf-8"),
+            "evidence receipt",
+        )
+    else:
+        _, receipt = existing
+        _require(
+            receipt["manifest_sha256"] == intent["metadata_sha256"]
+            and receipt["report_section_sha256"] == intent["report_sha256"],
+            "evidence receipt does not match the archive transaction",
+        )
+    cleanup = _finalize_cleanup_record(
+        target_id,
+        str(intent["revision"]),
+        True,  # ruff: ignore[boolean-positional-value-in-call]
+        str(intent["report"]),
+        str(intent["run_id"]),
+    )
+    # Replacing the intent retires the archive obligation only after the receipt
+    # is durable; the remaining cleanup is the ordinary finalize cleanup.
+    _write_recovery_record(state, cleanup)
+    _complete_cleanup_record(state, cleanup)
+    return _archive_result(root, intent)
+
+
+def _prepare_archive(
+    root: Path, state: Path, target_id: str, report: str
+) -> dict[str, object]:
+    """Validate and freeze one material decision, then complete its archive."""
+    target = next(
+        (item for item in load_targets(root) if item["target_id"] == target_id), None
+    )
+    if target is None or target["action"] == "skip_disabled":
+        raise WorkspaceError(
+            "target is not active in the current configuration; evidence not archived"
+        )
+    pending = _read_pending(state, target_id)
+    snapshot = _read_snapshot(state / "snapshots" / f"{target_id}.txt")
+    snapshot_sha256 = None if snapshot is None else hashlib.sha256(snapshot).hexdigest()
+    if snapshot_sha256 not in {pending["expected_sha256"], pending["candidate_sha256"]}:
+        return {"action": "snapshot_conflict", "target_id": target_id}
+    context = _target_review_contexts([target])[target_id]
+    review = _pending_review(state, target_id, current_context=context)
+    candidate = _read_text_bytes(_candidate_path(state, target_id), "candidate")
+    payloads = _archive_payloads(review, candidate)
+    for name, data in payloads.items():
+        _require(
+            len(data) <= _ARCHIVE_PAYLOAD_LIMITS[name],
+            f"{name} exceeds the evidence archive size limit",
+        )
+    _require(
+        len(report.encode("utf-8")) <= _MAX_ARCHIVE_REPORT_BYTES,
+        "report exceeds the evidence archive size limit",
+    )
+    ingestion_id = _ingestion_id(target_id, str(review["revision"]))
+    metadata = _archive_metadata(
+        ingestion_id=ingestion_id,
+        review=review,
+        interests=context["interests"],
+        payloads=payloads,
+        pending=pending,
+        archived_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        report_sha256=_text_sha256(report),
+    )
+    _require(
+        len(metadata.encode("utf-8")) <= _MAX_ARCHIVE_METADATA_BYTES,
+        "evidence metadata exceeds the evidence archive size limit",
+    )
+    intent: dict[str, object] = {
+        "archived_at": json.loads(metadata)["archived_at"],
+        "candidate_sha256": pending["candidate_sha256"],
+        "diff": review["diff"],
+        "expected_sha256": pending["expected_sha256"],
+        "ingestion_id": ingestion_id,
+        "kind": "archive",
+        "metadata": metadata,
+        "metadata_sha256": _text_sha256(metadata),
+        "report": report,
+        "report_sha256": _text_sha256(report),
+        "revision": review["revision"],
+        "run_id": review["run_id"],
+        "target_id": target_id,
+        "version": _ARCHIVE_INTENT_VERSION,
+    }
+    _require(
+        len(_json_text(intent).encode("utf-8")) <= _MAX_ARCHIVE_INTENT_BYTES,
+        "archive intent exceeds the evidence archive size limit",
+    )
+    _write_recovery_record(state, intent)
+    return _complete_archive(root, state, intent)
+
+
+def _finalize_archive_intent(
+    root: Path,
+    state: Path,
+    intent: Mapping[str, object],
+    revision: str,
+    report: str | None,
+) -> dict[str, object]:
+    """Finish an outstanding archive obligation whatever options the caller gave."""
+    _require(
+        report is not None
+        and intent["revision"] == revision
+        and intent["report_sha256"] == _text_sha256(report),
+        "decision does not match the prepared archive transaction",
+    )
+    return _complete_archive(root, state, intent)
+
+
+def _finalize_from_receipt(
+    root: Path,
+    state: Path,
+    recovery: Mapping[str, object] | None,
+    ingestion_id: str,
+    revision: str,
+    report: str | None,
+) -> dict[str, object] | None:
+    """Answer a retry from a durable receipt before any pending state is needed."""
+    existing = _read_receipt(root, ingestion_id)
+    if existing is None:
+        return None
+    _, receipt = existing
+    _require(
+        report is not None and receipt["report_section_sha256"] == _text_sha256(report),
+        "decision does not match the archived evidence receipt",
+    )
+    if (
+        recovery is not None
+        and recovery.get("kind") == "cleanup"
+        and recovery.get("revision") == revision
+    ):
+        _complete_cleanup_record(state, recovery)
+    return _archive_result(root, receipt)
 
 
 def _validate_decision(
@@ -2217,14 +2834,30 @@ def _finalized_result(root: Path, record: Mapping[str, object]) -> dict[str, obj
     return result
 
 
-def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, object]:
-    """Apply one semantic decision and safely advance its baseline."""
+def finalize(
+    workspace: str | Path,
+    payload: Mapping[str, object],
+    *,
+    archive_evidence: bool = False,
+) -> dict[str, object]:
+    """Apply one semantic decision and safely advance its baseline.
+
+    With ``archive_evidence``, a material decision also commits a durable,
+    digest-verified evidence bundle under ``evidence/<ingestion-id>/``.
+    """
     target_id, revision, material, report = _validate_decision(payload)
 
     root = _workspace(workspace)
     state = _state_dir(root)
     commit = _read_commit_record(state, target_id)
     recovery = _read_recovery_record(state, target_id)
+    if recovery is not None and recovery["kind"] == "archive":
+        return _finalize_archive_intent(root, state, recovery, revision, report)
+    archived = _finalize_from_receipt(
+        root, state, recovery, _ingestion_id(target_id, revision), revision, report
+    )
+    if archived is not None:
+        return archived
     if commit is not None:
         _recover_pending(state, target_id, revision=revision)
         recovery = _read_recovery_record(state, target_id)
@@ -2232,12 +2865,22 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
         if recovery.get("purpose") == "finalize":
             if not _finalize_record_matches(recovery, revision, material, report):
                 raise WorkspaceError("decision does not match pending cleanup")
+            if archive_evidence:
+                raise WorkspaceError(
+                    "evidence archival cannot be adopted after finalization "
+                    "completed without it"
+                )
             _complete_cleanup_record(state, recovery)
             return _finalized_result(root, recovery)
         _recover_pending(state, target_id)
     elif recovery is not None:
         _recover_pending(state, target_id)
 
+    if archive_evidence and _existing_pending_paths(state, target_id) is None:
+        raise WorkspaceError(
+            "no pending review or evidence receipt exists for this revision; "
+            "archival cannot be adopted after a completed finalization"
+        )
     pending = _read_pending(state, target_id)
     if pending["target_id"] != target_id:
         raise WorkspaceError("pending decision target does not match")
@@ -2245,6 +2888,9 @@ def finalize(workspace: str | Path, payload: Mapping[str, object]) -> dict[str, 
         raise WorkspaceError("decision revision does not match pending review")
     if pending["diff_truncated"] is True and not material:
         return {"action": "manual_review_required", "target_id": target_id}
+
+    if archive_evidence and report is not None:
+        return _prepare_archive(root, state, target_id, report)
 
     promoted = _promote_snapshot(
         state,
@@ -2301,7 +2947,8 @@ def _parser() -> argparse.ArgumentParser:
     discard_parser = subparsers.add_parser("discard")
     discard_parser.add_argument("--target-id", required=True)
 
-    subparsers.add_parser("finalize")
+    finalize_parser = subparsers.add_parser("finalize")
+    finalize_parser.add_argument("--archive-evidence", action="store_true")
     return parser
 
 
@@ -2321,8 +2968,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "discard":
             result = discard_pending(args.workspace, args.target_id)
         else:
-            result = finalize(args.workspace, _read_decision())
-    except WorkspaceError as exc:
+            result = finalize(
+                args.workspace,
+                _read_decision(),
+                archive_evidence=args.archive_evidence,
+            )
+    except (WorkspaceError, OSError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
     with _integer_text_limit():

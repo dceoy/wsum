@@ -4,6 +4,8 @@ Local-first Agent Skills for detecting meaningful updates on public websites and
 
 The core skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
 
+A second composite, `skills/web-update-monitor-llm-wiki/`, compiles durable captured evidence from the core into a source-backed Markdown knowledge base. The core also gains an opt-in `finalize --archive-evidence` output for it.
+
 A thin composite integration skill lives in `skills/web-update-monitor-gws/`. It keeps Google-specific orchestration outside the core while using Google Sheets as the target source, Google Drive for cross-run state, and Google Docs for completed report delivery.
 
 ## Agent Skills
@@ -12,8 +14,9 @@ The repository ships these canonical skills:
 
 - `skills/web-update-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
 - `skills/web-update-monitor-gws/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract, persists core state in Drive, and publishes completed runs as Google Docs.
+- `skills/web-update-monitor-llm-wiki/`: a composite skill with one deterministic helper (`scripts/wiki.py`) that turns committed evidence bundles into cited Markdown pages with a processed ledger and recoverable compilation transactions.
 
-To install the core skill in an Agent Skills-compatible runtime, use the `web-update-monitor` package from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain). To use the Google Workspace composite, install **both** `web-update-monitor` and `web-update-monitor-gws`; the composite package intentionally delegates to the core package instead of duplicating its runtime helpers.
+To install the core skill in an Agent Skills-compatible runtime, use the `web-update-monitor` package from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain). To use the Google Workspace composite, install **both** `web-update-monitor` and `web-update-monitor-gws`; the composite package intentionally delegates to the core package instead of duplicating its runtime helpers. The LLM wiki composite follows the same rule: install `web-update-monitor` and `web-update-monitor-llm-wiki`, and let the runtime's skill discovery locate the core instead of assuming a sibling path.
 
 ### Google Workspace composition
 
@@ -40,6 +43,23 @@ The core exposes resumable pending reviews directly. `check --compact` returns s
 Markdown remains the canonical core report and durable outbox format. The composite waits until a run has no pending reviews, then creates or updates one Google Doc named `Web Update Report — <run-id>` in the configured report folder. Exact-title lookup makes retries converge on the same Doc instead of creating duplicates.
 
 Read `skills/web-update-monitor-gws/SKILL.md` for connector orchestration and recovery semantics.
+
+### LLM wiki composition
+
+```mermaid
+flowchart LR
+    CSV["targets.csv"] --> CORE["web-update-monitor"]
+    CORE -->|"finalize --archive-evidence"| EV["evidence/&lt;ingestion-id&gt;/"]
+    CORE --> REPORT["reports/&lt;run-id&gt;.md"]
+    EV -->|"list / read / validate / apply"| WIKI["web-update-monitor-llm-wiki"]
+    WIKI --> KB["knowledge/<br/>SCHEMA.md, index.md, pages/"]
+```
+
+Detection, semantic materiality review, and one report per run stay in the core. With `finalize --archive-evidence`, a material decision also commits **captured evidence**: the complete normalized parent candidate, the bounded diff, exactly the retained linked-document excerpts with their completeness flags, digests, the enabled-interest context, and a commit receipt. The archive obligation is part of the core's existing recoverable finalization: a versioned intent freezes the decision, evidence is staged, the snapshot and report are applied, and `committed.json` is published last. `check`, `discard`, pending replacement, and later finalizations recover an outstanding intent first, so a crash can neither erase the only evidence nor leave an accepted snapshot without it. Ordinary `finalize` and the Google Workspace composite are unchanged unless they opt in.
+
+The wiki composite compiles that evidence asynchronously, one ingestion at a time, using the agent for routing and synthesis and `wiki.py` for deterministic work: listing digest-verified bundles in stable order, bounded line-range reads, draft validation (schema, paths, links, citations that resolve to verified evidence, expected hashes), a write-ahead transaction, a processed ledger, an exclusive lock, and replay recovery. Version 1 is update-driven (first observations do not seed the wiki), never prunes evidence automatically, and does not support page deletion or renaming. Hashes prove integrity, not authenticity or factual truth, and semantic source-support review remains the agent's responsibility.
+
+Read `skills/web-update-monitor-llm-wiki/SKILL.md` for the compilation workflow, draft format, limits, and the explicit conflict reconciliation procedure.
 
 ## Workspace
 
@@ -95,6 +115,7 @@ The workspace contains one user-facing input, user-facing reports, and internal 
 - `.wsum/snapshots/<target-id>.txt`: the accepted normalized baseline for each target. A first observation creates it; later finalized observations replace it atomically, including non-material changes.
 - `.wsum/pending/<target-id>/candidate.txt`: the normalized changed candidate awaiting semantic review.
 - `.wsum/pending/<target-id>/state.json`: review transaction state linking the candidate to its run, revision, expected baseline hash, candidate hash, diff-truncation status, enabled-interest context, and bounded linked-document evidence or individual child errors. Interest metadata is normalized to exactly `name,publisher,category,keywords,criteria,priority,enabled`; text is trimmed, unspecified text is blank, priority is an integer or null, and enabled is Boolean. The complete serialized pending record is bounded by the existing 40 MiB transaction-backup ceiling, including JSON escaping and object overhead; interests have no separate 1 MiB serialized cap.
+- `evidence/<ingestion-id>/`: optional captured-evidence bundles (`metadata.json`, `parent.txt`, `diff.txt`, `links.json`, `committed.json`) written only by `finalize --archive-evidence` for material decisions. These are supported output artifacts outside `.wsum/`; consumers accept only digest-verified bundles with a receipt and never read internal pending files. Evidence is never pruned automatically, so surface its storage growth.
 
 Each `.wsum/pending/<target-id>/` directory is one uncommitted review transaction. It survives the `check` → review → `finalize` boundary and is removed as a directory after successful finalization. `.wsum/snapshots/` is the only internal state that persists across completed transactions.
 
@@ -147,9 +168,10 @@ Then run tests and validate the canonical skills with the [Agent Skills referenc
 uv run pytest
 skills-ref validate skills/web-update-monitor
 skills-ref validate skills/web-update-monitor-gws
+skills-ref validate skills/web-update-monitor-llm-wiki
 ```
 
-`monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workspace.py` validates targets and owns pending review transactions, safe report writing, and atomic snapshot promotion.
+`monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workspace.py` validates targets and owns pending review transactions, safe report writing, atomic snapshot promotion, and optional evidence archival. `skills/web-update-monitor-llm-wiki/scripts/wiki.py` owns wiki validation, ledger, and recovery. Every runtime helper is included in the 100% branch-coverage gate.
 
 Browser-rendered targets are outside the CSV workspace workflow. Do not auto-escalate a static failure to browser rendering. Use browser input only when the browser tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Never provide cookies or credentials.
 
