@@ -1955,3 +1955,21 @@ def test_cli_reports_unexpected_io_errors_as_json(
 
     assert status == 2
     assert json.loads(capsys.readouterr().err) == {"error": "disk exploded"}
+
+
+def test_every_cited_payload_of_a_bundle_is_verified(env: _Env) -> None:
+    ingestion = env.commit("alpha\nbeta\n", diff="-alpha\n+beta")
+    (env.bundle(ingestion) / "diff.txt").write_text("tampered diff!\n")
+    draft = env.draft(
+        ingestion,
+        [_page(body="One [[cite:c1]] then two [[cite:c2]].")],
+        citations={
+            "c1": _cite(ingestion, "parent.txt", 1, 2),
+            "c2": _cite(ingestion, "diff.txt", 1, 1),
+        },
+    )
+
+    with pytest.raises(WikiError, match="does not match its digest"):
+        _apply(env, draft)
+
+    assert not list((env.knowledge / "pages").glob("*.md"))

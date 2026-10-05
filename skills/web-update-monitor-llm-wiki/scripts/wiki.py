@@ -715,7 +715,6 @@ def _validate_citations(
         "citations must match the markers used in page bodies",
     )
     cache: dict[tuple[str, str, str | None], list[str]] = {}
-    bundles: dict[str, dict[str, Any]] = {}
     for key, raw in citations.items():
         locator = cast("dict[str, Any]", raw if isinstance(raw, dict) else {})
         ingestion_id = locator.get("ingestion_id")
@@ -734,11 +733,8 @@ def _validate_citations(
             and type(end) is int,
             f"citation {key} is malformed",
         )
-        if ingestion_id not in bundles:
-            bundles[cast("str", ingestion_id)] = _load_bundle(
-                ws, cast("str", ingestion_id), (cast("str", file),)
-            )
-        metadata = bundles[cast("str", ingestion_id)]
+        # Verify the cited payload for every citation; ws.verified makes repeats cheap.
+        metadata = _load_bundle(ws, cast("str", ingestion_id), (cast("str", file),))
         cache_key = (
             cast("str", ingestion_id),
             cast("str", file),
