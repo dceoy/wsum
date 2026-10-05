@@ -282,8 +282,10 @@ def test_stat_failures_are_reported(
 def test_list_is_empty_without_evidence(env: _Env) -> None:
     assert wiki.list_ingestions(env.root) == {
         "blocked": [],
+        "blocked_total": 0,
         "eligible": [],
         "invalid": [],
+        "invalid_total": 0,
         "next_offset": None,
         "total_eligible": 0,
     }
@@ -920,6 +922,8 @@ _MUTATIONS: dict[str, _Mutation] = {
     "index-cite": _index_change(content="# Index\n[[cite:c1]]\n"),
     "index-broken-link": _index_change(content="# Index\n[x](pages/ghost.md)\n"),
     "page-broken-link": _page_change(body="See [x](ghost.md) [[cite:c1]]"),
+    "page-index-style-link": _page_change(body="See [x](pages/plans.md) [[cite:c1]]"),
+    "index-page-style-link": _index_change(content="# Index\n[x](plans.md)\n"),
     "page-unknown-evidence-link": _page_change(body=_UNKNOWN_LINK),
     "page-unsafe-link": _page_change(body="See [x](../secret.md) [[cite:c1]]"),
     "page-malformed-marker": _page_change(body="Bad [[cite:c1] [[cite:c1]]"),
@@ -1760,3 +1764,56 @@ def test_module_entry_point_runs_main(
 
     assert exit_info.value.code == 0
     assert '"processed": 0' in capsys.readouterr().out
+
+
+def test_list_caps_blocked_and_invalid_categories(env: _Env) -> None:
+    ids = [
+        env.commit(f"text {n}\n", when=f"2026-10-01T00:00:0{n}+00:00") for n in range(4)
+    ]
+    for ingestion in ids[:2]:
+        wiki.block(env.root, ingestion, "too big")
+    for ingestion in ids[2:]:
+        (env.bundle(ingestion) / "parent.txt").write_text("tampered\n")
+
+    first = wiki.list_ingestions(env.root, limit=1)
+    second = wiki.list_ingestions(env.root, limit=1, offset=1)
+
+    assert len(first["blocked"]) == len(first["invalid"]) == 1
+    assert first["blocked_total"] == first["invalid_total"] == 2
+    assert first["next_offset"] == 1
+    assert second["blocked"][0]["ingestion_id"] != first["blocked"][0]["ingestion_id"]
+    assert second["next_offset"] is None
+
+
+def test_full_ledger_fails_before_any_page_is_written(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ingestion = env.commit("alpha\n")
+    draft = env.draft(ingestion, [_page()])
+    baseline = len(wiki._ledger_bytes(wiki._read_ledger(wiki._Workspace(env.root))))
+    monkeypatch.setattr(wiki, "MAX_LEDGER_BYTES", baseline + 20)
+
+    with pytest.raises(WikiError, match="ledger exceeds its size limit"):
+        _apply(env, draft)
+
+    assert not list((env.knowledge / "pages").glob("*.md"))
+    assert not (env.knowledge / ".compiler" / "transaction.json").exists()
+    assert wiki.status(env.root)["transaction"] is None
+    assert wiki.status(env.root)["processed"] == 0
+
+
+def test_replay_checks_ledger_capacity_before_replacing_pages(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ingestion = env.commit("alpha\n")
+    _fail_write(monkeypatch, after=1)
+    with pytest.raises(WikiError, match="injected"):
+        _apply(env, env.draft(ingestion, [_page()]))
+    monkeypatch.undo()
+    baseline = len(wiki._ledger_bytes(wiki._read_ledger(wiki._Workspace(env.root))))
+    monkeypatch.setattr(wiki, "MAX_LEDGER_BYTES", baseline + 20)
+
+    with pytest.raises(WikiError, match="ledger exceeds its size limit"):
+        wiki.recover(env.root)
+
+    assert not (env.knowledge / "pages" / "plans.md").exists()

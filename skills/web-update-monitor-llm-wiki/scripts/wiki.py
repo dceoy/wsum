@@ -65,7 +65,8 @@ _PAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _CITE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _CITE_MARKER_RE = re.compile(r"\[\[cite:([A-Za-z0-9_-]{1,32})\]\]")
 _LINK_RE = re.compile(r"\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
-_PAGE_LINK_RE = re.compile(r"^(?:pages/)?([a-z0-9][a-z0-9-]{0,63})\.md(?:#[^\s]*)?$")
+_PAGE_LINK_RE = re.compile(r"^([a-z0-9][a-z0-9-]{0,63})\.md(?:#[^\s]*)?$")
+_INDEX_LINK_RE = re.compile(r"^pages/([a-z0-9][a-z0-9-]{0,63})\.md(?:#[^\s]*)?$")
 _PAGE_NAME_RE = re.compile(r"^([a-z0-9][a-z0-9-]{0,63})\.md$")
 _PAGE_FILE_RE = re.compile(r"^pages/([a-z0-9][a-z0-9-]{0,63})\.md$")
 _EVIDENCE_LINK_RE = re.compile(
@@ -430,10 +431,26 @@ def _read_ledger(ws: _Workspace) -> dict[str, Any]:
     return ledger
 
 
-def _write_ledger(ws: _Workspace, ledger: Mapping[str, Any]) -> None:
+def _ledger_bytes(ledger: Mapping[str, Any]) -> bytes:
     data = (json.dumps(ledger, sort_keys=True, indent=1) + "\n").encode("utf-8")
     _require(len(data) <= MAX_LEDGER_BYTES, "compiler ledger exceeds its size limit")
-    _atomic_write(ws.ledger, data, "compiler ledger")
+    return data
+
+
+def _write_ledger(ws: _Workspace, ledger: Mapping[str, Any]) -> None:
+    _atomic_write(ws.ledger, _ledger_bytes(ledger), "compiler ledger")
+
+
+def _next_ledger(
+    ws: _Workspace, txn: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the ledger that records a transaction, checking its capacity."""
+    ledger = _read_ledger(ws)
+    entry = _ledger_entry(txn)
+    ledger["processed"][txn["ingestion_id"]] = entry
+    ledger["blocked"].pop(txn["ingestion_id"], None)
+    _ledger_bytes(ledger)
+    return ledger, entry
 
 
 def _current_sha(path: Path, description: str) -> str | None:
@@ -538,12 +555,11 @@ def _replay(ws: _Workspace, txn: Mapping[str, Any]) -> dict[str, Any]:
         "conflict: destinations match neither the old nor the planned content: "
         + ", ".join(conflicts),
     )
+    # Check ledger capacity before touching any page so a full ledger cannot
+    # leave an unrecordable, permanently failing transaction behind.
+    ledger, entry = _next_ledger(ws, txn)
     for path, content in pending:
         _atomic_write(path, content.encode("utf-8"), path.name)
-    ledger = _read_ledger(ws)
-    entry = _ledger_entry(txn)
-    ledger["processed"][txn["ingestion_id"]] = entry
-    ledger["blocked"].pop(txn["ingestion_id"], None)
     _write_ledger(ws, ledger)
     with suppress(OSError):
         ws.transaction.unlink()
@@ -598,7 +614,13 @@ def _existing_pages(ws: _Workspace) -> list[str]:
     return page_ids
 
 
-def _check_links(ws: _Workspace, text: str, pages: set[str], description: str) -> None:
+def _check_links(
+    ws: _Workspace,
+    text: str,
+    pages: set[str],
+    description: str,
+    link_re: re.Pattern[str],
+) -> None:
     _require(
         len(_CITE_MARKER_RE.findall(text)) == text.count("[[cite:"),
         f"{description} contains a malformed citation marker",
@@ -610,7 +632,7 @@ def _check_links(ws: _Workspace, text: str, pages: set[str], description: str) -
             # evidence they point at still verifies.
             _load_bundle(ws, evidence.group(1))
             continue
-        match = _PAGE_LINK_RE.fullmatch(target)
+        match = link_re.fullmatch(target)
         _require(
             target.startswith(("http://", "https://", "#"))
             or (match is not None and match.group(1) in pages),
@@ -779,8 +801,8 @@ def _plan_files(ws: _Workspace, draft: Mapping[str, Any]) -> list[dict[str, Any]
         "draft index is malformed or too large",
     )
     for page_id, _title, body, _expected in prepared:
-        _check_links(ws, body, known, f"page {page_id}")
-    _check_links(ws, cast("str", index_content), known, "index")
+        _check_links(ws, body, known, f"page {page_id}", _PAGE_LINK_RE)
+    _check_links(ws, cast("str", index_content), known, "index", _INDEX_LINK_RE)
     citations = _validate_citations(ws, draft, bodies)
     files: list[dict[str, Any]] = []
     for page_id, title, body, expected in prepared:
@@ -889,12 +911,20 @@ def list_ingestions(
         else:
             eligible.append(summary)
     eligible.sort(key=itemgetter("archived_at", "ingestion_id"))
-    page = eligible[offset : offset + limit]
+    blocked.sort(key=itemgetter("ingestion_id"))
+    invalid.sort(key=itemgetter("ingestion_id"))
+    window = slice(offset, offset + limit)
     return {
-        "blocked": blocked,
-        "eligible": page,
-        "invalid": invalid,
-        "next_offset": offset + limit if offset + limit < len(eligible) else None,
+        "blocked": blocked[window],
+        "blocked_total": len(blocked),
+        "eligible": eligible[window],
+        "invalid": invalid[window],
+        "invalid_total": len(invalid),
+        "next_offset": (
+            offset + limit
+            if offset + limit < max(len(eligible), len(blocked), len(invalid))
+            else None
+        ),
         "total_eligible": len(eligible),
     }
 
@@ -1070,6 +1100,7 @@ def apply(
         if recorded is not None:
             return {"action": "already_compiled", "entry": recorded}
         txn = _plan(ws, ingestion_id, draft)
+        _next_ledger(ws, txn)
         data = (json.dumps(txn, sort_keys=True) + "\n").encode("utf-8")
         _atomic_write(ws.transaction, data, "transaction")
         entry = _replay(ws, txn)

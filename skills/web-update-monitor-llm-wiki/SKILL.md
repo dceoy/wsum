@@ -82,7 +82,7 @@ python "$WEB_UPDATE_MONITOR_LLM_WIKI_SKILL_DIR/scripts/wiki.py" --workspace "$WO
    wiki.py --workspace "$WORKSPACE" list [--limit N --offset N]
    ```
 
-   The result separates `eligible`, `blocked` (with visible reasons), and `invalid` bundles. Staged directories without a receipt are never listed. Page size is at most 100. Process the first eligible ingestion only.
+   The result separates `eligible`, `blocked` (with visible reasons), and `invalid` bundles; each category is capped to the same `--limit`/`--offset` window, with `blocked_total`, `invalid_total` and `total_eligible` counts and a shared `next_offset`. Listing still verifies every unprocessed bundle. Staged directories without a receipt are never listed. Page size is at most 100. Process the first eligible ingestion only.
 
 3. **Read within budgets.** `show --ingestion-id <id>` returns verified metadata, per-file line counts, and link-entry handles. Read evidence with bounded line ranges and never load a whole maximum-size candidate into context:
 
