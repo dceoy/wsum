@@ -905,9 +905,7 @@ def _too_many_pages(draft: dict[str, Any]) -> None:
 
 
 _UNKNOWN_LINK = (
-    "Old [x](../../../internal/evidence/"
-    + "a" * 64
-    + "/parent.txt) [[cite:c1]]"
+    "Old [x](../../../internal/evidence/" + "a" * 64 + "/parent.txt) [[cite:c1]]"
 )
 _MUTATIONS: dict[str, _Mutation] = {
     "missing-field": _drop("noop"),
