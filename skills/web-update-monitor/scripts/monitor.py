@@ -428,24 +428,26 @@ class _TextExtractor(HTMLParser):
             return
         for name in destinations:
             value = values.get(name)
-            if not value:
-                continue
-            self._destination_count += 1
-            destination = urljoin(self._base_url, value.strip())
-            if self._destination_count > _MAX_HTML_DESTINATIONS:
-                # Keep the first destinations; flag the rest as omitted so the
-                # review is marked incomplete instead of failing the target.
-                if tag in {"a", "area"}:
-                    self.links.omitted_hashes.add(
-                        hashlib.sha256(destination.encode("utf-8")).hexdigest()
-                    )
-                continue
-            if _destination_has_credentials(destination):
-                raise MonitorError("HTML destination contains credentials")
+            if value:
+                self._record_destination(tag, name, value)
+
+    def _record_destination(self, tag: str, name: str, value: str) -> None:
+        self._destination_count += 1
+        destination = urljoin(self._base_url, value.strip())
+        if self._destination_count > _MAX_HTML_DESTINATIONS:
+            # Keep the first destinations; flag the rest as omitted so the
+            # review is marked incomplete instead of failing the target.
             if tag in {"a", "area"}:
-                _collect_link(self.links, destination)
-            digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
-            self.parts.append(f"\n[{tag}:{name}:sha256:{digest}]\n")
+                self.links.omitted_hashes.add(
+                    hashlib.sha256(destination.encode("utf-8")).hexdigest()
+                )
+            return
+        if _destination_has_credentials(destination):
+            raise MonitorError("HTML destination contains credentials")
+        if tag in {"a", "area"}:
+            _collect_link(self.links, destination)
+        digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
+        self.parts.append(f"\n[{tag}:{name}:sha256:{digest}]\n")
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
