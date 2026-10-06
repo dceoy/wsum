@@ -234,7 +234,7 @@ Do not convert the report to a Google Doc or create an additional presentation c
 - Pending review exists: first reconcile it against the current authoritative Sheet projection, discard it if removed or disabled, otherwise resume it through the core API without refetching that target.
 - Core state change succeeds locally but Drive state persistence fails before the new archive verifies: do not treat the local mutation as durable; recover from the newest previously committed archive.
 - Report staging or state persistence fails after material finalize: do not delete the previously committed ZIP generation.
-- A run still has pending reviews: keep its Markdown outbox durable and do not publish a Google Doc yet.
+- A run still has pending reviews: keep its Markdown outbox durable and do not publish the Drive report yet.
 - Drive Markdown upload/update or read-back verification fails: keep the durable Markdown outbox and retry delivery only.
 - Drive Markdown delivery succeeds but outbox cleanup persistence fails: reuse the exact-filename file on retry and replace its content idempotently.
 - Multiple exact-filename report files exist: stop delivery and surface the ambiguity.
