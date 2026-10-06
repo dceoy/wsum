@@ -100,7 +100,7 @@ _HTML_BLOCK_TAGS = {
     "ul",
 }
 _HTML_LINE_BREAK_TAGS = {"br"}
-_MAX_HTML_DESTINATIONS = 500
+_MAX_HTML_DESTINATIONS = 1000
 _SENSITIVE_QUERY_NAMES = frozenset({
     "access-token",
     "api-key",
