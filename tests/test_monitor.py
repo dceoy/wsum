@@ -1727,11 +1727,23 @@ def test_html_extractor_keeps_first_destinations_and_flags_the_rest(
     first = monitor.hashlib.sha256(b"https://example.com/one").hexdigest()
     second = monitor.hashlib.sha256(b"https://example.com/two").hexdigest()
     assert list(parser.links) == [first]
-    form = monitor.hashlib.sha256(b"https://example.com/f").hexdigest()
-    assert parser.links.omitted_hashes == {second, form}
+    assert parser.links.omitted_hashes == set()
+    assert parser.links.overflow_count == 2
     text = "".join(parser.parts)
     assert second not in text
     assert "[omitted-destinations:2:sha256:" in text
+
+
+def test_html_extractor_overflow_metadata_stays_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitor, "_MAX_HTML_DESTINATIONS", 1)
+    parser = monitor._TextExtractor("https://example.com/")
+    parser.feed("".join(f'<a href="/{index}">x</a>' for index in range(2_000)))
+    parser.close()
+    assert parser.links.omitted_hashes == set()
+    assert parser.links.overflow_count == 1_999
+    assert len(parser.links) == 1
 
 
 def test_html_extractor_rejects_credentials_after_destination_limit(

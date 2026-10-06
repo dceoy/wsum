@@ -384,12 +384,14 @@ class LinkCollection(dict[str, str]):  # ruff: ignore[subclass-builtin]
         """Create empty link and omission collections."""
         super().__init__()
         self.omitted_hashes: set[str] = set()
+        self.overflow_count = 0
 
 
 def _merge_link_collection(target: dict[str, str], source: LinkCollection) -> None:
     target.update(source)
     if isinstance(target, LinkCollection):
         target.omitted_hashes.update(source.omitted_hashes)
+        target.overflow_count += source.overflow_count
 
 
 class _TextExtractor(HTMLParser):
@@ -442,7 +444,7 @@ class _TextExtractor(HTMLParser):
             digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
             self._omitted.update(f"{tag}:{name}:{digest}\n".encode())
             self._omitted_count += 1
-            self.links.omitted_hashes.add(digest)
+            self.links.overflow_count += 1
             return
         if tag in {"a", "area"}:
             _collect_link(self.links, destination)
