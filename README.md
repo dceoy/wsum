@@ -87,14 +87,14 @@ Columns and parsing rules:
 - `name` and `url` are required: a display name and absolute HTTP(S) URL without credentials or fragments. The helper derives `target_id` from the exact trimmed URL; do not supply an ID column.
 - `publisher` and `category` are optional organization and classification metadata.
 - `keywords` is optional free text providing semantic relevance hints, including spaces or slashes. Blank keywords are valid. Keywords supplement criteria; they never filter fetching, link traversal, or materiality by exact match.
-- `criteria` is optional natural language deciding which changes deserve a report. Legacy `watch_focus` maps to `criteria`; reject a header containing both, even if either column is blank. Do not introduce alternate column names.
+- `criteria` is optional natural language deciding which changes deserve a report. Use this canonical column name; alternate spellings are unsupported.
 - `priority` is optional: blank becomes `null`; otherwise accept only an ASCII decimal integer greater than zero. Leading zeros normalize to an integer. Reject signs, fractions, exponents, and nonnumeric text. Lower numbers indicate higher priority for display only; priority does not change fetch order, cadence, limits, or materiality.
 - `enabled` is optional and applies to each interest: trimmed, case-insensitive `true` or `false`; omitted or blank defaults to true.
-- Accept supported optional-column subsets and any column order with `name,url` present, including the legacy `name,url,watch_focus,enabled` shape. Reject duplicate or unknown runtime CSV headers.
+- Accept supported optional-column subsets and any column order with `name,url` present. Reject duplicate or unknown runtime CSV headers.
 - Retain UTF-8/BOM support, standard CSV quoting (including commas and newlines), and the 1 MiB file limit. Trim cell whitespace, pad missing trailing optional cells with blank, and skip completely blank records. Reject missing required values, surplus cells, and files with no targets. Validate every nonblank row, including disabled interests, before fetching or configuration-driven state changes. Row errors identify the CSV record (header is record 1) and field.
-- In `name,url,publisher,category,keywords,criteria` and legacy `watch_focus`, reject a whole trimmed cell equal to `"` (U+0022), `〃` (U+3003), `同上`, or `同左`. Replace it with the intended explicit value; optional text may instead be blank. Embedded tokens are valid. Never inherit values from earlier rows.
+- In `name,url,publisher,category,keywords,criteria`, reject a whole trimmed cell equal to `"` (U+0022), `〃` (U+3003), `同上`, or `同左`. Replace it with the intended explicit value; optional text may instead be blank. Embedded tokens are valid. Never inherit values from earlier rows.
 - Repeated exact trimmed URLs are supported. Each row is an interest; each distinct URL is one fetch/snapshot/review target. Preserve URL first-occurrence order and all row interests, including identical or disabled rows. Distinct URLs with colliding derived IDs fail.
-- A URL is enabled when any interest is enabled. Review only enabled interests. The scalar display name and compatibility `watch_focus` use the first enabled interest (or first interest when all are disabled); the full `interests` collection is authoritative.
+- A URL is enabled when any interest is enabled. Review only enabled interests. The display name uses the first enabled interest (or first interest when all are disabled); the full `interests` collection is authoritative.
 - Never put credentials, cookies, tokens, or secrets in URLs or CSV cells.
 
 The workspace separates user-facing artifacts from implementation data at the root. The selected target CSV is a separate input:
@@ -152,7 +152,7 @@ python skills/web-update-monitor/scripts/workspace.py \
   pending --target-id <target-id>
 ```
 
-Before semantic judgment or automated finalization, validate the current configuration. Full pending reviews replace stored interests with the complete current enabled-interest collection without rewriting candidate bytes, hashes, revision, original run ID, or diff/link evidence and without refetching. Valid removed/all-disabled URL groups expose no active interests and must be discarded through the core API; `check` performs that reconciliation automatically. Missing/invalid configuration makes `check` fail before fetching or configuration-driven mutation. `pending` remains available for inspection/recovery with saved context, and legacy direct finalization remains supported.
+Before semantic judgment or automated finalization, validate the current configuration. Full pending reviews replace stored interests with the complete current enabled-interest collection without rewriting candidate bytes, hashes, revision, original run ID, or diff/link evidence and without refetching. Valid removed/all-disabled URL groups expose no active interests and must be discarded through the core API; `check` performs that reconciliation automatically. Missing/invalid configuration makes `check` fail before fetching or configuration-driven mutation. `pending` remains available for inspection and recovery with the saved current-format context.
 
 After the agent decides whether a change is material for any enabled interest, it passes an internal decision to:
 
