@@ -2500,18 +2500,7 @@ def _validate_archive_intent(record: dict[str, object]) -> dict[str, object]:
 
 
 def _evidence_directory(root: Path, *, create: bool) -> Path | None:
-    internal = root / _INTERNAL_DIR
-    if create:
-        internal = _internal_dir(root)
-    else:
-        info = _optional_lstat(internal, "workspace internal directory")
-        if info is None:
-            return None
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise WorkspaceError(
-                "workspace internal directory must be a non-symlink directory"
-            )
-    path = internal / _EVIDENCE_DIR
+    path = _internal_dir(root) / _EVIDENCE_DIR
     if create:
         return _ensure_directory(path, "evidence directory", sync_parent=True)
     info = _optional_lstat(path, "evidence directory")
