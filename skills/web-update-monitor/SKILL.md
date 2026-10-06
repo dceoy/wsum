@@ -59,7 +59,6 @@ Generated files have these roles:
 
 Treat each pending target directory as one uncommitted review transaction. It survives process or runtime interruption until it is finalized or explicitly discarded. Snapshots persist across completed runs.
 
-Legacy pending layouts remain finalizable. New pending transactions use the grouped directory layout above and persist their review context directly so `pending` can reproduce the original bounded review without another network fetch.
 
 The canonical enriched CSV schema is:
 
