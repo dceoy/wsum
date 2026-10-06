@@ -59,7 +59,6 @@ Generated files have these roles:
 
 Treat each pending target directory as one uncommitted review transaction. It survives process or runtime interruption until it is finalized or explicitly discarded. Snapshots persist across completed runs.
 
-
 The canonical enriched CSV schema is:
 
 ```csv
