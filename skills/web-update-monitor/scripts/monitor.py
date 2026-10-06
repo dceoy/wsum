@@ -400,6 +400,8 @@ class _TextExtractor(HTMLParser):
         self._base_href_seen = False
         self._skip_depth = 0
         self._destination_count = 0
+        self._omitted = hashlib.sha256()
+        self._omitted_count = 0
         self.parts: list[str] = []
         self.links = LinkCollection()
 
@@ -435,10 +437,11 @@ class _TextExtractor(HTMLParser):
         if self._destination_count > _MAX_HTML_DESTINATIONS:
             # Keep the first destinations; flag the rest as omitted so the
             # review is marked incomplete instead of failing the target.
+            digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
+            self._omitted.update(f"{tag}:{name}:{digest}\n".encode())
+            self._omitted_count += 1
             if tag in {"a", "area"}:
-                self.links.omitted_hashes.add(
-                    hashlib.sha256(destination.encode("utf-8")).hexdigest()
-                )
+                self.links.omitted_hashes.add(digest)
             return
         if _destination_has_credentials(destination):
             raise MonitorError("HTML destination contains credentials")
@@ -446,6 +449,17 @@ class _TextExtractor(HTMLParser):
             _collect_link(self.links, destination)
         digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
         self.parts.append(f"\n[{tag}:{name}:sha256:{digest}]\n")
+
+    def close(self) -> None:
+        """Finish parsing and record omitted destinations as one bounded marker."""
+        super().close()
+        if self._omitted_count:
+            # Keeps destination-only changes beyond the limit visible to the diff.
+            self.parts.append(
+                f"\n[omitted-destinations:{self._omitted_count}"
+                f":sha256:{self._omitted.hexdigest()}]\n"
+            )
+            self._omitted_count = 0
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()

@@ -1728,7 +1728,26 @@ def test_html_extractor_keeps_first_destinations_and_flags_the_rest(
     second = monitor.hashlib.sha256(b"https://example.com/two").hexdigest()
     assert list(parser.links) == [first]
     assert parser.links.omitted_hashes == {second}
-    assert second not in "".join(parser.parts)
+    text = "".join(parser.parts)
+    assert second not in text
+    assert "[omitted-destinations:2:sha256:" in text
+
+
+def test_html_extractor_omitted_destination_change_alters_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitor, "_MAX_HTML_DESTINATIONS", 1)
+
+    def text_for(html: str) -> str:
+        parser = monitor._TextExtractor("https://example.com/")
+        parser.feed(html)
+        parser.close()
+        parser.close()
+        return "".join(parser.parts)
+
+    base = '<a href="/one">one</a><a href="/two">same</a>'
+    assert text_for(base) != text_for(base.replace("/two", "/changed"))
+    assert text_for(base) == text_for(base)
 
 
 @pytest.mark.parametrize(
