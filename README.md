@@ -23,7 +23,7 @@ To install the core skill in an Agent Skills-compatible runtime, use the `web-up
 ```mermaid
 flowchart LR
     GS["Google Sheet"] --> CSV["internal/gws/targets.csv"]
-    DS["Google Drive workspacess/<br/>workspace-YYYYMMDDTHHMMSSZ.zip × 3"] <-->|restore / persist| WS["workspace snapshot"]
+    DS["Google Drive workspaces/<br/>workspace-YYYYMMDDTHHMMSSZ.zip × 3"] <-->|restore / persist| WS["workspace snapshot"]
     WS --> WORKSPACE["output/ + internal/"]
     CSV --> CORE["web-update-monitor"]
     WORKSPACE --> CORE
