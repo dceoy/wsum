@@ -1717,11 +1717,18 @@ def test_html_extractor_handles_blocks_skips_and_base_urls(
         assert digest in normalized
 
 
-def test_html_extractor_caps_destination_count(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(monitor, "_MAX_HTML_DESTINATIONS", 0)
+def test_html_extractor_keeps_first_destinations_and_flags_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitor, "_MAX_HTML_DESTINATIONS", 1)
     parser = monitor._TextExtractor("https://example.com/")
-    with pytest.raises(MonitorError, match="too many monitored destinations"):
-        parser.feed('<a href="/one">one</a>')
+    parser.feed('<a href="/one">one</a><a href="/two">two</a><form action="/f"></form>')
+    parser.close()
+    first = monitor.hashlib.sha256(b"https://example.com/one").hexdigest()
+    second = monitor.hashlib.sha256(b"https://example.com/two").hexdigest()
+    assert list(parser.links) == [first]
+    assert parser.links.omitted_hashes == {second}
+    assert second not in "".join(parser.parts)
 
 
 @pytest.mark.parametrize(
