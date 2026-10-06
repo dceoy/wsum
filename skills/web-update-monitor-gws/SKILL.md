@@ -22,7 +22,7 @@ flowchart LR
     WORKSPACE --> CORE
     CORE --> WORKSPACE
     CORE --> REPORT["output/report/<run-id>.md"]
-    OUT -->|restore aggregation base| REPORT
+    WORKSPACE --> OUT["internal/gws/outbox/"]
     REPORT -->|stage durable Markdown| OUT
     OUT -->|run complete| GMD["Drive Markdown file"]
     GMD --> DR["Google Drive report folder"]
@@ -221,7 +221,7 @@ When a run has an outbox report and no pending review with the same `run_id`:
 6. If no legacy Google Doc and exactly one Markdown file matches, reuse that exact Drive file ID and replace its content with the complete canonical Markdown report so retries converge on the same file.
 7. If multiple exact Markdown filenames exist, stop delivery and report the ambiguity instead of creating another file.
 8. Read the delivered file back by its exact Drive file ID and verify its byte length and SHA-256 against the canonical outbox bytes.
-9. After delivery is confirmed, remove the outbox entry and commit a new timestamped Drive state archive.
+9. After delivery is confirmed, remove the outbox entry and commit a new timestamped Drive workspace snapshot.
 
 The exact Markdown filename is the current-format delivery idempotency key, while the Drive file ID is the mutation target after lookup. The prior exact-title Google Doc is a migration conflict to reconcile, not an automatic update target. Do not infer identity from modified time or listing order.
 
