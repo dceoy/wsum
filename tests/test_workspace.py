@@ -2569,79 +2569,39 @@ def test_load_targets_rejects_invalid_schema_and_row_values(
         workspace.load_targets(tmp_path / "targets.csv")
 
 
-@pytest.mark.parametrize(
-    ("location", "error", "message"),
-    [
-        ("target", PermissionError, "pending target directory"),
-        ("legacy", PermissionError, "cannot stat pending decision"),
-        ("candidates", PermissionError, "legacy candidate directory"),
-    ],
-    ids=["target-stat", "legacy-state-stat", "candidate-dir-stat"],
-)
-def test_existing_pending_paths_wraps_stat_errors(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    location: str,
-    error: type[OSError],
-    message: str,
+def test_existing_pending_paths_wraps_target_stat_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = tmp_path / "internal" / "state"
     pending = state / "pending"
     pending.mkdir(parents=True)
-    (pending / "example.json").write_text("{}", encoding="utf-8")
-    candidates = state / "candidates"
-    candidates.mkdir()
-    target = {
-        "target": pending / "example",
-        "legacy": pending / "example.json",
-        "candidates": candidates,
-    }[location]
+    target = pending / "example"
     original_lstat = Path.lstat
 
     def fail(path: Path) -> os.stat_result:
         if path == target:
-            raise error("injected")  # ruff: ignore[raw-string-in-exception]
+            raise PermissionError("injected")
         return original_lstat(path)
 
     monkeypatch.setattr(Path, "lstat", fail)
-    with pytest.raises(WorkspaceError, match=message):
-        workspace._existing_pending_paths(state, "example")  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(WorkspaceError, match="cannot stat pending target"):
+        workspace._existing_pending_paths(state, "example")
 
-
-@pytest.mark.parametrize(
-    ("location", "message"),
-    [
-        ("target", "pending target"),
-        ("legacy-state", "pending decision"),
-        ("candidates", "state/candidates"),
-    ],
-    ids=["target-symlink", "legacy-state-symlink", "candidate-dir-symlink"],
-)
-def test_existing_pending_paths_rejects_unsafe_layouts(
-    tmp_path: Path, location: str, message: str
+@pytest.mark.parametrize("kind", ["symlink", "file"])
+def test_existing_pending_paths_rejects_unsafe_target(
+    tmp_path: Path, kind: str
 ) -> None:
     state = tmp_path / "internal" / "state"
     pending = state / "pending"
     pending.mkdir(parents=True)
-    candidates = state / "candidates"
-    candidates.mkdir()
-    target_dir = pending / "example"
-    target_file = pending / "example.json"
-    candidate = candidates / "example.txt"
-    for path in (target_dir, target_file, candidate):
-        if path.exists():
-            path.unlink()
-    if location == "target":
-        target_dir.symlink_to(tmp_path, target_is_directory=True)
-    elif location == "legacy-state":
-        target_file.symlink_to(tmp_path / "missing")
-    elif location == "candidates":
-        candidates.rmdir()
-        candidates.symlink_to(tmp_path, target_is_directory=True)
-        target_file.write_text("{}", encoding="utf-8")
-    with pytest.raises(WorkspaceError, match=message):
-        workspace._existing_pending_paths(state, "example")  # pyright: ignore[reportPrivateUsage]
+    target = pending / "example"
+    if kind == "symlink":
+        target.symlink_to(tmp_path, target_is_directory=True)
+    else:
+        target.write_text("not a directory", encoding="utf-8")
 
+    with pytest.raises(WorkspaceError, match="pending target must be"):
+        workspace._existing_pending_paths(state, "example")
 
 @pytest.mark.parametrize(
     ("kind", "message"),
@@ -3582,10 +3542,13 @@ def test_recover_pending_resolves_committed_replacement_by_revision(
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
     old_revision = "c" * 32
-    old_state = json.dumps({"revision": old_revision}).encode()
-    backup = base64.b64encode(old_state).decode()
-    undo = _replace_record(group_dir_existed=True,
-        old_state=backup,
+    old_payload = _pending_payload(
+        revision=old_revision,
+        candidate_sha256=hashlib.sha256(b"old candidate").hexdigest(),
+    )
+    undo = _replace_record(
+        group_dir_existed=True,
+        old_state=base64.b64encode(json.dumps(old_payload).encode()).decode(),
         old_candidate=base64.b64encode(b"old candidate").decode(),
     )
     _write_recovery(state, undo)
@@ -3593,18 +3556,13 @@ def test_recover_pending_resolves_committed_replacement_by_revision(
     data = b"new candidate"
     payload = _pending_payload(candidate_sha256=hashlib.sha256(data).hexdigest())
     group = _grouped_pending(state, payload, data)
-    if resolution == "accept":
-        revision = _REVISION
-        assert workspace._recover_pending(state, "example", revision=revision) is None  # pyright: ignore[reportPrivateUsage]
-        assert group.joinpath("candidate.txt").read_bytes() == data
-    else:
-        revision = old_revision
-        # The old pending group must exist before grouped rollback restores it.
-        assert workspace._recover_pending(state, "example", revision=revision) is None  # pyright: ignore[reportPrivateUsage]
-        assert group.joinpath("candidate.txt").read_bytes() == b"old candidate"
-    assert workspace._read_recovery_record(state, "example") is None  # pyright: ignore[reportPrivateUsage]
-    assert workspace._read_commit_record(state, "example") is None  # pyright: ignore[reportPrivateUsage]
 
+    revision = _REVISION if resolution == "accept" else old_revision
+    assert workspace._recover_pending(state, "example", revision=revision) is None
+    expected = data if resolution == "accept" else b"old candidate"
+    assert group.joinpath("candidate.txt").read_bytes() == expected
+    assert workspace._read_recovery_record(state, "example") is None
+    assert workspace._read_commit_record(state, "example") is None
 
 def test_recover_pending_rejects_conflicting_recovery_and_commit_records(
     tmp_path: Path,
@@ -3653,15 +3611,7 @@ def test_read_pending_rejects_invalid_json_and_wrong_shapes(
         ({"extra": 1}, "pending decision is invalid"),
         ({"run_id": "bad"}, "pending decision is invalid"),
         ({"diff_truncated": "false"}, "pending decision is invalid"),
-        (
-            {
-                "name": "Example",
-                "url": "https://example.com/",
-                "watch_focus": "pricing",
-                "diff": 1,
-            },
-            "pending decision is invalid",
-        ),
+        ({"diff": 1}, "pending decision is invalid"),
     ],
     ids=[
         "unexpected-field",
@@ -3678,8 +3628,7 @@ def test_read_pending_rejects_extra_fields_and_bad_run_ids(
     payload.update(field_change)
     _grouped_pending(state, payload, b"candidate")
     with pytest.raises(WorkspaceError, match=message):
-        workspace._read_pending(state, "example")  # pyright: ignore[reportPrivateUsage]
-
+        workspace._read_pending(state, "example")
 
 def test_read_pending_backfills_legacy_missing_run_id(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
@@ -3717,32 +3666,6 @@ def test_report_write_rejects_empty_or_oversized_input(
     monkeypatch.setattr(workspace, "_MAX_SNAPSHOT_BYTES", 1)
     with pytest.raises(WorkspaceError, match="report size is invalid"):
         workspace._write_report(root, _RUN_ID, "example", report)  # pyright: ignore[reportPrivateUsage]
-
-
-def test_remove_pending_detects_candidate_directory_that_changes_after_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    state = tmp_path / "internal" / "state"
-    pending = state / "pending"
-    pending.mkdir(parents=True)
-    candidates = state / "candidates"
-    candidates.mkdir()
-    original_optional = workspace._optional_lstat
-    calls = 0
-
-    def changed(path: Path, description: str) -> os.stat_result | None:
-        nonlocal calls
-        if path == candidates:
-            calls += 1
-            if calls == 2:
-                candidates.rmdir()
-                candidates.symlink_to(tmp_path, target_is_directory=True)
-                return candidates.lstat()
-        return original_optional(path, description)
-
-    monkeypatch.setattr(workspace, "_optional_lstat", changed)
-    with pytest.raises(WorkspaceError, match="state/candidates"):
-        workspace._remove_pending(state, "example")  # pyright: ignore[reportPrivateUsage]
 
 
 def test_recovery_directory_wraps_second_lstat_failure(
@@ -3925,8 +3848,7 @@ def test_install_pending_replacement_checks_readback(
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
     (state / "pending").mkdir()
-    (state / "candidates").mkdir()
-    monkeypatch.setattr(workspace, "_fsync_directory", lambda _path: None)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+    monkeypatch.setattr(workspace, "_fsync_directory", lambda _path: None)
     if mismatch == "candidate":
         original_read = workspace._read_text_bytes
         candidate_path = state / "pending" / "example" / "candidate.txt"
@@ -3943,13 +3865,13 @@ def test_install_pending_replacement_checks_readback(
         monkeypatch.setattr(workspace, "_read_text_bytes", mismatch_read)
         expected = "pending candidate read-back mismatch"
     else:
-        monkeypatch.setattr(workspace, "_read_pending", lambda *_args: {})  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        monkeypatch.setattr(workspace, "_read_pending", lambda *_args: {})
         expected = "pending decision read-back mismatch"
-    with pytest.raises(WorkspaceError, match=expected):
-        workspace._install_pending_replacement(  # pyright: ignore[reportPrivateUsage]
-            state, _valid_payload(), b"new candidate", _replace_record()
-        )
 
+    with pytest.raises(WorkspaceError, match=expected):
+        workspace._install_pending_replacement(
+            state, _valid_payload(), b"new candidate"
+        )
 
 def test_handle_monitor_result_returns_baseline_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
