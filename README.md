@@ -13,7 +13,7 @@ A thin composite integration skill lives in `skills/web-update-monitor-gws/`. It
 The repository ships these canonical skills:
 
 - `skills/web-update-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
-- `skills/web-update-monitor-gws/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract, persists core state in Drive, and publishes completed runs as Google Docs.
+- `skills/web-update-monitor-gws/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract, persists core state as three retained timestamped ZIP generations in Drive, and publishes completed runs as Google Docs.
 - `skills/web-update-monitor-llm-wiki/`: a composite skill with one deterministic helper (`scripts/wiki.py`) that turns committed evidence bundles into cited Markdown pages with a processed ledger and recoverable compilation transactions.
 
 To install the core skill in an Agent Skills-compatible runtime, use the `web-update-monitor` package from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain). To use the Google Workspace composite, install **both** `web-update-monitor` and `web-update-monitor-gws`; the composite package intentionally delegates to the core package instead of duplicating its runtime helpers. The LLM wiki composite follows the same rule: install `web-update-monitor` and `web-update-monitor-llm-wiki`, and let the runtime's skill discovery locate the core instead of assuming a sibling path.
@@ -23,12 +23,14 @@ To install the core skill in an Agent Skills-compatible runtime, use the `web-up
 ```mermaid
 flowchart LR
     GS["Google Sheet"] --> CSV["targets.csv"]
-    DS["Google Drive state"] <-->|sync| STATE[".wsum/"]
+    DS["Google Drive state<br/>state-YYYYMMDDTHHMMSSZ.zip × 3"] <-->|restore / persist| BUNDLE["state bundle"]
+    BUNDLE --> STATE[".wsum/"]
+    BUNDLE --> OUT["durable Markdown outbox"]
     CSV --> CORE["web-update-monitor"]
     STATE --> CORE
     CORE --> STATE
     CORE --> REPORT["reports/<run-id>.md"]
-    OUT["durable Markdown outbox"] -->|restore| REPORT
+    OUT -->|restore| REPORT
     REPORT -->|stage| OUT
     OUT -->|run complete| GDOC["Google Doc"]
     GDOC --> DR["Google Drive report folder"]
@@ -38,7 +40,7 @@ The core automatically reads newly added navigation links from changed HTML page
 
 The core groups interests by exact trimmed URL and fetches each enabled URL once. Semantic review considers the parent diff and linked evidence for every enabled interest: material for any interest means material for the URL. Write one managed report section explaining the affected interests without repeating the same change, and finalize once per URL.
 
-The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite therefore persists the core `.wsum/` state directly instead of duplicating review metadata in an adapter-owned journal.
+The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite persists the core `.wsum/` state and durable Markdown outbox as timestamped ZIP generations (`state-YYYYMMDDTHHMMSSZ.zip`), restores the newest generation by filename timestamp, and retains only the three newest committed archives instead of duplicating review metadata in an adapter-owned journal or allowing state archives to accumulate.
 
 Markdown remains the canonical core report and durable outbox format. The composite waits until a run has no pending reviews, then creates or updates one Google Doc named `Web Update Report — <run-id>` in the configured report folder. Exact-title lookup makes retries converge on the same Doc instead of creating duplicates.
 
