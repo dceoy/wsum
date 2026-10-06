@@ -130,7 +130,6 @@ The workspace contains user-facing reports and internal state. The target CSV is
 
 Each `internal/state/pending/<target-id>/` directory is one uncommitted review transaction. It survives the `check` → review → `finalize` boundary and is removed as a directory after successful finalization. `internal/state/snapshots/` is the only core state that persists across completed transactions.
 
-Reviews created with the previous `internal/state/pending/<target-id>.json` and `internal/state/candidates/<target-id>.txt` layout remain finalizable after an upgrade; new transactions use the grouped directory layout.
 
 The helper may briefly create hidden `*.tmp` files next to the report, snapshot, or pending-state file being replaced. Keeping these temporary files in the destination directory preserves same-filesystem atomic replacement; they are not collected under a shared `internal/state/tmp/`.
 
