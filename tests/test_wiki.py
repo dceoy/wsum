@@ -51,7 +51,7 @@ class _Env:
             workspace.load_targets(root / "targets.csv")[0]["target_id"]
         )
         self.current = "baseline\n"
-        snapshots = root / ".wsum" / "snapshots"
+        snapshots = root / "state" / "snapshots"
         snapshots.mkdir(parents=True)
         (snapshots / f"{self.target_id}.txt").write_text(self.current)
         self.serial = 0
@@ -82,7 +82,7 @@ class _Env:
         if link_review is not None:
             result["link_review"] = link_review
         review = workspace._handle_monitor_result(
-            self.root / ".wsum",
+            self.root / "state",
             target,
             result,
             _RUN_ID,

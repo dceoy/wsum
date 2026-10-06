@@ -24,7 +24,7 @@ To install the core skill in an Agent Skills-compatible runtime, use the `web-up
 flowchart LR
     GS["Google Sheet"] --> CSV["targets.csv"]
     DS["Google Drive state<br/>state-YYYYMMDDTHHMMSSZ.zip × 3"] <-->|restore / persist| BUNDLE["state bundle"]
-    BUNDLE --> STATE[".wsum/"]
+    BUNDLE --> STATE["state/"]
     BUNDLE --> OUT["durable Markdown outbox"]
     CSV --> CORE["web-update-monitor"]
     STATE --> CORE
@@ -40,7 +40,7 @@ The core automatically reads newly added navigation links from changed HTML page
 
 The core groups interests by exact trimmed URL and fetches each enabled URL once. Semantic review considers the parent diff and linked evidence for every enabled interest: material for any interest means material for the URL. Write one managed report section explaining the affected interests without repeating the same change, and finalize once per URL.
 
-The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite persists the core `.wsum/` state and durable Markdown outbox as timestamped ZIP generations (`state-YYYYMMDDTHHMMSSZ.zip`), restores the newest generation by filename timestamp, and retains only the three newest committed archives instead of duplicating review metadata in an adapter-owned journal or allowing state archives to accumulate.
+The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite persists the core `state/` state and durable Markdown outbox as timestamped ZIP generations (`state-YYYYMMDDTHHMMSSZ.zip`), restores the newest generation by filename timestamp, and retains only the three newest committed archives instead of duplicating review metadata in an adapter-owned journal or allowing state archives to accumulate.
 
 Markdown remains the canonical core report, durable outbox format, and user-facing Google Drive report format. The composite waits until a run has no pending reviews, then uploads or updates one file named `Web Update Report — <run-id>.md` in the configured report folder. Exact-filename lookup makes retries converge on the same Drive file instead of creating duplicates.
 
@@ -104,7 +104,7 @@ The workspace contains generated reports and internal state. The selected target
 ```text
 workspace/
 ├── reports/
-└── .wsum/
+└── state/
     ├── snapshots/
     └── pending/
         └── <target-id>/
@@ -112,7 +112,7 @@ workspace/
             └── candidate.txt
 ```
 
-Edit the selected CSV when changing core monitoring targets. In the Google Workspace composite workflow, the authoritative Spreadsheet still projects to `$WORKSPACE/targets.csv`, which is passed explicitly to the core. `.wsum/` is internal state and should not be edited manually.
+Edit the selected CSV when changing core monitoring targets. In the Google Workspace composite workflow, the authoritative Spreadsheet still projects to `$WORKSPACE/targets.csv`, which is passed explicitly to the core. `state/` is internal state and should not be edited manually.
 
 ### Generated files
 
@@ -120,16 +120,16 @@ The workspace contains user-facing reports and internal state. The target CSV is
 
 - selected target CSV: the source of truth for monitored targets in the core workflow. The agent may create or edit the selected file when the user changes monitoring configuration. Composite integrations may generate a CSV from an external authoritative source.
 - `reports/<run-id>.md`: the user-facing output. One report is created per `check` run only when at least one material change is finalized. The run ID has the form `YYYYMMDDTHHMMSSZ-xxxxxxxx`. Material targets from the same run are merged into this file.
-- `.wsum/snapshots/<target-id>.txt`: the accepted normalized baseline for each target. A first observation creates it; later finalized observations replace it atomically, including non-material changes.
-- `.wsum/pending/<target-id>/candidate.txt`: the normalized changed candidate awaiting semantic review.
-- `.wsum/pending/<target-id>/state.json`: review transaction state linking the candidate to its run, revision, expected baseline hash, candidate hash, diff-truncation status, enabled-interest context, and bounded linked-document evidence or individual child errors. Interest metadata is normalized to exactly `name,publisher,category,keywords,criteria,priority,enabled`; text is trimmed, unspecified text is blank, priority is an integer or null, and enabled is Boolean. The complete serialized pending record is bounded by the existing 40 MiB transaction-backup ceiling, including JSON escaping and object overhead; interests have no separate 1 MiB serialized cap.
-- `evidence/<ingestion-id>/`: optional captured-evidence bundles (`metadata.json`, `parent.txt`, `diff.txt`, `links.json`, `committed.json`) written only by `finalize --archive-evidence` for material decisions. These are supported output artifacts outside `.wsum/`; consumers accept only digest-verified bundles with a receipt and never read internal pending files. Evidence is never pruned automatically, so surface its storage growth.
+- `state/snapshots/<target-id>.txt`: the accepted normalized baseline for each target. A first observation creates it; later finalized observations replace it atomically, including non-material changes.
+- `state/pending/<target-id>/candidate.txt`: the normalized changed candidate awaiting semantic review.
+- `state/pending/<target-id>/state.json`: review transaction state linking the candidate to its run, revision, expected baseline hash, candidate hash, diff-truncation status, enabled-interest context, and bounded linked-document evidence or individual child errors. Interest metadata is normalized to exactly `name,publisher,category,keywords,criteria,priority,enabled`; text is trimmed, unspecified text is blank, priority is an integer or null, and enabled is Boolean. The complete serialized pending record is bounded by the existing 40 MiB transaction-backup ceiling, including JSON escaping and object overhead; interests have no separate 1 MiB serialized cap.
+- `evidence/<ingestion-id>/`: optional captured-evidence bundles (`metadata.json`, `parent.txt`, `diff.txt`, `links.json`, `committed.json`) written only by `finalize --archive-evidence` for material decisions. These are supported output artifacts outside `state/`; consumers accept only digest-verified bundles with a receipt and never read internal pending files. Evidence is never pruned automatically, so surface its storage growth.
 
-Each `.wsum/pending/<target-id>/` directory is one uncommitted review transaction. It survives the `check` → review → `finalize` boundary and is removed as a directory after successful finalization. `.wsum/snapshots/` is the only internal state that persists across completed transactions.
+Each `state/pending/<target-id>/` directory is one uncommitted review transaction. It survives the `check` → review → `finalize` boundary and is removed as a directory after successful finalization. `state/snapshots/` is the only internal state that persists across completed transactions.
 
-Reviews created with the previous `.wsum/pending/<target-id>.json` and `.wsum/candidates/<target-id>.txt` layout remain finalizable after an upgrade; new transactions use the grouped directory layout.
+Reviews created with the previous `state/pending/<target-id>.json` and `state/candidates/<target-id>.txt` layout remain finalizable after an upgrade; new transactions use the grouped directory layout.
 
-The helper may briefly create hidden `*.tmp` files next to the report, snapshot, or pending-state file being replaced. Keeping these temporary files in the destination directory preserves same-filesystem atomic replacement; they are not collected under a shared `.wsum/tmp/`.
+The helper may briefly create hidden `*.tmp` files next to the report, snapshot, or pending-state file being replaced. Keeping these temporary files in the destination directory preserves same-filesystem atomic replacement; they are not collected under a shared `state/tmp/`.
 
 ## Agent workflow
 
@@ -187,4 +187,4 @@ Browser-rendered targets are outside the CSV workspace workflow. Do not auto-esc
 
 ## Repository boundary
 
-Do not commit operational target CSV files (regardless of filename), fetched production content, snapshots, reports, `.wsum/`, credentials, browser profiles, or other deployment data. The example CSV is tracked documentation data.
+Do not commit operational target CSV files (regardless of filename), fetched production content, snapshots, reports, `state/`, credentials, browser profiles, or other deployment data. The example CSV is tracked documentation data.

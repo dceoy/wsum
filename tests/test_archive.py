@@ -28,7 +28,7 @@ _DELETE = object()
 class _Review:
     def __init__(self, root: Path, target_id: str, revision: str) -> None:
         self.root = root
-        self.state = root / ".wsum"
+        self.state = root / "state"
         self.target_id = target_id
         self.revision = revision
         self.ingestion_id = workspace._ingestion_id(target_id, revision)
@@ -81,7 +81,7 @@ def _review(
     _targets(root)
     target = workspace.load_targets(root / "targets.csv")[0]
     target_id = str(target["target_id"])
-    snapshots = root / ".wsum" / "snapshots"
+    snapshots = root / "state" / "snapshots"
     snapshots.mkdir(parents=True)
     (snapshots / f"{target_id}.txt").write_text("old\n", encoding="utf-8")
     result: dict[str, object] = {
@@ -94,7 +94,7 @@ def _review(
     if link_review is not None:
         result["link_review"] = link_review
     review = workspace._handle_monitor_result(
-        root / ".wsum", target, result, _RUN_ID, candidate_data=b"new\n"
+        root / "state", target, result, _RUN_ID, candidate_data=b"new\n"
     )
     return _Review(root, target_id, str(review["revision"]))
 
@@ -1154,7 +1154,7 @@ def _legacy_review(root: Path) -> _Review:
     # A pending record with only the base fields has no stored diff.
     _targets(root)
     target_id = str(workspace.load_targets(root / "targets.csv")[0]["target_id"])
-    state = root / ".wsum"
+    state = root / "state"
     snapshots = state / "snapshots"
     snapshots.mkdir(parents=True)
     (snapshots / f"{target_id}.txt").write_text("old\n", encoding="utf-8")

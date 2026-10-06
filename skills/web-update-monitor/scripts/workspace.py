@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 
 import monitor
 
-_STATE_DIR = ".wsum"
+_STATE_DIR = "state"
 _PENDING_RECOVERY_DIR = ".pending-recovery"
 _MAX_CSV_BYTES = 1024 * 1024
 _MAX_SNAPSHOT_BYTES = 40 * 1024 * 1024

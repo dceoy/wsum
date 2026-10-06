@@ -32,7 +32,7 @@ Compilation is asynchronous and happens after the core's evidence commit. A comp
 workspace/
   reports/
   evidence/          core-owned immutable source record
-  .wsum/             core-internal state (never read it)
+  state/             core-internal state (never read it)
   knowledge/
     SCHEMA.md        human-readable editorial rules
     index.md         page index maintained by drafts
