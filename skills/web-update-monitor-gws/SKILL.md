@@ -16,7 +16,7 @@ Keep Google integration outside the core monitor. The core `web-update-monitor` 
 ```mermaid
 flowchart LR
     GS["Google Sheet"] -->|project| CSV["targets.csv"]
-    DS["Google Drive state folder<br/>state-YYYYMMDDTHHMMSSZ.zip × 2"] <-->|restore / persist| BUNDLE["state bundle"]
+    DS["Google Drive state folder<br/>state-YYYYMMDDTHHMMSSZ.zip × 3"] <-->|restore / persist| BUNDLE["state bundle"]
     BUNDLE --> STATE[".wsum/"]
     BUNDLE --> OUT[".wsum-google-workspace/outbox/"]
     CSV --> CORE["web-update-monitor"]
@@ -59,7 +59,7 @@ state/
 └── state-20261006T093000Z.zip
 ```
 
-Use the UTC commit time in the filename as `state-YYYYMMDDTHHMMSSZ.zip`. Do not maintain a separate `current.json` pointer and do not create other state-index files. A logical monitor must not commit more than one generation in the same second; if a filename collision exists, stop instead of overwriting it.
+Use the UTC generation time in the filename as `state-YYYYMMDDTHHMMSSZ.zip`. Do not maintain a separate `current.json` pointer or other state-index files. A logical monitor must not commit more than one generation in the same second. Never overwrite an existing archive.
 
 Each ZIP is a self-contained state generation. Include only regular UTF-8 files under these roots:
 
@@ -72,7 +72,9 @@ Place a UTF-8 `manifest.json` at the ZIP root. It must contain a schema version,
 
 ### Restore
 
-List only files whose names exactly match `state-YYYYMMDDTHHMMSSZ.zip`, parse their timestamps strictly, and select the newest archive by the timestamp embedded in its filename. Do not use Drive modified time, listing order, or any other metadata to choose the active state.
+List the entire dedicated state folder. If no timestamped archive exists, initialize a new monitor only when the folder is empty. If any other file exists—including individually mirrored `.wsum/` or outbox files from the prior text-file layout—fail closed without creating or deleting anything. Report that legacy state needs explicit migration or configure a new, empty state folder; never mistake it for an empty monitor.
+
+When timestamped archives exist, consider only files whose names exactly match `state-YYYYMMDDTHHMMSSZ.zip`, parse their timestamps strictly, and select the newest archive by its filename timestamp. Google Drive allows duplicate names, so require exactly one Drive file ID for each timestamp; duplicate files for one generation fail closed. Download the selected archive by its exact file ID. Do not use Drive modified time or listing order to choose the active state.
 
 Before installing any archive content:
 
@@ -89,19 +91,22 @@ If the newest archive fails validation, fail closed and report the older retaine
 
 Persist after every state-changing operation before relying on the local session.
 
-1. List and strictly parse the existing timestamped state archives. If more than three exist because of an interrupted cleanup or legacy operation, do not delete anything yet; identify their chronological order.
-2. Build the complete next-state ZIP locally, including `manifest.json`, using the current UTC second as its generation timestamp and filename.
+1. List and strictly parse all timestamped state archives, requiring one Drive file ID per filename. If more than three exist after interrupted cleanup, retain them until a new archive verifies.
+2. Build the complete next-state ZIP locally, including `manifest.json`, using the current UTC second as its generation timestamp and filename. If that filename already exists, stop instead of overwriting it.
 3. Compute the ZIP byte length and SHA-256.
-4. Upload the new archive under its final timestamped filename without modifying or deleting any existing archive.
-5. Read the uploaded archive back, verify its byte length and SHA-256, and validate its manifest and entries exactly as for restore.
+4. Upload the new archive under its final timestamped filename without modifying or deleting existing archives, and capture the returned Drive file ID.
+5. Read the uploaded archive back by that exact ID, verify its byte length and SHA-256, and validate its manifest and entries exactly as for restore.
 6. Treat the verified new archive as the committed latest generation.
-7. Delete the oldest timestamped archives until exactly the three newest committed archives remain. Never delete the immediately previous generation before the new one has passed read-back verification.
+7. Delete the oldest archives by their exact Drive file IDs until exactly the three newest committed generations remain. Never delete the immediately previous generation before the new one has passed read-back verification.
+
+If the upload result is ambiguous, query the exact generated filename. Continue only when exactly one file exists and its downloaded bytes match the locally computed length and SHA-256 and pass full archive validation. If none or multiple exist, or the digest differs, stop without cleanup; do not issue a second create for the same filename.
 
 A failure before step 6 leaves all previously committed generations untouched. A failure during step 7 may temporarily leave more than three archives; the next successful persistence run must perform the same oldest-first cleanup after committing its new archive. Cleanup failure must not invalidate the newly verified latest state.
 
 The newest filename is therefore the active generation; the two older retained archives are rollback generations. Do not overwrite an existing archive and do not infer recency from Drive metadata.
 
 Do not overlap invocations using the same state key. Timestamp ordering and retention provide crash recovery, not concurrent-writer coordination.
+
 ## Resolve the core skill dependency
 
 Resolve the installed `web-update-monitor` skill through the runtime's skill discovery mechanism before invoking its helper. Record the resolved absolute skill root as `WEB_UPDATE_MONITOR_SKILL_DIR`.
