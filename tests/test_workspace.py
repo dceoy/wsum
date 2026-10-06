@@ -28,8 +28,7 @@ _RUN_ID = "20261001T000000Z-deadbeef"
 
 
 def _write_targets(path: Path, rows: str) -> None:
-    path.write_text(f"name,url,watch_focus,enabled\n{rows}", encoding="utf-8")
-
+    path.write_text(f"name,url,criteria,enabled\n{rows}", encoding="utf-8")
 
 def _changed_result(
     current: str = "new\n", previous: str = "old\n"
@@ -43,33 +42,20 @@ def _changed_result(
     }
 
 
-def _transaction_paths(state: Path, target_id: str, layout: str) -> tuple[Path, Path]:
-    if layout == "grouped":
-        directory = state / "pending" / target_id
-        return directory / "state.json", directory / "candidate.txt"
-    if layout == "legacy":
-        return (
-            state / "pending" / f"{target_id}.json",
-            state / "candidates" / f"{target_id}.txt",
-        )
-    raise AssertionError
-
-
 def _write_review_transaction(
     state: Path,
-    layout: str,
     *,
     target_id: str = "example",
     revision: str = "a" * 32,
     run_id: str = _RUN_ID,
-    include_run_id: bool = True,
     diff_truncated: bool = False,
     baseline: str = "old\n",
     candidate: str = "new\n",
 ) -> tuple[Path, Path, Path]:
-    metadata, candidate_path = _transaction_paths(state, target_id, layout)
-    metadata.parent.mkdir(parents=True, exist_ok=True)
-    candidate_path.parent.mkdir(parents=True, exist_ok=True)
+    directory = state / "pending" / target_id
+    metadata = directory / "state.json"
+    candidate_path = directory / "candidate.txt"
+    directory.mkdir(parents=True, exist_ok=True)
     candidate_path.write_text(candidate, encoding="utf-8")
 
     snapshots = state / "snapshots"
@@ -79,16 +65,28 @@ def _write_review_transaction(
 
     payload: dict[str, object] = {
         "target_id": target_id,
+        "run_id": run_id,
         "revision": revision,
         "expected_sha256": hashlib.sha256(baseline.encode()).hexdigest(),
         "candidate_sha256": hashlib.sha256(candidate.encode()).hexdigest(),
         "diff_truncated": diff_truncated,
+        "name": "Example",
+        "url": "https://example.com/",
+        "diff": "--- previous\n+++ current\n-old\n+new",
+        "interests": [
+            {
+                "name": "Example",
+                "publisher": "",
+                "category": "",
+                "keywords": "",
+                "criteria": "pricing",
+                "priority": None,
+                "enabled": True,
+            }
+        ],
     }
-    if include_run_id:
-        payload["run_id"] = run_id
     metadata.write_text(json.dumps(payload), encoding="utf-8")
     return metadata, candidate_path, snapshot
-
 
 def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) -> None:
     _write_targets(
@@ -100,7 +98,7 @@ def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) ->
     targets = load_targets(tmp_path / "targets.csv")
 
     assert [target["action"] for target in targets] == ["monitor", "skip_disabled"]
-    assert targets[0]["watch_focus"] == "pricing"
+    assert cast("list[dict[str, object]]", targets[0]["interests"])[0]["criteria"] == "pricing"
     assert "fetch_mode" not in targets[0]
     assert str(targets[0]["target_id"]).startswith("example-com-")
     first_id = targets[0]["target_id"]
@@ -111,26 +109,17 @@ def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) ->
     )
     assert load_targets(tmp_path / "targets.csv")[0]["target_id"] == first_id
 
-
 @pytest.mark.parametrize(
     ("header", "rows", "message"),
     [
-        ("name,watch_focus\n", "Example,pricing\n", "requires name and url"),
-        ("name,url,extra\n", "Example,https://example.com/,x\n", "unsupported"),
-        (
-            "name,url,watch_focus,enabled\n",
-            "Example,https://example.com/,,yes\n",
-            "enabled must be true or false",
-        ),
-        (
-            "name,url,watch_focus,enabled\n",
-            ",https://example.com/,,true\n",
-            "name must be non-empty",
-        ),
+        ("name,criteria\n", "Example,pricing\n", "requires name and url"),
+        ("name,url,watch_focus\n", "Example,https://example.com/,pricing\n", "unsupported"),
+        ("name,url,criteria,enabled\n", "Example,https://example.com/,,yes\n", "enabled must be true or false"),
+        ("name,url,criteria,enabled\n", ",https://example.com/,,true\n", "name must be non-empty"),
     ],
     ids=[
         "missing-required-column",
-        "unsupported-column",
+        "removed-watch-focus",
         "invalid-enabled",
         "empty-name",
     ],
@@ -142,7 +131,6 @@ def test_load_targets_rejects_invalid_csv(
 
     with pytest.raises(WorkspaceError, match=message):
         load_targets(tmp_path / "targets.csv")
-
 
 @pytest.mark.parametrize(
     "url",
@@ -198,54 +186,40 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
         "target_id": "example",
         "name": "Example",
         "url": "https://example.com/",
-        "watch_focus": "pricing",
+        "interests": [
+            {
+                "name": "Example",
+                "publisher": "",
+                "category": "",
+                "keywords": "",
+                "criteria": "pricing",
+                "priority": None,
+                "enabled": True,
+            }
+        ],
     }
 
-    result = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
+    result = workspace._handle_monitor_result(
         state, target, _changed_result(), _RUN_ID
     )
 
     assert result["action"] == "review"
     assert len(str(result["revision"])) == 32
-    assert result["watch_focus"] == "pricing"
+    assert cast("list[dict[str, object]]", result["interests"])[0]["criteria"] == "pricing"
     pending = json.loads((state / "pending" / "example" / "state.json").read_text())
     assert pending["target_id"] == "example"
     assert pending["run_id"] == _RUN_ID
     assert pending["revision"] == result["revision"]
     assert pending["name"] == "Example"
     assert pending["url"] == "https://example.com/"
-    assert pending["watch_focus"] == "pricing"
+    assert pending["interests"] == result["interests"]
     assert pending["diff"] == _changed_result()["diff"]
     assert candidate.exists()
 
-
-@pytest.mark.parametrize(
-    ("layout", "include_run_id"),
-    [
-        ("grouped", True),
-        ("grouped", False),
-        ("legacy", True),
-        ("legacy", False),
-    ],
-    ids=[
-        "grouped-six-field",
-        "grouped-five-field",
-        "legacy-six-field",
-        "legacy-five-field",
-    ],
-)
-def test_finalize_material_review_promotes_and_writes_report(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    layout: str,
-    include_run_id: bool,
-) -> None:
+def test_finalize_material_review_promotes_and_writes_report(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(
-        state, layout, include_run_id=include_run_id
-    )
-    monkeypatch.setattr(workspace, "_new_run_id", lambda: _RUN_ID)
+    metadata, candidate, snapshot = _write_review_transaction(state)
 
     result = finalize(
         tmp_path,
@@ -267,15 +241,11 @@ def test_finalize_material_review_promotes_and_writes_report(
     assert not metadata.exists()
     assert not (state / "pending" / "example").exists()
 
-
-@pytest.mark.parametrize("layout", ["grouped", "legacy"], ids=["grouped", "legacy"])
-def test_finalize_non_material_truncated_diff_stops(
-    tmp_path: Path, layout: str
-) -> None:
+def test_finalize_non_material_truncated_diff_stops(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(
-        state, layout, diff_truncated=True
+        state, diff_truncated=True
     )
 
     result = finalize(
@@ -288,14 +258,10 @@ def test_finalize_non_material_truncated_diff_stops(
     assert candidate.exists()
     assert snapshot.read_text() == "old\n"
 
-
-@pytest.mark.parametrize("layout", ["grouped", "legacy"], ids=["grouped", "legacy"])
-def test_finalize_non_material_review_promotes_without_report(
-    tmp_path: Path, layout: str
-) -> None:
+def test_finalize_non_material_review_promotes_without_report(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, layout)
+    metadata, candidate, snapshot = _write_review_transaction(state)
 
     result = finalize(
         tmp_path,
@@ -308,31 +274,13 @@ def test_finalize_non_material_review_promotes_without_report(
     assert not metadata.exists()
     assert not candidate.exists()
 
-
-@pytest.mark.parametrize(
-    ("layout", "failure"),
-    [
-        ("grouped", "partial-delete"),
-        ("legacy", "partial-delete"),
-        ("grouped", "parent-fsync"),
-        ("legacy", "parent-fsync"),
-    ],
-    ids=[
-        "grouped-partial-delete",
-        "legacy-partial-delete",
-        "grouped-parent-fsync",
-        "legacy-parent-fsync",
-    ],
-)
+@pytest.mark.parametrize("failure", ["partial-delete", "parent-fsync"])
 def test_finalize_cleanup_failure_is_retryable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    layout: str,
-    failure: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, layout)
+    metadata, candidate, snapshot = _write_review_transaction(state)
     decision = {
         "target_id": "example",
         "revision": "a" * 32,
@@ -341,7 +289,7 @@ def test_finalize_cleanup_failure_is_retryable(
     }
     failed = False
 
-    if failure == "partial-delete" and layout == "grouped":
+    if failure == "partial-delete":
         original_rmtree = workspace.shutil.rmtree
 
         def partially_remove_group(path: Path) -> None:
@@ -353,19 +301,8 @@ def test_finalize_cleanup_failure_is_retryable(
             original_rmtree(path)
 
         monkeypatch.setattr(workspace.shutil, "rmtree", partially_remove_group)
-    elif failure == "partial-delete":
-        original_unlink = Path.unlink
-
-        def partially_remove_legacy(path: Path, *, missing_ok: bool = False) -> None:
-            nonlocal failed
-            original_unlink(path, missing_ok=missing_ok)
-            if path == candidate and not failed:
-                failed = True
-                raise PermissionError
-
-        monkeypatch.setattr(Path, "unlink", partially_remove_legacy)
     else:
-        original_fsync = workspace._fsync_directory  # pyright: ignore[reportPrivateUsage]
+        original_fsync = workspace._fsync_directory
         pending_dir = state / "pending"
 
         def fail_pending_fsync(path: Path) -> None:
@@ -388,50 +325,57 @@ def test_finalize_cleanup_failure_is_retryable(
 
     result = finalize(tmp_path, decision)
 
-    assert result == {
-        "action": "finalized",
-        "target_id": "example",
-        "material": True,
-        "report_path": str(tmp_path / "output" / "report" / f"{_RUN_ID}.md"),
-    }
+    assert result["action"] == "finalized"
     assert not metadata.exists()
     assert not candidate.exists()
     assert not (state / "pending" / "example").exists()
     assert not (state / "recovery" / "example.json").exists()
 
-
 def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
-    candidate_dir = state / "pending" / "example"
     snapshot_dir = state / "snapshots"
-    candidate_dir.mkdir(parents=True)
-    snapshot_dir.mkdir()
-    candidate = candidate_dir / "candidate.txt"
+    snapshot_dir.mkdir(parents=True)
     (snapshot_dir / "example.txt").write_text("old\n")
     reports = tmp_path / "output" / "report"
     reports.mkdir(parents=True)
     report = reports / f"{_RUN_ID}.md"
-    original_report = (
-        f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\ncurrent report\n"
-    )
+    original_report = f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\ncurrent report\n"
     report.write_text(original_report)
     target = {
         "target_id": "example",
         "name": "Example",
         "url": "https://example.com/",
-        "watch_focus": "pricing",
+        "interests": [
+            {
+                "name": "Example",
+                "publisher": "",
+                "category": "",
+                "keywords": "",
+                "criteria": "pricing",
+                "priority": None,
+                "enabled": True,
+            }
+        ],
     }
 
-    candidate.write_text("first\n")
-    first = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
-        state, target, _changed_result(current="first\n"), _RUN_ID
+    first = workspace._handle_monitor_result(
+        state,
+        target,
+        _changed_result(current="first\n"),
+        _RUN_ID,
+        candidate_data=b"first\n",
     )
     first_revision = str(first["revision"])
-    candidate.write_text("second\n")
-    second = workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
-        state, target, _changed_result(current="second\n"), _RUN_ID
+    second = workspace._handle_monitor_result(
+        state,
+        target,
+        _changed_result(current="second\n"),
+        _RUN_ID,
+        candidate_data=b"second\n",
     )
-    pending = (state / "pending" / "example" / "state.json").read_bytes()
+    pending_path = state / "pending" / "example" / "state.json"
+    candidate_path = state / "pending" / "example" / "candidate.txt"
+    pending = pending_path.read_bytes()
 
     with pytest.raises(WorkspaceError, match="revision"):
         finalize(
@@ -446,24 +390,20 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
 
     assert (snapshot_dir / "example.txt").read_text() == "old\n"
     assert report.read_text() == original_report
-    assert candidate.read_text() == "second\n"
-    assert (state / "pending" / "example" / "state.json").read_bytes() == pending
+    assert candidate_path.read_text() == "second\n"
+    assert pending_path.read_bytes() == pending
     assert str(second["revision"]) != first_revision
 
-
-@pytest.mark.parametrize("layout", ["grouped", "legacy"], ids=["grouped", "legacy"])
 def test_finalize_material_snapshot_conflict_does_not_write_report(
-    tmp_path: Path, layout: str
+    tmp_path: Path,
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, layout)
+    metadata, candidate, snapshot = _write_review_transaction(state)
     reports = tmp_path / "output" / "report"
     reports.mkdir(parents=True)
     report = reports / f"{_RUN_ID}.md"
-    original_report = (
-        f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\nprevious report\n"
-    )
+    original_report = f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\nprevious report\n"
     report.write_text(original_report)
     snapshot.write_text("external\n")
 
@@ -483,76 +423,23 @@ def test_finalize_material_snapshot_conflict_does_not_write_report(
     assert candidate.read_text() == "new\n"
     assert metadata.exists()
 
-
-@pytest.mark.parametrize(
-    "include_run_id", [True, False], ids=["six-field", "five-field"]
-)
-def test_finalize_rejects_legacy_revision_without_clearing_transaction(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, include_run_id: bool
-) -> None:
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(
-        state, "legacy", include_run_id=include_run_id
-    )
-    monkeypatch.setattr(workspace, "_new_run_id", lambda: _RUN_ID)
-
-    with pytest.raises(WorkspaceError, match="revision"):
-        finalize(
-            tmp_path,
-            {
-                "target_id": "example",
-                "revision": "b" * 32,
-                "material": True,
-                "report": "## Stale\n",
-            },
-        )
-
-    persisted = json.loads(metadata.read_text(encoding="utf-8"))
-    assert persisted["run_id"] == _RUN_ID
-    assert snapshot.read_text() == "old\n"
-    assert candidate.read_text() == "new\n"
-
-
-@pytest.mark.parametrize(
-    ("layout", "include_run_id"),
-    [
-        ("grouped", True),
-        ("grouped", False),
-        ("legacy", True),
-        ("legacy", False),
-    ],
-    ids=[
-        "grouped-six-field",
-        "grouped-five-field",
-        "legacy-six-field",
-        "legacy-five-field",
-    ],
-)
 def test_finalize_report_failure_can_be_retried(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    layout: str,
-    include_run_id: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(
-        state, layout, include_run_id=include_run_id
-    )
-    monkeypatch.setattr(workspace, "_new_run_id", lambda: _RUN_ID)
-    write_report = workspace._write_report  # pyright: ignore[reportPrivateUsage]
+    metadata, candidate, snapshot = _write_review_transaction(state)
+    write_report = workspace._write_report
     write_attempts = 0
 
     def fail_once(root: Path, run_id: str, target_id: str, report: str) -> Path:
         nonlocal write_attempts
         write_attempts += 1
         if write_attempts == 1:
-            message = "cannot write report"
-            raise WorkspaceError(message)
+            raise WorkspaceError("cannot write report")
         return write_report(root, run_id, target_id, report)
 
-    monkeypatch.setattr(workspace, "_write_report", fail_once)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(workspace, "_write_report", fail_once)
     decision = {
         "target_id": "example",
         "revision": "a" * 32,
@@ -566,322 +453,16 @@ def test_finalize_report_failure_can_be_retried(
     assert snapshot.read_text() == "new\n"
     assert metadata.exists()
     assert candidate.exists()
-    assert json.loads(metadata.read_text(encoding="utf-8"))["run_id"] == _RUN_ID
     assert not (tmp_path / "output" / "report").exists()
 
     result = finalize(tmp_path, decision)
 
     report_path = tmp_path / "output" / "report" / f"{_RUN_ID}.md"
-    report_content = report_path.read_text(encoding="utf-8")
     assert result["report_path"] == str(report_path)
     assert write_attempts == 2
-    assert report_content.count("<!-- wsum:target example:start -->") == 1
+    assert report_path.read_text().count("<!-- wsum:target example:start -->") == 1
     assert not metadata.exists()
     assert not candidate.exists()
-
-
-def test_finalize_prefers_grouped_transaction_and_cleans_matching_legacy_files(
-    tmp_path: Path,
-) -> None:
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    grouped_metadata, grouped_candidate, snapshot = _write_review_transaction(
-        state, "grouped", candidate="grouped\n"
-    )
-    legacy_metadata, legacy_candidate, _ = _write_review_transaction(
-        state, "legacy", revision="b" * 32, candidate="legacy\n"
-    )
-    unrelated_metadata, unrelated_candidate, unrelated_snapshot = (
-        _write_review_transaction(
-            state,
-            "legacy",
-            target_id="other",
-            revision="c" * 32,
-            baseline="previous other\n",
-            candidate="next other\n",
-        )
-    )
-
-    result = finalize(
-        tmp_path,
-        {
-            "target_id": "example",
-            "revision": "a" * 32,
-            "material": True,
-            "report": "## Example\n\nGrouped state won.\n",
-        },
-    )
-
-    assert result["action"] == "finalized"
-    assert snapshot.read_text() == "grouped\n"
-    assert unrelated_snapshot.read_text() == "previous other\n"
-    assert not grouped_metadata.exists()
-    assert not grouped_candidate.exists()
-    assert not legacy_metadata.exists()
-    assert not legacy_candidate.exists()
-    assert unrelated_metadata.exists()
-    assert unrelated_candidate.exists()
-
-
-def test_cleanup_failure_keeps_grouped_transaction_authoritative(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    grouped_metadata, grouped_candidate, _ = _write_review_transaction(
-        state, "grouped", candidate="grouped\n"
-    )
-    legacy_metadata, legacy_candidate, _ = _write_review_transaction(
-        state, "legacy", revision="b" * 32, candidate="legacy\n"
-    )
-    original_unlink = Path.unlink
-
-    def fail_legacy_candidate_unlink(path: Path, *, missing_ok: bool = False) -> None:
-        if path == legacy_candidate:
-            raise PermissionError
-        original_unlink(path, missing_ok=missing_ok)
-
-    monkeypatch.setattr(Path, "unlink", fail_legacy_candidate_unlink)
-
-    with pytest.raises(WorkspaceError, match="cannot remove pending transaction"):
-        workspace._remove_pending(  # pyright: ignore[reportPrivateUsage]
-            state, "example"
-        )
-
-    assert grouped_metadata.exists()
-    assert grouped_candidate.exists()
-    assert legacy_metadata.exists()
-    assert legacy_candidate.exists()
-    pending = workspace._read_pending(  # pyright: ignore[reportPrivateUsage]
-        state, "example"
-    )
-    assert pending["revision"] == "a" * 32
-
-    monkeypatch.setattr(Path, "unlink", original_unlink)
-    workspace._remove_pending(  # pyright: ignore[reportPrivateUsage]
-        state, "example"
-    )
-    assert not grouped_metadata.exists()
-    assert not grouped_candidate.exists()
-    assert not legacy_metadata.exists()
-    assert not legacy_candidate.exists()
-
-
-def _grouped_candidate_without_metadata(
-    state: Path, legacy_metadata: Path, legacy_candidate: Path, tmp_path: Path
-) -> Path:
-    del legacy_metadata, tmp_path
-    grouped = state / "pending" / "example"
-    grouped.mkdir()
-    candidate = grouped / "candidate.txt"
-    candidate.write_bytes(legacy_candidate.read_bytes())
-    return legacy_candidate
-
-
-def _grouped_metadata_without_candidate(
-    state: Path, legacy_metadata: Path, legacy_candidate: Path, tmp_path: Path
-) -> Path:
-    del tmp_path
-    grouped = state / "pending" / "example"
-    grouped.mkdir()
-    (grouped / "state.json").write_bytes(legacy_metadata.read_bytes())
-    return legacy_candidate
-
-
-def _symlink_grouped_directory(
-    state: Path, legacy_metadata: Path, legacy_candidate: Path, tmp_path: Path
-) -> Path:
-    del legacy_metadata, legacy_candidate
-    outside = tmp_path / "outside-grouped-transaction"
-    outside.mkdir()
-    marker = outside / "untouched.txt"
-    marker.write_text("outside\n", encoding="utf-8")
-    (state / "pending" / "example").symlink_to(outside, target_is_directory=True)
-    return marker
-
-
-@pytest.mark.parametrize(
-    ("grouped_setup", "message"),
-    [
-        (
-            _grouped_candidate_without_metadata,
-            "no valid pending decision",
-        ),
-        (_grouped_metadata_without_candidate, "cannot stat candidate"),
-        (_symlink_grouped_directory, "non-symlink directory"),
-    ],
-    ids=["missing-metadata", "missing-candidate", "symlinked-directory"],
-)
-def test_finalize_does_not_mix_grouped_and_legacy_paths(
-    tmp_path: Path,
-    grouped_setup: Callable[[Path, Path, Path, Path], Path],
-    message: str,
-) -> None:
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    legacy_metadata, legacy_candidate, snapshot = _write_review_transaction(
-        state, "legacy"
-    )
-    marker = grouped_setup(state, legacy_metadata, legacy_candidate, tmp_path)
-    marker_data = marker.read_bytes()
-
-    with pytest.raises(WorkspaceError, match=message):
-        finalize(
-            tmp_path,
-            {
-                "target_id": "example",
-                "revision": "a" * 32,
-                "material": True,
-                "report": "## Example\n",
-            },
-        )
-
-    assert marker.read_bytes() == marker_data
-    assert snapshot.read_text() == "old\n"
-    assert legacy_metadata.exists()
-    assert legacy_candidate.exists()
-
-
-def _replace_with_legacy_symlink(path: Path) -> Path:
-    outside = path.parents[2] / f"outside-{path.name}"
-    outside.write_bytes(path.read_bytes())
-    path.unlink()
-    path.symlink_to(outside)
-    return outside
-
-
-def _replace_with_legacy_directory(path: Path) -> None:
-    path.unlink()
-    path.mkdir()
-
-
-def _replace_with_legacy_fifo(path: Path) -> None:
-    path.unlink()
-    os.mkfifo(path)
-
-
-@pytest.mark.parametrize(
-    "make_unsafe",
-    [
-        _replace_with_legacy_symlink,
-        _replace_with_legacy_directory,
-        _replace_with_legacy_fifo,
-    ],
-    ids=["symlink", "directory", "fifo"],
-)
-def test_finalize_rejects_non_regular_legacy_metadata(
-    tmp_path: Path, make_unsafe: Callable[[Path], Path | None]
-) -> None:
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
-    outside = make_unsafe(metadata)
-    outside_data = None if outside is None else outside.read_bytes()
-
-    with pytest.raises(WorkspaceError, match="regular non-symlink file"):
-        finalize(
-            tmp_path,
-            {
-                "target_id": "example",
-                "revision": "a" * 32,
-                "material": True,
-                "report": "## Example\n",
-            },
-        )
-
-    if outside is not None:
-        assert outside.read_bytes() == outside_data
-    assert candidate.read_text(encoding="utf-8") == "new\n"
-    assert snapshot.read_text(encoding="utf-8") == "old\n"
-
-
-@pytest.mark.parametrize(
-    "make_unsafe",
-    [
-        _replace_with_legacy_symlink,
-        _replace_with_legacy_directory,
-        _replace_with_legacy_fifo,
-    ],
-    ids=["symlink", "directory", "fifo"],
-)
-def test_finalize_rejects_non_regular_legacy_candidate(
-    tmp_path: Path, make_unsafe: Callable[[Path], Path | None]
-) -> None:
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
-    outside = make_unsafe(candidate)
-
-    with pytest.raises(WorkspaceError, match="regular non-symlink file"):
-        finalize(
-            tmp_path,
-            {
-                "target_id": "example",
-                "revision": "a" * 32,
-                "material": True,
-                "report": "## Example\n",
-            },
-        )
-
-    if outside is not None:
-        assert outside.read_text(encoding="utf-8") == "new\n"
-    assert metadata.exists()
-    assert snapshot.read_text(encoding="utf-8") == "old\n"
-
-
-def test_finalize_rejects_legacy_candidate_hash_mismatch(tmp_path: Path) -> None:
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
-    candidate.write_text("tampered\n", encoding="utf-8")
-
-    with pytest.raises(WorkspaceError, match="candidate_sha256 does not match"):
-        finalize(
-            tmp_path,
-            {
-                "target_id": "example",
-                "revision": "a" * 32,
-                "material": True,
-                "report": "## Example\n",
-            },
-        )
-
-    assert metadata.exists()
-    assert candidate.read_text(encoding="utf-8") == "tampered\n"
-    assert snapshot.read_text(encoding="utf-8") == "old\n"
-
-
-def test_finalize_rejects_symlinked_legacy_candidate_directory(
-    tmp_path: Path,
-) -> None:
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
-    candidates = state / "candidates"
-    candidate.unlink()
-    candidates.rmdir()
-    outside = tmp_path / "outside-candidates"
-    outside.mkdir()
-    outside_candidate = outside / "example.txt"
-    outside_candidate.write_text("outside\n", encoding="utf-8")
-    candidates.symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(WorkspaceError, match="non-symlink directory"):
-        finalize(
-            tmp_path,
-            {
-                "target_id": "example",
-                "revision": "a" * 32,
-                "material": True,
-                "report": "## Example\n",
-            },
-        )
-
-    assert outside_candidate.read_text(encoding="utf-8") == "outside\n"
-    assert metadata.exists()
-    assert candidates.is_symlink()
-    assert snapshot.read_text(encoding="utf-8") == "old\n"
-
 
 def test_check_batches_targets_and_contains_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1066,7 +647,7 @@ def test_monitor_update_failure_keeps_previous_review_finalizable(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
+    metadata, candidate, snapshot = _write_review_transaction(state)
     target = {
         "target_id": "example",
         "name": "Example",
@@ -1127,7 +708,7 @@ def test_staging_cleanup_failure_does_not_commit_monitor_result(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
+    metadata, candidate, snapshot = _write_review_transaction(state)
     original_metadata = metadata.read_bytes()
     cleanup_error = "injected staging cleanup failure"
     target = {
@@ -1178,7 +759,7 @@ def test_failed_commit_marker_keeps_undo_available_for_recovery(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, _ = _write_review_transaction(state, "grouped")
+    metadata, candidate, _ = _write_review_transaction(state)
     recovery_dir = state / "recovery"
     commit_marker = recovery_dir / "example.json.commit"
     original_fsync = workspace._fsync_directory  # pyright: ignore[reportPrivateUsage]
@@ -1275,7 +856,7 @@ def test_finalize_resolves_ambiguous_commit_by_requested_revision(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    _, _, snapshot = _write_review_transaction(state, "grouped")
+    _, _, snapshot = _write_review_transaction(state)
     _leave_ambiguous_replacement(state, monkeypatch)
     assert (state / "recovery" / "example.json").exists()
     assert (state / "recovery" / "example.json.commit").exists()
@@ -1299,7 +880,7 @@ def test_finalize_unrelated_revision_preserves_ambiguous_replacement(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
+    metadata, candidate, snapshot = _write_review_transaction(state)
     _leave_ambiguous_replacement(state, monkeypatch)
     monkeypatch.undo()
     original_metadata = metadata.read_bytes()
@@ -1331,7 +912,7 @@ def test_finalize_rejects_symlinked_pending_ancestor_with_ambiguous_records(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    _write_review_transaction(state, "grouped")
+    _write_review_transaction(state)
     _leave_ambiguous_replacement(state, monkeypatch)
     monkeypatch.undo()
 
@@ -1361,7 +942,7 @@ def test_finalize_rejects_symlinked_pending_ancestor_with_ambiguous_records(
 def test_finalize_recovers_interrupted_pending_replacement(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
+    metadata, candidate, snapshot = _write_review_transaction(state)
     undo = workspace._capture_pending_replacement(  # pyright: ignore[reportPrivateUsage]
         state, "example"
     )
@@ -1443,7 +1024,7 @@ def test_finalize_rejects_decision_mismatch_for_pending_cleanup(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, _ = _write_review_transaction(state, "grouped")
+    metadata, candidate, _ = _write_review_transaction(state)
     decision = {
         "target_id": "example",
         "revision": "a" * 32,
@@ -1562,7 +1143,6 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
     assert full["revision"] == reviews[0]["revision"]
     assert full["name"] == "Example"
     assert full["url"] == "https://example.com/"
-    assert full["watch_focus"] == "pricing"
     assert full["diff"] == _changed_result()["diff"]
 
     _write_targets(
@@ -1595,7 +1175,6 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
     assert refreshed_full["run_id"] == _RUN_ID
     assert refreshed_full["name"] == "Renamed"
     assert refreshed_full["url"] == "https://example.com/"
-    assert refreshed_full["watch_focus"] == "security"
     assert refreshed_full["diff"] == _changed_result()["diff"]
 
 
@@ -1627,33 +1206,10 @@ def test_pending_reviews_recovers_partial_replacement_before_listing(
     )
 
 
-def test_pending_reviews_legacy_reconstructs_diff_and_context(tmp_path: Path) -> None:
-    _write_targets(
-        tmp_path / "targets.csv", "Example,https://example.com/,pricing,true\n"
-    )
-    target_id = str(load_targets(tmp_path / "targets.csv")[0]["target_id"])
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    _write_review_transaction(state, "legacy", target_id=target_id)
-
-    pending = workspace.pending_reviews(
-        tmp_path, targets=tmp_path / "targets.csv", target_id=target_id
-    )
-    review = cast("list[dict[str, object]]", pending["reviews"])[0]
-
-    assert review["run_id"] == _RUN_ID
-    assert review["target_id"] == target_id
-    assert review["name"] == "Example"
-    assert review["url"] == "https://example.com/"
-    assert review["watch_focus"] == "pricing"
-    assert "-old" in str(review["diff"])
-    assert "+new" in str(review["diff"])
-
-
 def test_discard_pending_clears_conflicted_review(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
+    metadata, candidate, snapshot = _write_review_transaction(state)
 
     result = workspace.discard_pending(tmp_path, "example")
 
@@ -1787,7 +1343,7 @@ def test_pending_reviews_grouped_without_targets_uses_persisted_context(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, _, _ = _write_review_transaction(state, "grouped")
+    metadata, _, _ = _write_review_transaction(state)
     payload = json.loads(metadata.read_text(encoding="utf-8"))
     payload.update({
         "name": "Persisted",
@@ -1809,89 +1365,10 @@ def test_pending_reviews_grouped_without_targets_uses_persisted_context(
     assert review["diff"] == "persisted diff"
 
 
-def test_pending_reviews_legacy_without_targets_uses_safe_fallback(
-    tmp_path: Path,
-) -> None:
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    _write_review_transaction(state, "legacy")
-
-    result = workspace.pending_reviews(tmp_path, target_id="example")
-    review = cast("list[dict[str, object]]", result["reviews"])[0]
-
-    assert review["name"] == "example"
-    assert not review["url"]
-    assert not review["watch_focus"]
-
-
-def test_legacy_review_context_falls_back_when_target_is_not_in_csv(
-    tmp_path: Path,
-) -> None:
-    _write_targets(
-        tmp_path / "targets.csv",
-        "Other,https://example.org/,,true\n",
-    )
-
-    assert workspace._saved_review_context(
-        "example",
-        {},
-    ) == {
-        "name": "example",
-        "url": "",
-        "watch_focus": "",
-        "interests": [_interest("example")],
-    }
-
-
-@pytest.mark.parametrize(
-    "fault",
-    ["candidate-hash", "missing-baseline", "baseline-hash", "invalid-diff"],
-)
-def test_legacy_pending_diff_rejects_invalid_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
-) -> None:
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
-    pending = json.loads(metadata.read_text(encoding="utf-8"))
-
-    if fault == "candidate-hash":
-        candidate.write_text("tampered\n", encoding="utf-8")
-        expected = "candidate_sha256"
-    elif fault == "missing-baseline":
-        snapshot.unlink()
-        expected = "baseline is missing"
-    elif fault == "baseline-hash":
-        snapshot.write_text("tampered\n", encoding="utf-8")
-        expected = "baseline does not match"
-    else:
-
-        def invalid_diff(
-            _current: str,
-            _previous: str | None,
-            *,
-            max_diff_lines: int,
-            max_diff_bytes: int,
-        ) -> dict[str, object]:
-            assert max_diff_lines > 0
-            assert max_diff_bytes > 0
-            return {"diff": 1}
-
-        monkeypatch.setattr(workspace.monitor, "compare_text", invalid_diff)
-        expected = "diff is invalid"
-
-    with pytest.raises(WorkspaceError, match=expected):
-        workspace._legacy_pending_diff(  # pyright: ignore[reportPrivateUsage]
-            state,
-            "example",
-            pending,
-        )
-
-
 def test_pending_review_rejects_candidate_hash_mismatch(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, _ = _write_review_transaction(state, "grouped")
+    metadata, candidate, _ = _write_review_transaction(state)
     payload = json.loads(metadata.read_text(encoding="utf-8"))
     payload.update({
         "name": "Example",
@@ -1923,7 +1400,7 @@ def test_main_discard_command_emits_json(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    _write_review_transaction(state, "grouped")
+    _write_review_transaction(state)
 
     assert (
         workspace.main([
@@ -1945,7 +1422,7 @@ def test_recovery_directory_parent_fsync_retries_after_creation_failure(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    _write_review_transaction(state, "grouped")
+    _write_review_transaction(state)
     record = workspace._capture_pending_replacement(  # pyright: ignore[reportPrivateUsage]
         state, "example"
     )
@@ -1976,39 +1453,6 @@ def test_recovery_directory_parent_fsync_retries_after_creation_failure(
 
     assert state_fsyncs == 2
     assert (recovery_dir / "example.json").is_file()
-
-
-def test_check_migrates_legacy_pending_on_successful_changed_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target_id = "example"
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    legacy_metadata, legacy_candidate, _ = _write_review_transaction(
-        state, "legacy", target_id=target_id
-    )
-
-    def fake_monitor(args: argparse.Namespace) -> dict[str, object]:
-        Path(args.output).write_text("third\n", encoding="utf-8")
-        return _changed_result(current="third\n")
-
-    monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
-    target = {
-        "target_id": target_id,
-        "name": "Example",
-        "url": "https://example.com/",
-        "watch_focus": "pricing",
-    }
-
-    result = workspace._monitor_target(state, target, _RUN_ID)  # pyright: ignore[reportPrivateUsage]
-
-    grouped = state / "pending" / target_id
-    pending = json.loads((grouped / "state.json").read_text(encoding="utf-8"))
-    assert result["action"] == "review"
-    assert pending["revision"] == result["revision"]
-    assert (grouped / "candidate.txt").read_text(encoding="utf-8") == "third\n"
-    assert not legacy_metadata.exists()
-    assert not legacy_candidate.exists()
 
 
 def test_main_requires_targets_and_reports_invalid_workspace(
@@ -2419,7 +1863,6 @@ def _replace_record(**changes: object) -> dict[str, object]:
     record: dict[str, object] = {
         "group_dir_existed": False,
         "kind": "replace",
-        "layout": "none",
         "old_candidate": None,
         "old_state": None,
         "target_id": "example",
@@ -2995,7 +2438,7 @@ def test_main_finalize_dispatches_decision(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    _write_review_transaction(state, "grouped")
+    _write_review_transaction(state)
     payload = json.dumps({
         "target_id": "example",
         "revision": "a" * 32,
@@ -3615,7 +3058,7 @@ def test_decode_recovery_backup_rejects_non_ascii_and_wrong_type() -> None:
 @pytest.mark.parametrize(
     ("record", "expected"),
     [
-        (_replace_record(layout="grouped", group_dir_existed=True), True),
+        (_replace_record(group_dir_existed=True), True),
         (
             {
                 "kind": "cleanup",
@@ -4229,9 +3672,7 @@ def test_recover_pending_resolves_committed_replacement_by_revision(
     old_revision = "c" * 32
     old_state = json.dumps({"revision": old_revision}).encode()
     backup = base64.b64encode(old_state).decode()
-    undo = _replace_record(
-        layout="grouped",
-        group_dir_existed=True,
+    undo = _replace_record(group_dir_existed=True,
         old_state=backup,
         old_candidate=base64.b64encode(b"old candidate").decode(),
     )
@@ -4353,19 +3794,6 @@ def test_load_targets_rejects_non_string_csv_values(
     monkeypatch.setattr(workspace.csv, "reader", fake_reader)
     with pytest.raises(WorkspaceError, match="invalid CSV value"):
         workspace.load_targets(tmp_path / "targets.csv")
-
-
-def test_existing_pending_paths_requires_legacy_candidate_directory(
-    tmp_path: Path,
-) -> None:
-    state = tmp_path / "internal" / "state"
-    pending = state / "pending"
-    pending.mkdir(parents=True)
-    (pending / "example.json").write_text("{}", encoding="utf-8")
-    with pytest.raises(
-        WorkspaceError, match="legacy candidate directory is unavailable"
-    ):
-        workspace._existing_pending_paths(state, "example")  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize("report", ["", "x" * 2], ids=["empty", "oversized"])
@@ -4583,34 +4011,6 @@ def _legacy_undo() -> dict[str, object]:
 
 def _valid_payload(data: bytes = b"new candidate") -> dict[str, object]:
     return _pending_payload(candidate_sha256=hashlib.sha256(data).hexdigest())
-
-
-@pytest.mark.parametrize(
-    "fault",
-    ["no-legacy-files", "unsafe-legacy-file"],
-    ids=["absent-legacy", "symlink-legacy"],
-)
-def test_install_pending_replacement_handles_legacy_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
-) -> None:
-    state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
-    (state / "pending").mkdir()
-    candidates = state / "candidates"
-    candidates.mkdir()
-    if fault == "unsafe-legacy-file":
-        (candidates / "example.txt").symlink_to(tmp_path / "missing")
-    monkeypatch.setattr(workspace, "_fsync_directory", lambda _path: None)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
-    if fault == "unsafe-legacy-file":
-        with pytest.raises(WorkspaceError, match="candidate must be a regular"):
-            workspace._install_pending_replacement(  # pyright: ignore[reportPrivateUsage]
-                state, _valid_payload(), b"new candidate", _legacy_undo()
-            )
-        return
-    workspace._install_pending_replacement(  # pyright: ignore[reportPrivateUsage]
-        state, _valid_payload(), b"new candidate", _legacy_undo()
-    )
-    assert workspace._read_commit_record(state, "example") is not None  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize(
@@ -5878,39 +5278,6 @@ def test_unavailable_configuration_keeps_saved_review_and_direct_finalize(
     )
 
 
-@pytest.mark.parametrize("layout", ["legacy", "grouped"])
-@pytest.mark.parametrize("links", [True, False])
-def test_legacy_scalar_review_synthesizes_interest(
-    tmp_path: Path, layout: str, links: bool
-) -> None:
-    state = tmp_path / "internal" / "state"
-    metadata, _, _ = _write_review_transaction(state, layout)
-    payload = json.loads(metadata.read_text(encoding="utf-8"))
-    payload.update({
-        "name": "Saved",
-        "url": "https://example.com/",
-        "watch_focus": "rules",
-        "diff": "diff",
-    })
-    if links:
-        payload["link_review"] = {"documents": [], "omitted": 0, "incomplete": False}
-    metadata.write_text(json.dumps(payload), encoding="utf-8")
-    review = cast(
-        "list[dict[str, object]]",
-        workspace.pending_reviews(
-            tmp_path, targets=tmp_path / "targets.csv", target_id="example"
-        )["reviews"],
-    )[0]
-    assert review["interests"] == [_interest("Saved", criteria="rules")]
-    assert (
-        finalize(
-            tmp_path,
-            {"target_id": "example", "revision": review["revision"], "material": False},
-        )["action"]
-        == "finalized"
-    )
-
-
 @pytest.mark.parametrize(
     "interests",
     [
@@ -6117,7 +5484,6 @@ def test_enriched_replacement_recovery_keeps_both_revision_choices(
         **previous,
         "revision": "b" * 32,
         "name": "Replacement",
-        "watch_focus": "new rules",
         "interests": [_interest("Replacement", criteria="new rules")],
     }
     workspace._write_recovery_record(state, undo)
