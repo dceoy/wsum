@@ -400,7 +400,6 @@ def load_targets(targets: str | Path) -> list[dict[str, object]]:
     return _group_target_interests(rows)
 
 
-
 def _existing_pending_paths(
     state: Path, target_id: str
 ) -> tuple[Path, Path] | None:
@@ -416,6 +415,7 @@ def _existing_pending_paths(
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         raise WorkspaceError("pending target must be a non-symlink directory")
     return target / "state.json", target / "candidate.txt"
+
 
 def _pending_paths(
     state: Path, target_id: str, *, create: bool = False
@@ -872,7 +872,6 @@ def _optional_lstat(path: Path, description: str) -> os.stat_result | None:
         raise WorkspaceError(f"cannot stat {description}") from exc
 
 
-
 def _remove_pending(state: Path, target_id: str) -> None:
     pending = _ensure_directory(
         state / "pending", "pending directory", sync_parent=True
@@ -890,6 +889,7 @@ def _remove_pending(state: Path, target_id: str) -> None:
         _fsync_directory(pending)
     except OSError as exc:
         raise WorkspaceError("cannot remove pending transaction") from exc
+
 
 def _serialize_pending(payload: Mapping[str, object]) -> bytes:
     """Preflight the complete escaped transaction against its backup ceiling."""
@@ -1076,7 +1076,6 @@ def _commit_record_path(state: Path, target_id: str) -> Path | None:
     return directory / f"{_validate_target_id(target_id)}.json.commit"
 
 
-
 def _read_recovery_record(state: Path, target_id: str) -> dict[str, object] | None:
     target_id = _validate_target_id(target_id)
     path = _recovery_record_path(state, target_id)
@@ -1086,6 +1085,7 @@ def _read_recovery_record(state: Path, target_id: str) -> dict[str, object] | No
     if record is not None and record.get("kind") == "commit":
         raise WorkspaceError("pending recovery record is invalid")
     return record
+
 
 def _read_commit_record(state: Path, target_id: str) -> dict[str, object] | None:
     target_id = _validate_target_id(target_id)
@@ -1193,7 +1193,6 @@ def _read_transaction_backup(path: Path, description: str) -> bytes | None:
     return _read_text_bytes(path, description)
 
 
-
 def _capture_pending_replacement(state: Path, target_id: str) -> dict[str, object]:
     pending = _ensure_directory(
         state / "pending", "pending directory", sync_parent=True
@@ -1223,6 +1222,7 @@ def _capture_pending_replacement(state: Path, target_id: str) -> dict[str, objec
         "target_id": target_id,
         "version": _RECOVERY_RECORD_VERSION,
     }
+
 
 def _write_pending_candidate(destination: Path, data: bytes) -> None:
     temporary = _write_temporary_file(destination, data, "pending candidate")
@@ -1294,7 +1294,6 @@ def _remove_pending_write_temporaries(directory: Path) -> None:
             raise WorkspaceError("cannot remove pending temporary file") from exc
 
 
-
 def _restore_pending_replacement(state: Path, record: Mapping[str, object]) -> None:
     target_id = _validate_target_id(record.get("target_id"))
     pending = _ensure_directory(
@@ -1333,6 +1332,7 @@ def _restore_pending_replacement(state: Path, record: Mapping[str, object]) -> N
         _fsync_directory(pending)
     except OSError as exc:
         raise WorkspaceError("cannot fsync restored pending transaction") from exc
+
 
 def _finalize_cleanup_record(
     target_id: str,
@@ -1495,7 +1495,6 @@ def _recover_pending(
     return record
 
 
-
 def _install_pending_replacement(
     state: Path,
     payload: Mapping[str, object],
@@ -1529,6 +1528,7 @@ def _install_pending_replacement(
             "version": _RECOVERY_RECORD_VERSION,
         },
     )
+
 
 def _write_pending_transaction(
     state: Path, payload: Mapping[str, object], candidate_data: bytes
@@ -1761,7 +1761,6 @@ def _validate_interests(value: object) -> list[dict[str, object]]:
     return interests
 
 
-
 def _validate_pending_context(pending: Mapping[str, object]) -> None:
     """Validate the current persisted review context."""
     for field in _PENDING_TEXT_FIELDS:
@@ -1770,6 +1769,7 @@ def _validate_pending_context(pending: Mapping[str, object]) -> None:
     _validate_interests(pending.get("interests"))
     if "link_review" in pending:
         _validate_link_review(pending["link_review"])
+
 
 def _read_pending_json(path: Path) -> object:
     """Bound both the stated and actual serialized transaction size."""
@@ -1782,7 +1782,6 @@ def _read_pending_json(path: Path) -> object:
         raise WorkspaceError("pending decision size is invalid")
     with _integer_text_limit():
         return json.loads(data.decode("utf-8"))
-
 
 
 def _read_pending(state: Path, target_id: str) -> dict[str, object]:
@@ -1846,6 +1845,7 @@ def _pending_target_ids(state: Path) -> list[str]:
         target_ids.append(_validate_target_id(entry.name))
     return target_ids
 
+
 def _enabled_interests(context: Mapping[str, object]) -> list[dict[str, object]]:
     """Return the enabled interests from the current authoritative schema."""
     return [
@@ -1867,6 +1867,7 @@ def _target_review_contexts(
         for target in targets
     }
 
+
 def _current_review_contexts(
     targets: str | Path | None,
 ) -> dict[str, dict[str, object]] | None:
@@ -1878,7 +1879,6 @@ def _current_review_contexts(
     except WorkspaceError:
         return None
     return _target_review_contexts(configured_targets)
-
 
 
 def _saved_review_context(
@@ -1923,6 +1923,7 @@ def _pending_review(
         "diff_truncated": pending["diff_truncated"],
         **({"link_review": pending["link_review"]} if "link_review" in pending else {}),
     }
+
 
 def _pending_review_handle(
     state: Path,
