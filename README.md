@@ -29,7 +29,7 @@ flowchart LR
     WORKSPACE --> CORE
     CORE --> WORKSPACE
     CORE --> REPORT["output/report/<run-id>.md"]
-    OUT -->|restore| REPORT
+    WORKSPACE --> OUT["internal/gws/outbox/"]
     REPORT -->|stage| OUT
     OUT -->|run complete| GMD["Drive Markdown file"]
     GMD --> DR["Google Drive report folder"]
