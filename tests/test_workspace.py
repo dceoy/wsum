@@ -30,6 +30,7 @@ _RUN_ID = "20261001T000000Z-deadbeef"
 def _write_targets(path: Path, rows: str) -> None:
     path.write_text(f"name,url,criteria,enabled\n{rows}", encoding="utf-8")
 
+
 def _changed_result(
     current: str = "new\n", previous: str = "old\n"
 ) -> dict[str, object]:
@@ -88,6 +89,7 @@ def _write_review_transaction(
     metadata.write_text(json.dumps(payload), encoding="utf-8")
     return metadata, candidate_path, snapshot
 
+
 def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) -> None:
     _write_targets(
         tmp_path / "targets.csv",
@@ -98,7 +100,10 @@ def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) ->
     targets = load_targets(tmp_path / "targets.csv")
 
     assert [target["action"] for target in targets] == ["monitor", "skip_disabled"]
-    assert cast("list[dict[str, object]]", targets[0]["interests"])[0]["criteria"] == "pricing"
+    assert (
+        cast("list[dict[str, object]]", targets[0]["interests"])[0]["criteria"]
+        == "pricing"
+    )
     assert "fetch_mode" not in targets[0]
     assert str(targets[0]["target_id"]).startswith("example-com-")
     first_id = targets[0]["target_id"]
@@ -109,13 +114,26 @@ def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) ->
     )
     assert load_targets(tmp_path / "targets.csv")[0]["target_id"] == first_id
 
+
 @pytest.mark.parametrize(
     ("header", "rows", "message"),
     [
         ("name,criteria\n", "Example,pricing\n", "requires name and url"),
-        ("name,url,watch_focus\n", "Example,https://example.com/,pricing\n", "unsupported"),
-        ("name,url,criteria,enabled\n", "Example,https://example.com/,,yes\n", "enabled must be true or false"),
-        ("name,url,criteria,enabled\n", ",https://example.com/,,true\n", "name must be non-empty"),
+        (
+            "name,url,watch_focus\n",
+            "Example,https://example.com/,pricing\n",
+            "unsupported",
+        ),
+        (
+            "name,url,criteria,enabled\n",
+            "Example,https://example.com/,,yes\n",
+            "enabled must be true or false",
+        ),
+        (
+            "name,url,criteria,enabled\n",
+            ",https://example.com/,,true\n",
+            "name must be non-empty",
+        ),
     ],
     ids=[
         "missing-required-column",
@@ -131,6 +149,7 @@ def test_load_targets_rejects_invalid_csv(
 
     with pytest.raises(WorkspaceError, match=message):
         load_targets(tmp_path / "targets.csv")
+
 
 @pytest.mark.parametrize(
     "url",
@@ -205,7 +224,10 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
 
     assert result["action"] == "review"
     assert len(str(result["revision"])) == 32
-    assert cast("list[dict[str, object]]", result["interests"])[0]["criteria"] == "pricing"
+    assert (
+        cast("list[dict[str, object]]", result["interests"])[0]["criteria"]
+        == "pricing"
+    )
     pending = json.loads((state / "pending" / "example" / "state.json").read_text())
     assert pending["target_id"] == "example"
     assert pending["run_id"] == _RUN_ID
@@ -215,6 +237,7 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
     assert pending["interests"] == result["interests"]
     assert pending["diff"] == _changed_result()["diff"]
     assert candidate.exists()
+
 
 def test_finalize_material_review_promotes_and_writes_report(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
@@ -241,6 +264,7 @@ def test_finalize_material_review_promotes_and_writes_report(tmp_path: Path) -> 
     assert not metadata.exists()
     assert not (state / "pending" / "example").exists()
 
+
 def test_finalize_non_material_truncated_diff_stops(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
@@ -258,6 +282,7 @@ def test_finalize_non_material_truncated_diff_stops(tmp_path: Path) -> None:
     assert candidate.exists()
     assert snapshot.read_text() == "old\n"
 
+
 def test_finalize_non_material_review_promotes_without_report(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
@@ -273,6 +298,7 @@ def test_finalize_non_material_review_promotes_without_report(tmp_path: Path) ->
     assert not (tmp_path / "output" / "report").exists()
     assert not metadata.exists()
     assert not candidate.exists()
+
 
 @pytest.mark.parametrize("failure", ["partial-delete", "parent-fsync"])
 def test_finalize_cleanup_failure_is_retryable(
@@ -331,6 +357,7 @@ def test_finalize_cleanup_failure_is_retryable(
     assert not (state / "pending" / "example").exists()
     assert not (state / "recovery" / "example.json").exists()
 
+
 def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
     snapshot_dir = state / "snapshots"
@@ -339,7 +366,9 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
     reports = tmp_path / "output" / "report"
     reports.mkdir(parents=True)
     report = reports / f"{_RUN_ID}.md"
-    original_report = f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\ncurrent report\n"
+    original_report = (
+        f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\ncurrent report\n"
+    )
     report.write_text(original_report)
     target = {
         "target_id": "example",
@@ -394,6 +423,7 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
     assert pending_path.read_bytes() == pending
     assert str(second["revision"]) != first_revision
 
+
 def test_finalize_material_snapshot_conflict_does_not_write_report(
     tmp_path: Path,
 ) -> None:
@@ -403,7 +433,9 @@ def test_finalize_material_snapshot_conflict_does_not_write_report(
     reports = tmp_path / "output" / "report"
     reports.mkdir(parents=True)
     report = reports / f"{_RUN_ID}.md"
-    original_report = f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\nprevious report\n"
+    original_report = (
+        f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\nprevious report\n"
+    )
     report.write_text(original_report)
     snapshot.write_text("external\n")
 
@@ -423,6 +455,7 @@ def test_finalize_material_snapshot_conflict_does_not_write_report(
     assert candidate.read_text() == "new\n"
     assert metadata.exists()
 
+
 def test_finalize_report_failure_can_be_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -436,7 +469,8 @@ def test_finalize_report_failure_can_be_retried(
         nonlocal write_attempts
         write_attempts += 1
         if write_attempts == 1:
-            raise WorkspaceError("cannot write report")
+            message = "cannot write report"
+            raise WorkspaceError(message)
         return write_report(root, run_id, target_id, report)
 
     monkeypatch.setattr(workspace, "_write_report", fail_once)
@@ -463,6 +497,7 @@ def test_finalize_report_failure_can_be_retried(
     assert report_path.read_text().count("<!-- wsum:target example:start -->") == 1
     assert not metadata.exists()
     assert not candidate.exists()
+
 
 def test_check_batches_targets_and_contains_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -582,6 +617,7 @@ def test_check_reuses_pending_target_and_fetches_other_targets(
     assert candidate.read_text(encoding="utf-8") == "new\n"
     assert snapshot.read_text(encoding="utf-8") == "old\n"
 
+
 @pytest.mark.parametrize(
     ("targets_csv", "expected_action", "expected_monitor_calls"),
     [
@@ -624,6 +660,7 @@ def test_check_discards_stale_pending_target(
     assert not metadata.exists()
     assert not candidate.exists()
     assert snapshot.read_text(encoding="utf-8") == "old\n"
+
 
 @pytest.mark.parametrize(
     "failure_point",
@@ -702,6 +739,7 @@ def test_monitor_update_failure_keeps_previous_review_finalizable(
     assert not metadata.exists()
     assert not candidate.exists()
 
+
 def test_staging_cleanup_failure_does_not_commit_monitor_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -761,6 +799,7 @@ def test_staging_cleanup_failure_does_not_commit_monitor_result(
     )
     assert result["action"] == "finalized"
     assert snapshot.read_text(encoding="utf-8") == "new\n"
+
 
 def test_failed_commit_marker_keeps_undo_available_for_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1277,6 +1316,7 @@ def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
             candidate_data=b"new\n",
         )
 
+
 @pytest.mark.parametrize(
     "fault",
     [
@@ -1388,8 +1428,12 @@ def test_pending_reviews_grouped_without_targets_uses_persisted_context(
     review = cast("list[dict[str, object]]", result["reviews"])[0]
     assert review["name"] == "Persisted"
     assert review["url"] == "https://example.com/"
-    assert cast("list[dict[str, object]]", review["interests"])[0]["criteria"] == "pricing"
+    assert (
+        cast("list[dict[str, object]]", review["interests"])[0]["criteria"]
+        == "pricing"
+    )
     assert review["diff"] == "persisted diff"
+
 
 def test_pending_review_rejects_candidate_hash_mismatch(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
@@ -1399,6 +1443,7 @@ def test_pending_review_rejects_candidate_hash_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(WorkspaceError, match="candidate_sha256"):
         workspace.pending_reviews(tmp_path, target_id="example")
+
 
 def test_pending_reviews_rejects_unknown_target_id(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
@@ -2127,6 +2172,7 @@ def test_pending_target_listing_rejects_removed_flat_layout(tmp_path: Path) -> N
     with pytest.raises(WorkspaceError, match="unsupported entry"):
         workspace._pending_target_ids(state)
 
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -2204,6 +2250,7 @@ def test_recovery_record_validation_rejects_malformed_shapes(record: object) -> 
     with pytest.raises(WorkspaceError, match="invalid"):
         workspace._validate_recovery_record(record, "example")
 
+
 def test_recovery_backup_size_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(workspace, "_MAX_SNAPSHOT_BYTES", 1)
     encoded = base64.b64encode(b"too long").decode()
@@ -2231,6 +2278,7 @@ def test_recovery_record_validation_accepts_supported_records(
     record: dict[str, object],
 ) -> None:
     assert workspace._validate_recovery_record(record, "example") == record
+
 
 @pytest.mark.parametrize(
     ("kind", "message"),
@@ -2466,6 +2514,7 @@ def _pending_payload(**changes: object) -> dict[str, object]:
     payload.update(changes)
     return payload
 
+
 def _grouped_pending(state: Path, payload: dict[str, object], data: bytes) -> Path:
     target = state / "pending" / "example"
     target.mkdir(parents=True)
@@ -2580,12 +2629,14 @@ def test_existing_pending_paths_wraps_target_stat_errors(
 
     def fail(path: Path) -> os.stat_result:
         if path == target:
-            raise PermissionError("injected")
+            message = "injected"
+            raise PermissionError(message)
         return original_lstat(path)
 
     monkeypatch.setattr(Path, "lstat", fail)
     with pytest.raises(WorkspaceError, match="cannot stat pending target"):
         workspace._existing_pending_paths(state, "example")
+
 
 @pytest.mark.parametrize("kind", ["symlink", "file"])
 def test_existing_pending_paths_rejects_unsafe_target(
@@ -2602,6 +2653,7 @@ def test_existing_pending_paths_rejects_unsafe_target(
 
     with pytest.raises(WorkspaceError, match="pending target must be"):
         workspace._existing_pending_paths(state, "example")
+
 
 @pytest.mark.parametrize(
     ("kind", "message"),
@@ -2842,7 +2894,8 @@ def test_report_write_validates_and_persists_atomically(
 
             def fail_report_fsync(path: Path) -> None:
                 if path.name == "report":
-                    raise OSError("injected")  # ruff: ignore[raw-string-in-exception]
+                    message = "injected"
+            raise OSError(message)  # ruff: ignore[raw-string-in-exception]
                 original_fsync(path)
 
             monkeypatch.setattr(workspace, "_fsync_directory", fail_report_fsync)
@@ -2898,6 +2951,7 @@ def test_remove_pending_wraps_removal_and_sync_failures(
 
     with pytest.raises(WorkspaceError, match="cannot remove pending transaction"):
         workspace._remove_pending(state, "example")
+
 
 @pytest.mark.parametrize("fault", ["replace", "fsync"], ids=["replace", "fsync"])
 def test_pending_file_wraps_atomic_write_failures(
@@ -2962,6 +3016,7 @@ def test_recovery_record_validator_accepts_supported_optional_shapes(
     record: dict[str, object],
 ) -> None:
     assert workspace._validate_recovery_record(record, "example") == record
+
 
 def test_read_commit_record_rejects_non_commit_record(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
@@ -3196,6 +3251,7 @@ def test_restore_pending_replacement_restores_current_layout(
     else:
         assert not grouped.exists()
 
+
 @pytest.mark.parametrize(
     ("decision", "message"),
     [
@@ -3428,6 +3484,7 @@ def test_normal_recovery_file_rejects_commit_record(tmp_path: Path) -> None:
     with pytest.raises(WorkspaceError, match="invalid"):
         workspace._read_recovery_record(state, "example")
 
+
 @pytest.mark.parametrize(
     ("case", "revision", "expected"),
     [
@@ -3564,6 +3621,7 @@ def test_recover_pending_resolves_committed_replacement_by_revision(
     assert workspace._read_recovery_record(state, "example") is None
     assert workspace._read_commit_record(state, "example") is None
 
+
 def test_recover_pending_rejects_conflicting_recovery_and_commit_records(
     tmp_path: Path,
 ) -> None:
@@ -3629,6 +3687,7 @@ def test_read_pending_rejects_extra_fields_and_bad_run_ids(
     _grouped_pending(state, payload, b"candidate")
     with pytest.raises(WorkspaceError, match=message):
         workspace._read_pending(state, "example")
+
 
 def test_read_pending_backfills_legacy_missing_run_id(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
@@ -3835,6 +3894,7 @@ def test_restore_pending_replacement_rejects_unsafe_state_or_sync_failure(
     ):
         workspace._restore_pending_replacement(state, _replace_record())
 
+
 def _valid_payload(data: bytes = b"new candidate") -> dict[str, object]:
     return _pending_payload(candidate_sha256=hashlib.sha256(data).hexdigest())
 
@@ -3872,6 +3932,7 @@ def test_install_pending_replacement_checks_readback(
         workspace._install_pending_replacement(
             state, _valid_payload(), b"new candidate"
         )
+
 
 def test_handle_monitor_result_returns_baseline_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4714,24 +4775,32 @@ def _create_interest_review(tmp_path: Path) -> tuple[str, Path, Path, Path]:
     metadata, candidate = workspace._pending_paths(state, target_id)
     return target_id, metadata, candidate, snapshot
 
+
 @pytest.mark.parametrize(
     ("csv_text", "expected"),
     [
         ("name,url\n Example , https://example.com/ \n", _interest()),
         (
-            "url,enabled,name,criteria\nhttps://example.com/, TrUe ,Example, pricing \n",
+            (
+                "url,enabled,name,criteria\n"
+                "https://example.com/, TrUe ,Example, pricing \n"
+            ),
             _interest(criteria="pricing"),
         ),
         (
-            "\ufeffname,url,criteria,priority,enabled\n"
-            "Example,https://example.com/, pricing ,0002, FALSE \n",
+            (
+                "\ufeffname,url,criteria,priority,enabled\n"
+                "Example,https://example.com/, pricing ,0002, FALSE \n"
+            ),
             _interest(criteria="pricing", priority=2, enabled=False),
         ),
         (_ENRICHED_HEADER + "Example,https://example.com/\n", _interest()),
         (
-            "name,url,publisher,category,keywords,criteria,priority\n"
-            "Example,https://example.com/, Publisher , Category ,"
-            '"a, b / c","first\nsecond",1\n',
+            (
+                "name,url,publisher,category,keywords,criteria,priority\n"
+                "Example,https://example.com/, Publisher , Category ,"
+                '"a, b / c","first\nsecond",1\n'
+            ),
             _interest(
                 publisher="Publisher",
                 category="Category",
@@ -4741,8 +4810,10 @@ def _create_interest_review(tmp_path: Path) -> tuple[str, Path, Path, Path]:
             ),
         ),
         (
-            "name,url,keywords,criteria\n"
-            "\n,,,\nExample,https://example.com/,,mentions 同上 and 〃\n",
+            (
+                "name,url,keywords,criteria\n"
+                "\n,,,\nExample,https://example.com/,,mentions 同上 and 〃\n"
+            ),
             _interest(criteria="mentions 同上 and 〃"),
         ),
     ],
@@ -4763,6 +4834,7 @@ def test_interest_csv_normalization(
     assert target["interests"] == [expected]
     assert target["target_id"] == workspace._target_id("https://example.com/")
     assert target["enabled"] is expected["enabled"]
+
 
 @pytest.mark.parametrize(
     "priority", ["0", "00", "-1", "+1", "1.0", "1e2", "one", "\u0661", "\uff11"]
@@ -4815,6 +4887,7 @@ def test_ditto_cells_rejected_with_record_and_field(
     with pytest.raises(WorkspaceError, match=f"row 3: {field}: replace ditto"):
         load_targets(tmp_path / "targets.csv")
 
+
 @pytest.mark.parametrize(
     ("csv_text", "message"),
     [
@@ -4838,6 +4911,7 @@ def test_enriched_csv_errors(tmp_path: Path, csv_text: str, message: str) -> Non
     (tmp_path / "targets.csv").write_text(csv_text, encoding="utf-8")
     with pytest.raises(WorkspaceError, match=message):
         load_targets(tmp_path / "targets.csv")
+
 
 @pytest.mark.parametrize("field", ["keywords", "criteria"])
 def test_large_csv_text_and_serialized_expansion(tmp_path: Path, field: str) -> None:
@@ -4865,6 +4939,7 @@ def test_large_csv_text_and_serialized_expansion(tmp_path: Path, field: str) -> 
         )["reviews"],
     )[0]
     assert cast("list[dict[str, object]]", review["interests"])[0][field] == text
+
 
 def test_priority_exceeding_python_decimal_limit_round_trips(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -4924,6 +4999,7 @@ def test_repeated_urls_preserve_order_and_display(
     ]
     assert targets[0]["name"] == ("Second" if enabled else "First")
     assert targets[0]["enabled"] is enabled
+
 
 def test_distinct_urls_with_colliding_ids_fail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -5066,6 +5142,7 @@ def test_unavailable_configuration_keeps_saved_review_and_direct_finalize(
         tmp_path,
         {"target_id": target_id, "revision": review["revision"], "material": False},
     )["action"] == "finalized"
+
 
 @pytest.mark.parametrize(
     "interests",
