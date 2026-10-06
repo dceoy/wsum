@@ -28,13 +28,13 @@ _DELETE = object()
 class _Review:
     def __init__(self, root: Path, target_id: str, revision: str) -> None:
         self.root = root
-        self.state = root / ".wsum"
+        self.state = root / "internal" / "state"
         self.target_id = target_id
         self.revision = revision
         self.ingestion_id = workspace._ingestion_id(target_id, revision)
-        self.bundle = root / "evidence" / self.ingestion_id
+        self.bundle = root / "internal" / "evidence" / self.ingestion_id
         self.snapshot = self.state / "snapshots" / f"{target_id}.txt"
-        self.intent = self.state / ".pending-recovery" / f"{target_id}.json"
+        self.intent = self.state / "recovery" / f"{target_id}.json"
         self.pending = self.state / "pending" / target_id
 
     def decision(
@@ -81,7 +81,7 @@ def _review(
     _targets(root)
     target = workspace.load_targets(root / "targets.csv")[0]
     target_id = str(target["target_id"])
-    snapshots = root / ".wsum" / "snapshots"
+    snapshots = root / "internal" / "state" / "snapshots"
     snapshots.mkdir(parents=True)
     (snapshots / f"{target_id}.txt").write_text("old\n", encoding="utf-8")
     result: dict[str, object] = {
@@ -94,7 +94,7 @@ def _review(
     if link_review is not None:
         result["link_review"] = link_review
     review = workspace._handle_monitor_result(
-        root / ".wsum", target, result, _RUN_ID, candidate_data=b"new\n"
+        root / "internal" / "state", target, result, _RUN_ID, candidate_data=b"new\n"
     )
     return _Review(root, target_id, str(review["revision"]))
 
@@ -216,7 +216,7 @@ def test_archive_finalize_commits_bundle(tmp_path: Path) -> None:
         "evidence_path": str(review.bundle),
         "ingestion_id": review.ingestion_id,
         "material": True,
-        "report_path": str(tmp_path / "reports" / f"{_RUN_ID}.md"),
+        "report_path": str(tmp_path / "output" / "report" / f"{_RUN_ID}.md"),
         "target_id": review.target_id,
     }
     assert _files(review.bundle) == {
@@ -243,7 +243,8 @@ def test_archive_finalize_commits_bundle(tmp_path: Path) -> None:
     assert receipt["ingestion_id"] == review.ingestion_id
     assert receipt["material"] is True
     assert review.snapshot.read_text() == "new\n"
-    assert "Plans changed." in (tmp_path / "reports" / f"{_RUN_ID}.md").read_text()
+    report = tmp_path / "output" / "report" / f"{_RUN_ID}.md"
+    assert "Plans changed." in report.read_text()
     assert not review.pending.exists()
     assert not review.intent.exists()
     assert workspace._read_receipt(tmp_path, review.ingestion_id) is not None
@@ -269,10 +270,10 @@ def test_ordinary_finalize_is_unchanged(tmp_path: Path) -> None:
     assert result == {
         "action": "finalized",
         "material": True,
-        "report_path": str(tmp_path / "reports" / f"{_RUN_ID}.md"),
+        "report_path": str(tmp_path / "output" / "report" / f"{_RUN_ID}.md"),
         "target_id": review.target_id,
     }
-    assert not (tmp_path / "evidence").exists()
+    assert not (tmp_path / "internal" / "evidence").exists()
 
 
 def test_archive_flag_skips_non_material_decisions(tmp_path: Path) -> None:
@@ -285,7 +286,7 @@ def test_archive_flag_skips_non_material_decisions(tmp_path: Path) -> None:
         "material": False,
         "target_id": review.target_id,
     }
-    assert not (tmp_path / "evidence").exists()
+    assert not (tmp_path / "internal" / "evidence").exists()
     assert review.snapshot.read_text() == "new\n"
 
 
@@ -298,7 +299,7 @@ def test_archive_skips_manual_review_for_truncated_non_material(
         "action": "manual_review_required",
         "target_id": review.target_id,
     }
-    assert not (tmp_path / "evidence").exists()
+    assert not (tmp_path / "internal" / "evidence").exists()
 
 
 def test_crash_before_promotion_is_not_consumable(
@@ -343,7 +344,7 @@ def test_recovery_after_promotion_before_report(
 
     assert result["ingestion_id"] == review.ingestion_id
     assert (review.bundle / "committed.json").exists()
-    report = (tmp_path / "reports" / f"{_RUN_ID}.md").read_text()
+    report = (tmp_path / "output" / "report" / f"{_RUN_ID}.md").read_text()
     assert report.count("Plans changed.") == 1
 
 
@@ -364,7 +365,8 @@ def test_recovery_after_report_before_receipt(
     result = review.finalize()
 
     assert result["ingestion_id"] == review.ingestion_id
-    assert (tmp_path / "reports" / f"{_RUN_ID}.md").read_text().count("Plans") == 1
+    report = tmp_path / "output" / "report" / f"{_RUN_ID}.md"
+    assert report.read_text().count("Plans") == 1
 
 
 def test_recovery_after_receipt_before_cleanup(
@@ -590,7 +592,7 @@ def test_evidence_directory_must_not_be_a_symlink(tmp_path: Path) -> None:
     review = _review(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir()
-    (tmp_path / "evidence").symlink_to(outside)
+    (tmp_path / "internal" / "evidence").symlink_to(outside)
 
     with pytest.raises(WorkspaceError, match="non-symlink directory"):
         finalize(tmp_path, review.decision())
@@ -600,7 +602,7 @@ def test_bundle_directory_must_not_be_a_symlink(tmp_path: Path) -> None:
     review = _review(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir()
-    (tmp_path / "evidence").mkdir()
+    (tmp_path / "internal" / "evidence").mkdir()
     review.bundle.symlink_to(outside)
 
     with pytest.raises(WorkspaceError, match="non-symlink directory"):
@@ -618,7 +620,7 @@ def test_adopting_archive_after_completed_legacy_finalize_is_rejected(
     with pytest.raises(WorkspaceError, match="cannot be adopted"):
         review.finalize()
 
-    assert not (tmp_path / "evidence").exists()
+    assert not (tmp_path / "internal" / "evidence").exists()
 
 
 def test_adopting_archive_without_pending_state_is_rejected(tmp_path: Path) -> None:
@@ -628,7 +630,7 @@ def test_adopting_archive_without_pending_state_is_rejected(tmp_path: Path) -> N
     with pytest.raises(WorkspaceError, match="cannot be adopted"):
         review.finalize()
 
-    assert not (tmp_path / "evidence").exists()
+    assert not (tmp_path / "internal" / "evidence").exists()
 
 
 _INACTIVE_CSV = {
@@ -657,7 +659,7 @@ def test_inactive_target_or_invalid_configuration_archives_nothing(
         with pytest.raises(WorkspaceError):
             review.finalize()
 
-    assert not (tmp_path / "evidence").exists()
+    assert not (tmp_path / "internal" / "evidence").exists()
     assert not review.intent.exists()
     assert review.snapshot.read_text() == "old\n"
     assert review.pending.exists()
@@ -674,7 +676,7 @@ def test_snapshot_conflict_before_preparation_archives_nothing(
         "target_id": review.target_id,
     }
 
-    assert not (tmp_path / "evidence").exists()
+    assert not (tmp_path / "internal" / "evidence").exists()
     assert not review.intent.exists()
     assert review.pending.exists()
 
@@ -1002,7 +1004,7 @@ def test_archive_limits_are_enforced_before_preparation(
         review.finalize()
 
     assert not review.intent.exists()
-    assert not (tmp_path / "evidence").exists()
+    assert not (tmp_path / "internal" / "evidence").exists()
     assert review.pending.exists()
     assert review.snapshot.read_text() == "old\n"
 
@@ -1116,7 +1118,7 @@ def test_ingestion_identity_is_transaction_scoped() -> None:
 
 def test_ordinary_finalize_ignores_other_targets_bundles(tmp_path: Path) -> None:
     review = _review(tmp_path)
-    (tmp_path / "evidence").mkdir()
+    (tmp_path / "internal" / "evidence").mkdir()
 
     result = finalize(tmp_path, review.decision())
 
@@ -1154,7 +1156,7 @@ def _legacy_review(root: Path) -> _Review:
     # A pending record with only the base fields has no stored diff.
     _targets(root)
     target_id = str(workspace.load_targets(root / "targets.csv")[0]["target_id"])
-    state = root / ".wsum"
+    state = root / "internal" / "state"
     snapshots = state / "snapshots"
     snapshots.mkdir(parents=True)
     (snapshots / f"{target_id}.txt").write_text("old\n", encoding="utf-8")

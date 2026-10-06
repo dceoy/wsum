@@ -25,8 +25,11 @@ from urllib.parse import urlsplit
 
 import monitor
 
-_STATE_DIR = ".wsum"
-_PENDING_RECOVERY_DIR = ".pending-recovery"
+_INTERNAL_DIR = "internal"
+_OUTPUT_DIR = "output"
+_STATE_DIR = "state"
+_REPORT_DIR = "report"
+_PENDING_RECOVERY_DIR = "recovery"
 _MAX_CSV_BYTES = 1024 * 1024
 _MAX_SNAPSHOT_BYTES = 40 * 1024 * 1024
 _MAX_RECOVERY_RECORD_BYTES = 3 * _MAX_SNAPSHOT_BYTES + 1024 * 1024
@@ -68,7 +71,7 @@ _RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{32}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RECOVERY_RECORD_VERSION = 1
-_ARCHIVE_DIR = "evidence"
+_EVIDENCE_DIR = "evidence"
 _ARCHIVE_INTENT_VERSION = 2
 _EVIDENCE_SCHEMA = "wsum.evidence/1"
 _LINKS_SCHEMA = "wsum.evidence.links/1"
@@ -172,10 +175,34 @@ def _ensure_directory(
     return path
 
 
+def _internal_dir(workspace: Path) -> Path:
+    return _ensure_directory(
+        workspace / _INTERNAL_DIR,
+        "workspace internal directory",
+        sync_parent=True,
+    )
+
+
+def _output_dir(workspace: Path) -> Path:
+    return _ensure_directory(
+        workspace / _OUTPUT_DIR,
+        "workspace output directory",
+        sync_parent=True,
+    )
+
+
 def _state_dir(workspace: Path) -> Path:
     return _ensure_directory(
-        workspace / _STATE_DIR,
+        _internal_dir(workspace) / _STATE_DIR,
         "workspace state directory",
+        sync_parent=True,
+    )
+
+
+def _report_dir(workspace: Path) -> Path:
+    return _ensure_directory(
+        _output_dir(workspace) / _REPORT_DIR,
+        "workspace report directory",
         sync_parent=True,
     )
 
@@ -653,9 +680,7 @@ def _write_report(workspace: Path, run_id: str, target_id: str, report: str) -> 
     if not report_data or len(report_data) > _MAX_SNAPSHOT_BYTES:
         raise WorkspaceError("report size is invalid")
 
-    reports_dir = _ensure_directory(
-        workspace / "reports", "workspace reports directory", sync_parent=True
-    )
+    reports_dir = _report_dir(workspace)
     destination = _report_path(reports_dir, run_id)
     existing = _read_optional_report(destination)
     report_data = _render_run_report(run_id, target_id, report, existing).encode(
@@ -1553,7 +1578,7 @@ def _recover_pending(
     if record is not None and record["kind"] == "archive":
         # An archive obligation completes (or stays blocked) before any other
         # recovery, discard, or replacement may touch the pending evidence.
-        _complete_archive(state.parent, state, record)
+        _complete_archive(state.parent.parent, state, record)
         return None
     commit = _read_commit_record(state, target_id)
     if commit is not None:
@@ -2475,7 +2500,7 @@ def _validate_archive_intent(record: dict[str, object]) -> dict[str, object]:
 
 
 def _evidence_directory(root: Path, *, create: bool) -> Path | None:
-    path = root / _ARCHIVE_DIR
+    path = _internal_dir(root) / _EVIDENCE_DIR
     if create:
         return _ensure_directory(path, "evidence directory", sync_parent=True)
     info = _optional_lstat(path, "evidence directory")
@@ -2598,10 +2623,10 @@ def _archive_result(root: Path, source: Mapping[str, object]) -> dict[str, objec
     ingestion_id = str(source["ingestion_id"])
     return {
         "action": "finalized",
-        "evidence_path": str(root / _ARCHIVE_DIR / ingestion_id),
+        "evidence_path": str(root / _INTERNAL_DIR / _EVIDENCE_DIR / ingestion_id),
         "ingestion_id": ingestion_id,
         "material": True,
-        "report_path": str(root / "reports" / f"{source['run_id']}.md"),
+        "report_path": str(root / _OUTPUT_DIR / _REPORT_DIR / f"{source['run_id']}.md"),
         "target_id": source["target_id"],
     }
 
@@ -2850,7 +2875,7 @@ def _finalized_result(root: Path, record: Mapping[str, object]) -> dict[str, obj
     }
     if material is True:
         run_id = _validate_run_id(record.get("run_id"))
-        result["report_path"] = str(root / "reports" / f"{run_id}.md")
+        result["report_path"] = str(root / _OUTPUT_DIR / _REPORT_DIR / f"{run_id}.md")
     return result
 
 
@@ -2864,7 +2889,7 @@ def finalize(
     """Apply one semantic decision and safely advance its baseline.
 
     With ``archive_evidence``, a material decision also commits a durable,
-    digest-verified evidence bundle under ``evidence/<ingestion-id>/``.
+    digest-verified evidence bundle under ``internal/evidence/<ingestion-id>/``.
     """
     target_id, revision, material, report = _validate_decision(payload)
 

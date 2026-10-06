@@ -162,7 +162,7 @@ def test_load_targets_rejects_unsafe_urls(tmp_path: Path, url: str) -> None:
 
 
 def test_handle_monitor_result_promotes_baseline(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     candidate_dir = state / "pending" / "example"
     candidate_dir.mkdir(parents=True)
     candidate = candidate_dir / "candidate.txt"
@@ -186,7 +186,7 @@ def test_handle_monitor_result_promotes_baseline(tmp_path: Path) -> None:
 
 
 def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     candidate_dir = state / "pending" / "example"
     snapshot_dir = state / "snapshots"
     candidate_dir.mkdir(parents=True)
@@ -240,8 +240,8 @@ def test_finalize_material_review_promotes_and_writes_report(
     layout: str,
     include_run_id: bool,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(
         state, layout, include_run_id=include_run_id
     )
@@ -257,7 +257,7 @@ def test_finalize_material_review_promotes_and_writes_report(
         },
     )
 
-    report = tmp_path / "reports" / f"{_RUN_ID}.md"
+    report = tmp_path / "output" / "report" / f"{_RUN_ID}.md"
     assert result["action"] == "finalized"
     assert result["report_path"] == str(report)
     assert report.exists()
@@ -272,8 +272,8 @@ def test_finalize_material_review_promotes_and_writes_report(
 def test_finalize_non_material_truncated_diff_stops(
     tmp_path: Path, layout: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(
         state, layout, diff_truncated=True
     )
@@ -293,8 +293,8 @@ def test_finalize_non_material_truncated_diff_stops(
 def test_finalize_non_material_review_promotes_without_report(
     tmp_path: Path, layout: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, layout)
 
     result = finalize(
@@ -304,7 +304,7 @@ def test_finalize_non_material_review_promotes_without_report(
 
     assert result == {"action": "finalized", "target_id": "example", "material": False}
     assert snapshot.read_text() == "new\n"
-    assert not (tmp_path / "reports").exists()
+    assert not (tmp_path / "output" / "report").exists()
     assert not metadata.exists()
     assert not candidate.exists()
 
@@ -330,8 +330,8 @@ def test_finalize_cleanup_failure_is_retryable(
     layout: str,
     failure: str,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, layout)
     decision = {
         "target_id": "example",
@@ -381,11 +381,10 @@ def test_finalize_cleanup_failure_is_retryable(
         finalize(tmp_path, decision)
 
     assert failed
-    assert (state / ".pending-recovery" / "example.json").exists()
+    assert (state / "recovery" / "example.json").exists()
     assert snapshot.read_text(encoding="utf-8") == "new\n"
-    assert "Retry cleanup." in (tmp_path / "reports" / f"{_RUN_ID}.md").read_text(
-        encoding="utf-8"
-    )
+    report = tmp_path / "output" / "report" / f"{_RUN_ID}.md"
+    assert "Retry cleanup." in report.read_text(encoding="utf-8")
 
     result = finalize(tmp_path, decision)
 
@@ -393,24 +392,24 @@ def test_finalize_cleanup_failure_is_retryable(
         "action": "finalized",
         "target_id": "example",
         "material": True,
-        "report_path": str(tmp_path / "reports" / f"{_RUN_ID}.md"),
+        "report_path": str(tmp_path / "output" / "report" / f"{_RUN_ID}.md"),
     }
     assert not metadata.exists()
     assert not candidate.exists()
     assert not (state / "pending" / "example").exists()
-    assert not (state / ".pending-recovery" / "example.json").exists()
+    assert not (state / "recovery" / "example.json").exists()
 
 
 def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     candidate_dir = state / "pending" / "example"
     snapshot_dir = state / "snapshots"
     candidate_dir.mkdir(parents=True)
     snapshot_dir.mkdir()
     candidate = candidate_dir / "candidate.txt"
     (snapshot_dir / "example.txt").write_text("old\n")
-    reports = tmp_path / "reports"
-    reports.mkdir()
+    reports = tmp_path / "output" / "report"
+    reports.mkdir(parents=True)
     report = reports / f"{_RUN_ID}.md"
     original_report = (
         f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\ncurrent report\n"
@@ -456,11 +455,11 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
 def test_finalize_material_snapshot_conflict_does_not_write_report(
     tmp_path: Path, layout: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, layout)
-    reports = tmp_path / "reports"
-    reports.mkdir()
+    reports = tmp_path / "output" / "report"
+    reports.mkdir(parents=True)
     report = reports / f"{_RUN_ID}.md"
     original_report = (
         f"# Web Update Monitor Report\n\nRun: `{_RUN_ID}`\n\nprevious report\n"
@@ -491,8 +490,8 @@ def test_finalize_material_snapshot_conflict_does_not_write_report(
 def test_finalize_rejects_legacy_revision_without_clearing_transaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, include_run_id: bool
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(
         state, "legacy", include_run_id=include_run_id
     )
@@ -536,8 +535,8 @@ def test_finalize_report_failure_can_be_retried(
     layout: str,
     include_run_id: bool,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(
         state, layout, include_run_id=include_run_id
     )
@@ -568,11 +567,11 @@ def test_finalize_report_failure_can_be_retried(
     assert metadata.exists()
     assert candidate.exists()
     assert json.loads(metadata.read_text(encoding="utf-8"))["run_id"] == _RUN_ID
-    assert not (tmp_path / "reports").exists()
+    assert not (tmp_path / "output" / "report").exists()
 
     result = finalize(tmp_path, decision)
 
-    report_path = tmp_path / "reports" / f"{_RUN_ID}.md"
+    report_path = tmp_path / "output" / "report" / f"{_RUN_ID}.md"
     report_content = report_path.read_text(encoding="utf-8")
     assert result["report_path"] == str(report_path)
     assert write_attempts == 2
@@ -584,8 +583,8 @@ def test_finalize_report_failure_can_be_retried(
 def test_finalize_prefers_grouped_transaction_and_cleans_matching_legacy_files(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     grouped_metadata, grouped_candidate, snapshot = _write_review_transaction(
         state, "grouped", candidate="grouped\n"
     )
@@ -627,8 +626,8 @@ def test_finalize_prefers_grouped_transaction_and_cleans_matching_legacy_files(
 def test_cleanup_failure_keeps_grouped_transaction_authoritative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     grouped_metadata, grouped_candidate, _ = _write_review_transaction(
         state, "grouped", candidate="grouped\n"
     )
@@ -718,8 +717,8 @@ def test_finalize_does_not_mix_grouped_and_legacy_paths(
     grouped_setup: Callable[[Path, Path, Path, Path], Path],
     message: str,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     legacy_metadata, legacy_candidate, snapshot = _write_review_transaction(
         state, "legacy"
     )
@@ -773,8 +772,8 @@ def _replace_with_legacy_fifo(path: Path) -> None:
 def test_finalize_rejects_non_regular_legacy_metadata(
     tmp_path: Path, make_unsafe: Callable[[Path], Path | None]
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
     outside = make_unsafe(metadata)
     outside_data = None if outside is None else outside.read_bytes()
@@ -808,8 +807,8 @@ def test_finalize_rejects_non_regular_legacy_metadata(
 def test_finalize_rejects_non_regular_legacy_candidate(
     tmp_path: Path, make_unsafe: Callable[[Path], Path | None]
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
     outside = make_unsafe(candidate)
 
@@ -831,8 +830,8 @@ def test_finalize_rejects_non_regular_legacy_candidate(
 
 
 def test_finalize_rejects_legacy_candidate_hash_mismatch(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
     candidate.write_text("tampered\n", encoding="utf-8")
 
@@ -855,8 +854,8 @@ def test_finalize_rejects_legacy_candidate_hash_mismatch(tmp_path: Path) -> None
 def test_finalize_rejects_symlinked_legacy_candidate_directory(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
     candidates = state / "candidates"
     candidate.unlink()
@@ -961,8 +960,8 @@ def test_check_reuses_pending_target_and_fetches_other_targets(
     targets = load_targets(tmp_path / "targets.csv")
     target_id = str(targets[0]["target_id"])
     other_id = str(targets[1]["target_id"])
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(
         state, "legacy", target_id=target_id
     )
@@ -1027,8 +1026,8 @@ def test_check_discards_stale_pending_target(
     expected_monitor_calls: int,
 ) -> None:
     _write_targets(tmp_path / "targets.csv", targets_csv)
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
     calls = 0
 
@@ -1065,8 +1064,8 @@ def test_monitor_update_failure_keeps_previous_review_finalizable(
     monkeypatch: pytest.MonkeyPatch,
     failure_point: str,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
     target = {
         "target_id": "example",
@@ -1126,8 +1125,8 @@ def test_monitor_update_failure_keeps_previous_review_finalizable(
 def test_staging_cleanup_failure_does_not_commit_monitor_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
     original_metadata = metadata.read_bytes()
     cleanup_error = "injected staging cleanup failure"
@@ -1177,10 +1176,10 @@ def test_staging_cleanup_failure_does_not_commit_monitor_result(
 def test_failed_commit_marker_keeps_undo_available_for_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, _ = _write_review_transaction(state, "grouped")
-    recovery_dir = state / ".pending-recovery"
+    recovery_dir = state / "recovery"
     commit_marker = recovery_dir / "example.json.commit"
     original_fsync = workspace._fsync_directory  # pyright: ignore[reportPrivateUsage]
     original_write = workspace._write_temporary_file  # pyright: ignore[reportPrivateUsage]
@@ -1274,12 +1273,12 @@ def test_finalize_resolves_ambiguous_commit_by_requested_revision(
     revision: str,
     expected_snapshot: str,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     _, _, snapshot = _write_review_transaction(state, "grouped")
     _leave_ambiguous_replacement(state, monkeypatch)
-    assert (state / ".pending-recovery" / "example.json").exists()
-    assert (state / ".pending-recovery" / "example.json.commit").exists()
+    assert (state / "recovery" / "example.json").exists()
+    assert (state / "recovery" / "example.json.commit").exists()
     with pytest.raises(WorkspaceError, match="requires a decision revision"):
         workspace._recover_pending(  # pyright: ignore[reportPrivateUsage]
             state, "example"
@@ -1298,14 +1297,14 @@ def test_finalize_resolves_ambiguous_commit_by_requested_revision(
 def test_finalize_unrelated_revision_preserves_ambiguous_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
     _leave_ambiguous_replacement(state, monkeypatch)
     monkeypatch.undo()
     original_metadata = metadata.read_bytes()
     original_candidate = candidate.read_bytes()
-    recovery_dir = state / ".pending-recovery"
+    recovery_dir = state / "recovery"
 
     with pytest.raises(WorkspaceError, match="does not match pending replacement"):
         finalize(
@@ -1330,8 +1329,8 @@ def test_finalize_unrelated_revision_preserves_ambiguous_replacement(
 def test_finalize_rejects_symlinked_pending_ancestor_with_ambiguous_records(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     _write_review_transaction(state, "grouped")
     _leave_ambiguous_replacement(state, monkeypatch)
     monkeypatch.undo()
@@ -1340,7 +1339,7 @@ def test_finalize_rejects_symlinked_pending_ancestor_with_ambiguous_records(
     moved_target = state / "pending" / "example-moved"
     target_dir.replace(moved_target)
     target_dir.symlink_to(moved_target, target_is_directory=True)
-    recovery_dir = state / ".pending-recovery"
+    recovery_dir = state / "recovery"
 
     with pytest.raises(WorkspaceError, match="non-symlink directory"):
         finalize(
@@ -1360,8 +1359,8 @@ def test_finalize_rejects_symlinked_pending_ancestor_with_ambiguous_records(
 
 
 def test_finalize_recovers_interrupted_pending_replacement(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
     undo = workspace._capture_pending_replacement(  # pyright: ignore[reportPrivateUsage]
         state, "example"
@@ -1380,14 +1379,14 @@ def test_finalize_recovers_interrupted_pending_replacement(tmp_path: Path) -> No
     assert snapshot.read_text(encoding="utf-8") == "new\n"
     assert not metadata.exists()
     assert not candidate.exists()
-    assert not (state / ".pending-recovery" / "example.json").exists()
+    assert not (state / "recovery" / "example.json").exists()
 
 
 def test_recovery_removes_temporaries_from_interrupted_initial_write(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     undo = workspace._capture_pending_replacement(  # pyright: ignore[reportPrivateUsage]
         state, "example"
     )
@@ -1402,7 +1401,7 @@ def test_recovery_removes_temporaries_from_interrupted_initial_write(
     workspace._recover_pending(state, "example")  # pyright: ignore[reportPrivateUsage]
 
     assert not target_dir.exists()
-    assert not (state / ".pending-recovery" / "example.json").exists()
+    assert not (state / "recovery" / "example.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -1417,8 +1416,8 @@ def test_recovery_removes_temporaries_from_interrupted_initial_write(
 def test_pending_recovery_rejects_unsafe_record(
     tmp_path: Path, unsafe_record: str, message: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    recovery_dir = state / ".pending-recovery"
+    state = tmp_path / "internal" / "state"
+    recovery_dir = state / "recovery"
     recovery_dir.mkdir(parents=True, mode=0o700)
     record = recovery_dir / "example.json"
     outside = tmp_path / "outside.json"
@@ -1442,8 +1441,8 @@ def test_pending_recovery_rejects_unsafe_record(
 def test_finalize_rejects_decision_mismatch_for_pending_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, _ = _write_review_transaction(state, "grouped")
     decision = {
         "target_id": "example",
@@ -1473,7 +1472,7 @@ def test_finalize_rejects_decision_mismatch_for_pending_cleanup(
 
     assert metadata.exists()
     assert candidate.exists()
-    assert (state / ".pending-recovery" / "example.json").exists()
+    assert (state / "recovery" / "example.json").exists()
 
     monkeypatch.undo()
     result = finalize(tmp_path, decision)
@@ -1506,14 +1505,14 @@ def test_check_syncs_new_state_and_grouped_pending_directories(
     result = check(tmp_path, tmp_path / "targets.csv")
 
     target_id = str(load_targets(tmp_path / "targets.csv")[0]["target_id"])
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     pending = state / "pending"
     assert result["targets"][0]["action"] == "review"  # type: ignore[index]
     assert tmp_path in fsynced
     assert state in fsynced
     assert pending in fsynced
     assert pending / target_id in fsynced
-    assert state / ".pending-recovery" in fsynced
+    assert state / "recovery" in fsynced
     assert (pending / target_id / "state.json").exists()
 
 
@@ -1523,7 +1522,7 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
     _write_targets(
         tmp_path / "targets.csv", "Example,https://example.com/,pricing,true\n"
     )
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     snapshots = state / "snapshots"
     snapshots.mkdir(parents=True)
     target_id = str(load_targets(tmp_path / "targets.csv")[0]["target_id"])
@@ -1603,8 +1602,8 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
 def test_pending_reviews_recovers_partial_replacement_before_listing(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     pending = state / "pending"
     pending.mkdir()
     workspace._write_recovery_record(  # pyright: ignore[reportPrivateUsage]
@@ -1633,8 +1632,8 @@ def test_pending_reviews_legacy_reconstructs_diff_and_context(tmp_path: Path) ->
         tmp_path / "targets.csv", "Example,https://example.com/,pricing,true\n"
     )
     target_id = str(load_targets(tmp_path / "targets.csv")[0]["target_id"])
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     _write_review_transaction(state, "legacy", target_id=target_id)
 
     pending = workspace.pending_reviews(
@@ -1652,8 +1651,8 @@ def test_pending_reviews_legacy_reconstructs_diff_and_context(tmp_path: Path) ->
 
 
 def test_discard_pending_clears_conflicted_review(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, "grouped")
 
     result = workspace.discard_pending(tmp_path, "example")
@@ -1672,7 +1671,7 @@ def test_discard_pending_clears_conflicted_review(tmp_path: Path) -> None:
 
 
 def test_pending_target_listing_rejects_hidden_unsafe_entry(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     pending = state / "pending"
     pending.mkdir(parents=True)
     outside = tmp_path / "outside"
@@ -1684,8 +1683,8 @@ def test_pending_target_listing_rejects_hidden_unsafe_entry(tmp_path: Path) -> N
 
 
 def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     target = {
         "target_id": "example",
         "name": "Example",
@@ -1719,8 +1718,8 @@ def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
 def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     pending = state / "pending"
     original_lstat = Path.lstat
     original_iterdir = Path.iterdir
@@ -1786,8 +1785,8 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
 def test_pending_reviews_grouped_without_targets_uses_persisted_context(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, _, _ = _write_review_transaction(state, "grouped")
     payload = json.loads(metadata.read_text(encoding="utf-8"))
     payload.update({
@@ -1813,8 +1812,8 @@ def test_pending_reviews_grouped_without_targets_uses_persisted_context(
 def test_pending_reviews_legacy_without_targets_uses_safe_fallback(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     _write_review_transaction(state, "legacy")
 
     result = workspace.pending_reviews(tmp_path, target_id="example")
@@ -1851,8 +1850,8 @@ def test_legacy_review_context_falls_back_when_target_is_not_in_csv(
 def test_legacy_pending_diff_rejects_invalid_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
     pending = json.loads(metadata.read_text(encoding="utf-8"))
 
@@ -1890,8 +1889,8 @@ def test_legacy_pending_diff_rejects_invalid_state(
 
 
 def test_pending_review_rejects_candidate_hash_mismatch(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     metadata, candidate, _ = _write_review_transaction(state, "grouped")
     payload = json.loads(metadata.read_text(encoding="utf-8"))
     payload.update({
@@ -1910,8 +1909,8 @@ def test_pending_review_rejects_candidate_hash_mismatch(tmp_path: Path) -> None:
 
 
 def test_pending_reviews_rejects_unknown_target_id(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
 
     with pytest.raises(WorkspaceError, match="no valid pending"):
         workspace.pending_reviews(
@@ -1922,8 +1921,8 @@ def test_pending_reviews_rejects_unknown_target_id(tmp_path: Path) -> None:
 def test_main_discard_command_emits_json(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     _write_review_transaction(state, "grouped")
 
     assert (
@@ -1944,8 +1943,8 @@ def test_main_discard_command_emits_json(
 def test_recovery_directory_parent_fsync_retries_after_creation_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     _write_review_transaction(state, "grouped")
     record = workspace._capture_pending_replacement(  # pyright: ignore[reportPrivateUsage]
         state, "example"
@@ -1968,7 +1967,7 @@ def test_recovery_directory_parent_fsync_retries_after_creation_failure(
             state, record
         )
 
-    recovery_dir = state / ".pending-recovery"
+    recovery_dir = state / "recovery"
     assert recovery_dir.is_dir()
     assert not (recovery_dir / "example.json").exists()
     workspace._write_recovery_record(  # pyright: ignore[reportPrivateUsage]
@@ -1983,8 +1982,8 @@ def test_check_migrates_legacy_pending_on_successful_changed_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target_id = "example"
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     legacy_metadata, legacy_candidate, _ = _write_review_transaction(
         state, "legacy", target_id=target_id
     )
@@ -2034,8 +2033,8 @@ def test_main_requires_targets_and_reports_invalid_workspace(
 
 
 def _state(tmp_path: Path) -> Path:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     return state
 
 
@@ -2066,7 +2065,7 @@ def test_write_report_creates_private_run_report(tmp_path: Path) -> None:
 
     destination = workspace._write_report(tmp_path, _RUN_ID, "example", report)  # pyright: ignore[reportPrivateUsage]
 
-    reports = tmp_path / "reports"
+    reports = tmp_path / "output" / "report"
     content = destination.read_text()
     assert destination == reports / f"{_RUN_ID}.md"
     assert f"Run: `{_RUN_ID}`" in content
@@ -2079,8 +2078,8 @@ def test_write_report_aggregates_targets_into_one_run_file(tmp_path: Path) -> No
     workspace._write_report(tmp_path, _RUN_ID, "one", "## One\n\nFirst.\n")  # pyright: ignore[reportPrivateUsage]
     workspace._write_report(tmp_path, _RUN_ID, "two", "## Two\n\nSecond.\n")  # pyright: ignore[reportPrivateUsage]
 
-    reports = list((tmp_path / "reports").glob("*.md"))
-    assert reports == [tmp_path / "reports" / f"{_RUN_ID}.md"]
+    reports = list((tmp_path / "output" / "report").glob("*.md"))
+    assert reports == [tmp_path / "output" / "report" / f"{_RUN_ID}.md"]
     content = reports[0].read_text()
     assert "## One" in content
     assert "## Two" in content
@@ -2118,7 +2117,7 @@ def test_write_report_rejects_invalid_run_id(tmp_path: Path, run_id: str) -> Non
     with pytest.raises(WorkspaceError, match="invalid_run_id"):
         workspace._write_report(tmp_path, run_id, "example", "update\n")  # pyright: ignore[reportPrivateUsage]
 
-    assert not (tmp_path / "reports").exists()
+    assert not (tmp_path / "output" / "report").exists()
 
 
 def test_write_report_rejects_reserved_section_markers(tmp_path: Path) -> None:
@@ -2127,7 +2126,7 @@ def test_write_report_rejects_reserved_section_markers(tmp_path: Path) -> None:
     with pytest.raises(WorkspaceError, match="reserved marker"):
         workspace._write_report(tmp_path, _RUN_ID, "example", report)  # pyright: ignore[reportPrivateUsage]
 
-    assert not (tmp_path / "reports" / f"{_RUN_ID}.md").exists()
+    assert not (tmp_path / "output" / "report" / f"{_RUN_ID}.md").exists()
 
 
 def _symlink_workspace_root_for_report(
@@ -2135,13 +2134,14 @@ def _symlink_workspace_root_for_report(
 ) -> tuple[Path, Path]:
     workspace_root = tmp_path / "workspace-link"
     workspace_root.symlink_to(outside, target_is_directory=True)
-    return workspace_root, outside / "reports" / f"{_RUN_ID}.md"
+    return workspace_root, outside / "output" / "report" / f"{_RUN_ID}.md"
 
 
 def _symlink_reports_directory_for_report(
     tmp_path: Path, outside: Path
 ) -> tuple[Path, Path]:
-    (tmp_path / "reports").symlink_to(outside, target_is_directory=True)
+    (tmp_path / "output").mkdir()
+    (tmp_path / "output" / "report").symlink_to(outside, target_is_directory=True)
     return tmp_path, outside / f"{_RUN_ID}.md"
 
 
@@ -2165,8 +2165,8 @@ def test_write_report_rejects_symlinked_workspace_paths(
 
 
 def test_write_report_rejects_symlinked_destination(tmp_path: Path) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
+    reports = tmp_path / "output" / "report"
+    reports.mkdir(parents=True)
     outside = tmp_path / "outside.md"
     outside.write_text("original\n")
     destination = reports / f"{_RUN_ID}.md"
@@ -2182,8 +2182,8 @@ def test_write_report_rejects_symlinked_destination(tmp_path: Path) -> None:
 def test_write_report_preserves_destination_when_replace_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
+    reports = tmp_path / "output" / "report"
+    reports.mkdir(parents=True)
     destination = reports / f"{_RUN_ID}.md"
     destination.write_text("old report\n")
 
@@ -2206,14 +2206,18 @@ def test_write_report_fsyncs_directories(
 
     workspace._write_report(tmp_path, _RUN_ID, "example", "update\n")  # pyright: ignore[reportPrivateUsage]
 
-    assert fsynced == [tmp_path, tmp_path / "reports"]
+    assert fsynced == [
+        tmp_path,
+        tmp_path / "output",
+        tmp_path / "output" / "report",
+    ]
 
 
 def test_write_report_reports_fsync_failure_after_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
+    reports = tmp_path / "output" / "report"
+    reports.mkdir(parents=True)
 
     def fail(path: Path) -> None:
         if path == reports:
@@ -2232,7 +2236,9 @@ def test_write_report_reports_fsync_failure_after_replacement(
 def test_promote_snapshot_rejects_symlinked_state_root(tmp_path: Path) -> None:
     outside = tmp_path / "outside-state"
     outside.mkdir()
-    state = tmp_path / ".wsum"
+    internal = tmp_path / "internal"
+    internal.mkdir()
+    state = internal / "state"
     state.symlink_to(outside, target_is_directory=True)
     digest = hashlib.sha256(b"next\n").hexdigest()
 
@@ -2646,7 +2652,7 @@ def test_load_targets_rejects_duplicate_and_malformed_rows(
 def test_pending_path_resolver_selects_layout_or_creates_grouped(
     tmp_path: Path, layout: str
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     pending = state / "pending"
     pending.mkdir(parents=True)
     if layout == "grouped":
@@ -2852,8 +2858,8 @@ def test_read_recovery_file_rejects_invalid_json(tmp_path: Path, data: bytes) ->
 def test_recovery_record_write_and_retire_roundtrip(
     tmp_path: Path, purpose: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     record = _replace_record() if purpose == "replace" else _commit_record()
     writer = (
         workspace._write_recovery_record
@@ -2880,9 +2886,9 @@ def test_recovery_record_write_and_retire_roundtrip(
 def test_retire_recovery_record_ignores_unlink_errors_when_requested(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
-    recovery = state / ".pending-recovery"
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
+    recovery = state / "recovery"
     recovery.mkdir(mode=0o700)
     path = recovery / "example.json"
     path.write_text(json.dumps(_replace_record()), encoding="utf-8")
@@ -2987,8 +2993,8 @@ def test_main_finalize_dispatches_decision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     _write_review_transaction(state, "grouped")
     payload = json.dumps({
         "target_id": "example",
@@ -3154,7 +3160,7 @@ def test_existing_pending_paths_wraps_stat_errors(
     error: type[OSError],
     message: str,
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     pending = state / "pending"
     pending.mkdir(parents=True)
     (pending / "example.json").write_text("{}", encoding="utf-8")
@@ -3189,7 +3195,7 @@ def test_existing_pending_paths_wraps_stat_errors(
 def test_existing_pending_paths_rejects_unsafe_layouts(
     tmp_path: Path, location: str, message: str
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     pending = state / "pending"
     pending.mkdir(parents=True)
     candidates = state / "candidates"
@@ -3220,7 +3226,7 @@ def test_existing_pending_paths_rejects_unsafe_layouts(
 def test_candidate_path_rejects_unavailable_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, message: str
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     candidate_dir = state / "pending" / "example"
     candidate_dir.mkdir(parents=True)
     (candidate_dir / "state.json").write_text("{}", encoding="utf-8")
@@ -3355,8 +3361,8 @@ def test_temporary_file_creation_and_write_failures_are_wrapped(
 def test_snapshot_promotion_wraps_failures_and_checks_durable_readback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     data = b"candidate"
     digest = hashlib.sha256(data).hexdigest()
     monkeypatch.setattr(workspace, "_fsync_snapshot_directory", lambda _path: None)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
@@ -3398,8 +3404,8 @@ def test_snapshot_promotion_wraps_failures_and_checks_durable_readback(
 def test_snapshot_promotion_accepts_candidate_source_and_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     candidate = tmp_path / "candidate.txt"
     candidate.write_bytes(b"candidate")
     digest = __import__("hashlib").sha256(b"candidate").hexdigest()
@@ -3450,7 +3456,7 @@ def test_report_write_validates_and_persists_atomically(
             original_fsync = workspace._fsync_directory
 
             def fail_report_fsync(path: Path) -> None:
-                if path.name == "reports":
+                if path.name == "report":
                     raise OSError("injected")  # ruff: ignore[raw-string-in-exception]
                 original_fsync(path)
 
@@ -3473,8 +3479,8 @@ def test_report_write_validates_and_persists_atomically(
 def test_monitor_target_skips_candidate_read_for_unchanged_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     (state / "snapshots").mkdir()
     monkeypatch.setattr(workspace, "_recover_pending", lambda *_args, **_kwargs: None)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     monkeypatch.setattr(workspace.monitor, "run", lambda _args: {"status": "unchanged"})  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
@@ -3497,7 +3503,7 @@ def test_monitor_target_skips_candidate_read_for_unchanged_status(
 def test_pending_cleanup_paths_rejects_unsafe_entries(
     tmp_path: Path, kind: str, message: str
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     pending = state / "pending"
     pending.mkdir(parents=True)
     candidates = state / "candidates"
@@ -3523,7 +3529,7 @@ def test_pending_cleanup_paths_rejects_unsafe_entries(
 def test_remove_pending_wraps_removal_and_sync_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     pending = state / "pending"
     target = pending / "example"
     target.mkdir(parents=True)
@@ -3585,9 +3591,9 @@ def test_pending_file_wraps_atomic_write_failures(
 def test_recovery_directory_validates_existing_directory(
     tmp_path: Path, kind: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
-    recovery = state / ".pending-recovery"
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
+    recovery = state / "recovery"
     if kind == "symlink":
         recovery.symlink_to(tmp_path, target_is_directory=True)
     elif kind == "permissive":
@@ -3633,8 +3639,8 @@ def test_recovery_record_validator_accepts_supported_optional_shapes(
 
 
 def test_read_commit_record_rejects_non_commit_record(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
-    recovery = state / ".pending-recovery"
+    state = tmp_path / "internal" / "state"
+    recovery = state / "recovery"
     recovery.mkdir(parents=True, mode=0o700)
     path = recovery / "example.json.commit"
     path.write_text(json.dumps(_replace_record()), encoding="utf-8")
@@ -3651,14 +3657,14 @@ def test_read_commit_record_rejects_non_commit_record(tmp_path: Path) -> None:
 def test_recovery_writer_validates_and_wraps_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     record = _replace_record()
     if fault == "commit-kind":
         with pytest.raises(WorkspaceError, match="pending commit record is invalid"):
             workspace._write_commit_record(state, record)  # pyright: ignore[reportPrivateUsage]
         return
-    recovery = state / ".pending-recovery"
+    recovery = state / "recovery"
     recovery.mkdir(mode=0o700)
     destination = recovery / "example.json"
     if fault == "unsafe-existing":
@@ -3689,8 +3695,8 @@ def test_recovery_writer_validates_and_wraps_failures(
 def test_recovery_retirement_checks_safety_and_optional_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    recovery = state / ".pending-recovery"
+    state = tmp_path / "internal" / "state"
+    recovery = state / "recovery"
     recovery.mkdir(parents=True, mode=0o700)
     path = recovery / "example.json"
     path.write_text(json.dumps(_replace_record()), encoding="utf-8")
@@ -3842,8 +3848,8 @@ def test_pending_temporary_cleanup_rejects_invalid_or_unremovable_files(
 def test_restore_pending_replacement_restores_legacy_or_absent_layout(
     tmp_path: Path, layout: str, old_state: bytes | None, old_candidate: bytes | None
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     pending = state / "pending"
     pending.mkdir()
     candidates = state / "candidates"
@@ -3923,8 +3929,8 @@ def test_decision_validation_rejects_invalid_shapes(
 def test_replacement_matches_commit_returns_false_for_invalid_state(
     tmp_path: Path, payload: object, result: bool
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     data = b"candidate"
     item = _pending_payload(candidate_sha256=hashlib.sha256(data).hexdigest())
     item.update(payload if isinstance(payload, dict) else {})  # pyright: ignore[reportUnknownArgumentType]
@@ -3973,8 +3979,8 @@ def test_replacement_matches_commit_returns_false_for_invalid_state(
 def test_replacement_matches_commit_handles_missing_malformed_and_unsafe_paths(  # ruff: ignore[too-many-return-statements]
     tmp_path: Path, fault: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     pending = state / "pending"
     target = pending / "example"
     if fault == "state-file":
@@ -4031,8 +4037,8 @@ def test_replacement_matches_commit_handles_missing_malformed_and_unsafe_paths( 
 def test_replacement_matches_commit_accepts_valid_durable_replacement(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     data = b"candidate"
     payload = _pending_payload(candidate_sha256=hashlib.sha256(data).hexdigest())
     _grouped_pending(state, payload, data)
@@ -4066,8 +4072,8 @@ def test_replacement_previous_revision_rejects_corrupt_backup(
 def test_recover_pending_completes_noncommit_recovery_records(
     tmp_path: Path, mode: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     (state / "pending").mkdir()
     if mode == "no-record":
         assert workspace._recover_pending(state, "example") is None  # pyright: ignore[reportPrivateUsage]
@@ -4119,8 +4125,8 @@ def test_recover_pending_completes_noncommit_recovery_records(
 def test_recover_pending_rejects_unresolvable_commit_states(
     tmp_path: Path, case: str, revision: str | None, expected: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     (state / "pending").mkdir()
     _write_recovery(state, _replace_record())
     _write_commit(state)
@@ -4133,8 +4139,8 @@ def test_recover_pending_rejects_unresolvable_commit_states(
 def test_prepare_pending_for_read_preserves_complete_committed_replacement(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     _write_recovery(state, _replace_record())
     _write_commit(state)
     data = b"new candidate"
@@ -4166,8 +4172,8 @@ def test_prepare_pending_for_read_preserves_complete_committed_replacement(
 def test_discard_pending_accepts_complete_committed_replacement(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     _write_recovery(state, _replace_record())
     _write_commit(state)
     data = b"new candidate"
@@ -4199,8 +4205,8 @@ def test_discard_pending_accepts_complete_committed_replacement(
 def test_prepare_pending_for_read_rejects_incomplete_committed_replacement(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     (state / "pending").mkdir()
     _write_recovery(state, _replace_record())
     _write_commit(state)
@@ -4218,8 +4224,8 @@ def test_prepare_pending_for_read_rejects_incomplete_committed_replacement(
 def test_recover_pending_resolves_committed_replacement_by_revision(
     tmp_path: Path, resolution: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     old_revision = "c" * 32
     old_state = json.dumps({"revision": old_revision}).encode()
     backup = base64.b64encode(old_state).decode()
@@ -4250,8 +4256,8 @@ def test_recover_pending_resolves_committed_replacement_by_revision(
 def test_recover_pending_rejects_conflicting_recovery_and_commit_records(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     _write_recovery(
         state,
         {
@@ -4276,7 +4282,7 @@ def test_recover_pending_rejects_conflicting_recovery_and_commit_records(
 def test_read_pending_rejects_invalid_json_and_wrong_shapes(
     tmp_path: Path, fault: str
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     target = state / "pending" / "example"
     target.mkdir(parents=True)
     path = target / "state.json"
@@ -4314,7 +4320,7 @@ def test_read_pending_rejects_invalid_json_and_wrong_shapes(
 def test_read_pending_rejects_extra_fields_and_bad_run_ids(
     tmp_path: Path, field_change: dict[str, object], message: str
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     payload = _pending_payload()
     payload.update(field_change)
     _grouped_pending(state, payload, b"candidate")
@@ -4323,7 +4329,7 @@ def test_read_pending_rejects_extra_fields_and_bad_run_ids(
 
 
 def test_read_pending_backfills_legacy_missing_run_id(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     target = state / "pending" / "example"
     target.mkdir(parents=True)
     payload = _pending_payload()
@@ -4352,7 +4358,7 @@ def test_load_targets_rejects_non_string_csv_values(
 def test_existing_pending_paths_requires_legacy_candidate_directory(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     pending = state / "pending"
     pending.mkdir(parents=True)
     (pending / "example.json").write_text("{}", encoding="utf-8")
@@ -4376,7 +4382,7 @@ def test_report_write_rejects_empty_or_oversized_input(
 def test_remove_pending_detects_candidate_directory_that_changes_after_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     pending = state / "pending"
     pending.mkdir(parents=True)
     candidates = state / "candidates"
@@ -4402,9 +4408,9 @@ def test_remove_pending_detects_candidate_directory_that_changes_after_validatio
 def test_recovery_directory_wraps_second_lstat_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
-    directory = state / ".pending-recovery"
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
+    directory = state / "recovery"
     directory.mkdir(mode=0o700)
     original_lstat = Path.lstat
     calls = 0
@@ -4429,8 +4435,8 @@ def test_recovery_directory_wraps_second_lstat_failure(
 def test_recovery_writer_rejects_size_and_missing_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     if fault == "size":
         monkeypatch.setattr(workspace, "_MAX_RECOVERY_RECORD_BYTES", 0)
         expected = "size is invalid"
@@ -4448,8 +4454,8 @@ def test_recovery_writer_rejects_size_and_missing_directory(
 def test_recovery_retirement_returns_when_directory_is_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     monkeypatch.setattr(
         workspace,
         "_recovery_directory",
@@ -4461,7 +4467,7 @@ def test_recovery_retirement_returns_when_directory_is_missing(
 def test_capture_pending_replacement_rejects_target_race(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     target = state / "pending" / "example"
     target.mkdir(parents=True)
     (target / "state.json").write_text("{}", encoding="utf-8")
@@ -4536,8 +4542,8 @@ def test_pending_temporary_cleanup_skips_entries_removed_during_scan(
 def test_restore_pending_replacement_rejects_unsafe_layout_or_sync_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     pending = state / "pending"
     pending.mkdir()
     grouped = pending / "example"
@@ -4587,8 +4593,8 @@ def _valid_payload(data: bytes = b"new candidate") -> dict[str, object]:
 def test_install_pending_replacement_handles_legacy_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     (state / "pending").mkdir()
     candidates = state / "candidates"
     candidates.mkdir()
@@ -4613,8 +4619,8 @@ def test_install_pending_replacement_handles_legacy_paths(
 def test_install_pending_replacement_checks_readback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     (state / "pending").mkdir()
     (state / "candidates").mkdir()
     monkeypatch.setattr(workspace, "_fsync_directory", lambda _path: None)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
@@ -4645,8 +4651,8 @@ def test_install_pending_replacement_checks_readback(
 def test_handle_monitor_result_returns_baseline_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     monkeypatch.setattr(
         workspace,
         "_promote_snapshot",
@@ -4662,8 +4668,8 @@ def test_handle_monitor_result_returns_baseline_conflict(
 def test_handle_monitor_result_rejects_mismatched_candidate_digest(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     target = {"target_id": "example", "name": "Example"}
     result = {
         "status": "changed",
@@ -4677,8 +4683,8 @@ def test_handle_monitor_result_rejects_mismatched_candidate_digest(
 
 
 def test_handle_monitor_result_rejects_unknown_status(tmp_path: Path) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     target = {"target_id": "example", "name": "Example"}
     with pytest.raises(WorkspaceError, match="unsupported status"):
         workspace._handle_monitor_result(  # pyright: ignore[reportPrivateUsage]
@@ -4689,7 +4695,7 @@ def test_handle_monitor_result_rejects_unknown_status(tmp_path: Path) -> None:
 def test_read_pending_wraps_state_file_lstat_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     target = state / "pending" / "example"
     target.mkdir(parents=True)
     path = target / "state.json"
@@ -4708,7 +4714,7 @@ def test_read_pending_wraps_state_file_lstat_error(
 
 @pytest.mark.parametrize("kind", ["symlink", "directory"], ids=["symlink", "directory"])
 def test_read_pending_rejects_nonregular_state_file(tmp_path: Path, kind: str) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     target = state / "pending" / "example"
     target.mkdir(parents=True)
     path = target / "state.json"
@@ -4723,8 +4729,8 @@ def test_read_pending_rejects_nonregular_state_file(tmp_path: Path, kind: str) -
 def test_finalize_recovers_discard_cleanup_before_reading_pending_state(
     tmp_path: Path,
 ) -> None:
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     (state / "pending").mkdir()
     discard = {
         "kind": "cleanup",
@@ -4746,8 +4752,8 @@ def test_finalize_rejects_pending_target_id_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path
-    state = root / ".wsum"
-    state.mkdir()
+    state = root / "internal" / "state"
+    state.mkdir(parents=True)
     monkeypatch.setattr(
         workspace,
         "_read_pending",
@@ -4762,8 +4768,8 @@ def test_finalize_checks_report_path_after_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path
-    state = root / ".wsum"
-    state.mkdir()
+    state = root / "internal" / "state"
+    state.mkdir(parents=True)
     pending = {
         "target_id": "example",
         "revision": _REVISION,
@@ -4781,7 +4787,7 @@ def test_finalize_checks_report_path_after_commit(
     monkeypatch.setattr(
         workspace,
         "_write_report",
-        lambda *_args: root / "reports" / "actual.md",  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        lambda *_args: root / "output" / "report" / "actual.md",  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     )
     monkeypatch.setattr(workspace, "_write_recovery_record", lambda *_args: None)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     monkeypatch.setattr(workspace, "_complete_cleanup_record", lambda *_args: None)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
@@ -5372,7 +5378,7 @@ def test_link_review_transaction_survives_resume_and_promotes_identity_baseline(
         assert workspace.pending_reviews(
             tmp_path, targets=tmp_path / "targets.csv"
         ) == {"reviews": []}
-        assert not list((tmp_path / "reports").glob("*.md"))
+        assert not list((tmp_path / "output" / "report").glob("*.md"))
     assert (
         cast(
             "list[dict[str, object]]",
@@ -5465,7 +5471,7 @@ def _create_interest_review(tmp_path: Path) -> tuple[str, Path, Path, Path]:
     )
     target = load_targets(tmp_path / "targets.csv")[0]
     target_id = str(target["target_id"])
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     snapshots = state / "snapshots"
     snapshots.mkdir(parents=True)
     snapshot = snapshots / f"{target_id}.txt"
@@ -5642,8 +5648,8 @@ def test_large_csv_text_and_serialized_expansion(tmp_path: Path, field: str) -> 
     previous_limit = workspace.csv.field_size_limit()
     target = load_targets(tmp_path / "targets.csv")[0]
     assert workspace.csv.field_size_limit() == previous_limit
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     workspace._handle_monitor_result(
         state, target, _changed_result(), _RUN_ID, candidate_data=b"new\n"
     )
@@ -5674,8 +5680,8 @@ def test_priority_exceeding_python_decimal_limit_round_trips(
         encoding="utf-8",
     )
     target = load_targets(tmp_path / "targets.csv")[0]
-    state = tmp_path / ".wsum"
-    state.mkdir()
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
     workspace._handle_monitor_result(
         state, target, _changed_result(), _RUN_ID, candidate_data=b"new\n"
     )
@@ -5777,7 +5783,7 @@ def test_metadata_changes_replace_context_without_rewriting_transaction(
 ) -> None:
     target_id, metadata, candidate, snapshot = _create_interest_review(tmp_path)
     before = [path.read_bytes() for path in (metadata, candidate, snapshot)]
-    stored = workspace._read_pending(tmp_path / ".wsum", target_id)
+    stored = workspace._read_pending(tmp_path / "internal" / "state", target_id)
     (tmp_path / "targets.csv").write_text(_ENRICHED_HEADER + rows, encoding="utf-8")
 
     def forbidden(*_args: object, **_kwargs: object) -> None:
@@ -5877,7 +5883,7 @@ def test_unavailable_configuration_keeps_saved_review_and_direct_finalize(
 def test_legacy_scalar_review_synthesizes_interest(
     tmp_path: Path, layout: str, links: bool
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     metadata, _, _ = _write_review_transaction(state, layout)
     payload = json.loads(metadata.read_text(encoding="utf-8"))
     payload.update({
@@ -5950,15 +5956,15 @@ def test_malformed_interests_fail_reads_backfill_and_committed_recovery(
     payload["interests"] = interests
     metadata.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(WorkspaceError, match="interests are invalid"):
-        workspace._read_pending(tmp_path / ".wsum", target_id)
+        workspace._read_pending(tmp_path / "internal" / "state", target_id)
     assert not workspace._replacement_matches_commit(
-        tmp_path / ".wsum", target_id, {"revision": payload["revision"]}
+        tmp_path / "internal" / "state", target_id, {"revision": payload["revision"]}
     )
     payload.pop("run_id")
     metadata.write_text(json.dumps(payload), encoding="utf-8")
     before = metadata.read_bytes()
     with pytest.raises(WorkspaceError, match="interests are invalid"):
-        workspace._read_pending(tmp_path / ".wsum", target_id)
+        workspace._read_pending(tmp_path / "internal" / "state", target_id)
     assert metadata.read_bytes() == before
 
 
@@ -5972,10 +5978,10 @@ def test_new_interests_pending_backfill_and_replacement_matching(
         payload.pop("link_review")
     payload.pop("run_id")
     metadata.write_text(json.dumps(payload), encoding="utf-8")
-    pending = workspace._read_pending(tmp_path / ".wsum", target_id)
+    pending = workspace._read_pending(tmp_path / "internal" / "state", target_id)
     assert pending["interests"] == payload["interests"]
     assert workspace._replacement_matches_commit(
-        tmp_path / ".wsum", target_id, {"revision": pending["revision"]}
+        tmp_path / "internal" / "state", target_id, {"revision": pending["revision"]}
     )
 
 
@@ -5984,22 +5990,29 @@ def test_pending_serialized_size_boundary_preserves_existing_transaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra_bytes: int
 ) -> None:
     target_id, metadata, candidate, snapshot = _create_interest_review(tmp_path)
-    payload = workspace._read_pending(tmp_path / ".wsum", target_id)
+    payload = workspace._read_pending(tmp_path / "internal" / "state", target_id)
     size = len(workspace._serialize_pending(payload))
     before = [path.read_bytes() for path in (metadata, candidate, snapshot)]
     monkeypatch.setattr(workspace, "_MAX_SNAPSHOT_BYTES", size - extra_bytes)
     if extra_bytes:
         with pytest.raises(WorkspaceError, match="pending decision size"):
-            workspace._write_pending_transaction(tmp_path / ".wsum", payload, b"new\n")
+            workspace._write_pending_transaction(
+                tmp_path / "internal" / "state", payload, b"new\n"
+            )
         with pytest.raises(WorkspaceError, match="pending decision size"):
-            workspace._read_pending(tmp_path / ".wsum", target_id)
+            workspace._read_pending(tmp_path / "internal" / "state", target_id)
         assert not workspace._replacement_matches_commit(
-            tmp_path / ".wsum", target_id, {"revision": payload["revision"]}
+            tmp_path / "internal" / "state",
+            target_id,
+            {"revision": payload["revision"]},
         )
         assert [path.read_bytes() for path in (metadata, candidate, snapshot)] == before
     else:
         assert workspace._serialize_pending(payload) == metadata.read_bytes()
-        assert workspace._read_pending(tmp_path / ".wsum", target_id) == payload
+        assert (
+            workspace._read_pending(tmp_path / "internal" / "state", target_id)
+            == payload
+        )
 
 
 @pytest.mark.parametrize(
@@ -6074,7 +6087,7 @@ def test_shared_url_fetch_and_finalization_use_one_transaction_and_section(
             priority=2,
         ),
     ]
-    assert len(list((tmp_path / ".wsum" / "pending").iterdir())) == 1
+    assert len(list((tmp_path / "internal" / "state" / "pending").iterdir())) == 1
     decision = {
         "target_id": review["target_id"],
         "revision": review["revision"],
@@ -6097,7 +6110,7 @@ def test_enriched_replacement_recovery_keeps_both_revision_choices(
     tmp_path: Path, choose_previous: bool
 ) -> None:
     target_id, metadata, candidate, snapshot = _create_interest_review(tmp_path)
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     previous = workspace._read_pending(state, target_id)
     undo = workspace._capture_pending_replacement(state, target_id)
     replacement = {
@@ -6120,7 +6133,7 @@ def test_enriched_replacement_recovery_keeps_both_revision_choices(
         )["reviews"],
     )[0]
     assert review["interests"] == replacement["interests"]
-    assert (state / ".pending-recovery" / f"{target_id}.json").exists()
+    assert (state / "recovery" / f"{target_id}.json").exists()
     chosen = previous if choose_previous else replacement
     assert (
         finalize(
@@ -6132,7 +6145,7 @@ def test_enriched_replacement_recovery_keeps_both_revision_choices(
     assert snapshot.read_bytes() == b"new\n"
     assert not candidate.exists()
     assert not metadata.exists()
-    assert not list((state / ".pending-recovery").iterdir())
+    assert not list((state / "recovery").iterdir())
 
 
 @pytest.mark.parametrize("corruption", ["interests", "link_review", "diff"])
@@ -6140,7 +6153,7 @@ def test_enriched_committed_recovery_rejects_malformed_review_metadata(
     tmp_path: Path, corruption: str
 ) -> None:
     target_id, metadata, candidate, snapshot = _create_interest_review(tmp_path)
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     payload = workspace._read_pending(state, target_id)
     payload[corruption] = False
     metadata.write_text(json.dumps(payload), encoding="utf-8")
@@ -6168,7 +6181,7 @@ def test_enriched_committed_recovery_rejects_malformed_review_metadata(
 def test_check_reconciliation_uses_one_configuration_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = tmp_path / ".wsum"
+    state = tmp_path / "internal" / "state"
     _write_review_transaction(state, "legacy")
     _write_targets(tmp_path / "targets.csv", "Other,https://other.example/,,false\n")
     original = workspace.load_targets

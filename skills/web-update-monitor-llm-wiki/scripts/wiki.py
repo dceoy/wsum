@@ -31,9 +31,11 @@ fcntl: ModuleType | None = (
     importlib.import_module("fcntl") if os.name == "posix" else None
 )
 
+_OUTPUT = "output"
+_INTERNAL = "internal"
 _KNOWLEDGE = "knowledge"
 _PAGES = "pages"
-_COMPILER = ".compiler"
+_WIKI_STATE = "wiki"
 _SCHEMA_FILE = "SCHEMA.md"
 _INDEX_FILE = "index.md"
 _LEDGER_FILE = "ledger.json"
@@ -81,7 +83,8 @@ _INDEX_LINK_RE = re.compile(r"^pages/([a-z0-9][a-z0-9-]{0,63})\.md(?:#[^\s]*)?$"
 _PAGE_NAME_RE = re.compile(r"^([a-z0-9][a-z0-9-]{0,63})\.md$")
 _PAGE_FILE_RE = re.compile(r"^pages/([a-z0-9][a-z0-9-]{0,63})\.md$")
 _EVIDENCE_LINK_RE = re.compile(
-    r"^\.\./\.\./evidence/([0-9a-f]{64})/(parent\.txt|diff\.txt|links\.json)$"
+    r"^\.\./\.\./\.\./internal/evidence/([0-9a-f]{64})/"
+    r"(parent\.txt|diff\.txt|links\.json)$"
 )
 _ENTRY_RE = re.compile(r"^link-([1-9][0-9]*)$")
 
@@ -254,19 +257,27 @@ class _Workspace:
             "workspace must be an existing non-symlink directory",
         )
         self.root = root.resolve()
-        self.knowledge = self.root / _KNOWLEDGE
+        self.output = self.root / _OUTPUT
+        self.internal = self.root / _INTERNAL
+        self.knowledge = self.output / _KNOWLEDGE
         self.pages = self.knowledge / _PAGES
-        self.compiler = self.knowledge / _COMPILER
+        self.compiler = self.internal / _WIKI_STATE
         self.schema = self.knowledge / _SCHEMA_FILE
         self.index = self.knowledge / _INDEX_FILE
         self.ledger = self.compiler / _LEDGER_FILE
         self.transaction = self.compiler / _TRANSACTION_FILE
-        self.evidence = self.root / _EVIDENCE
+        self.evidence = self.internal / _EVIDENCE
         # (ingestion id, payload file) pairs already digest-verified in this process.
         self.verified: set[tuple[str, str]] = set()
 
     def require_initialized(self) -> None:
-        for path in (self.knowledge, self.pages, self.compiler):
+        for path in (
+            self.output,
+            self.knowledge,
+            self.pages,
+            self.internal,
+            self.compiler,
+        ):
             info = _lstat(path)
             _require(
                 info is not None
@@ -754,7 +765,7 @@ def _validate_citations(
         rendered[key] = {
             "markdown": (
                 f"[evidence {str(ingestion_id)[:12]} {location} L{start}-{end}]"
-                f'(../../{_EVIDENCE}/{ingestion_id}/{file} "{title}")'
+                f'(../../../{_INTERNAL}/{_EVIDENCE}/{ingestion_id}/{file} "{title}")'
             )
         }
     return rendered
@@ -910,8 +921,10 @@ def _read_draft() -> dict[str, Any]:
 def init(workspace: str | Path) -> dict[str, Any]:
     """Create the knowledge workspace without overwriting user content."""
     ws = _Workspace(workspace)
+    _ensure_directory(ws.output, "output directory")
     _ensure_directory(ws.knowledge, "knowledge directory")
     _ensure_directory(ws.pages, "pages directory")
+    _ensure_directory(ws.internal, "internal directory")
     _ensure_directory(ws.compiler, "compiler directory")
     created: list[str] = []
     for path, content in ((ws.schema, _DEFAULT_SCHEMA), (ws.index, _DEFAULT_INDEX)):
