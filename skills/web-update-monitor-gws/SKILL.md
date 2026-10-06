@@ -59,7 +59,7 @@ state/
 └── state-20261006T093000Z.zip
 ```
 
-Use the UTC generation time in the filename as `state-YYYYMMDDTHHMMSSZ.zip`. Do not maintain a separate `current.json` pointer or other state-index files. A logical monitor must not commit more than one generation in the same second. Never overwrite an existing archive.
+Use a monotonic UTC generation timestamp in the filename as `state-YYYYMMDDTHHMMSSZ.zip`. Do not maintain a separate `current.json` pointer or other state-index files. For every new generation, choose `max(current_utc_second, newest_existing_timestamp + 1 second)` so the filename order always matches committed state order, even when multiple state changes occur within one second or a worker clock moves backward. Never overwrite an existing archive.
 
 Each ZIP is a self-contained state generation. Include only regular UTF-8 files under these roots:
 
@@ -92,7 +92,7 @@ If the newest archive fails validation, fail closed and report each independentl
 Persist after every state-changing operation before relying on the local session.
 
 1. List and strictly parse all timestamped state archives, requiring one Drive file ID per filename. If more than three exist after interrupted cleanup, retain them until a new archive verifies.
-2. Build the complete next-state ZIP locally, including `manifest.json`, using the current UTC second as its generation timestamp and filename. If that filename already exists, stop instead of overwriting it.
+2. Derive the next generation timestamp as `max(current_utc_second, newest_existing_timestamp + 1 second)`; when no prior archive exists, use the current UTC second. Build the complete next-state ZIP locally, including `manifest.json`, and use that exact timestamp in both the manifest and filename. If that filename already exists despite the monotonic derivation, stop instead of overwriting it.
 3. Compute the ZIP byte length and SHA-256.
 4. Upload the new archive under its final timestamped filename without modifying or deleting existing archives, and capture the returned Drive file ID.
 5. Read the uploaded archive back by that exact ID, verify its byte length and SHA-256, and validate its manifest and entries exactly as for restore.
