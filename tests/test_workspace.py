@@ -544,7 +544,7 @@ def test_check_reuses_pending_target_and_fetches_other_targets(
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
     metadata, candidate, snapshot = _write_review_transaction(
-        state, "legacy", target_id=target_id
+        state, target_id=target_id
     )
     calls = 0
 
@@ -582,20 +582,11 @@ def test_check_reuses_pending_target_and_fetches_other_targets(
     assert candidate.read_text(encoding="utf-8") == "new\n"
     assert snapshot.read_text(encoding="utf-8") == "old\n"
 
-
 @pytest.mark.parametrize(
     ("targets_csv", "expected_action", "expected_monitor_calls"),
     [
-        (
-            "Example,https://example.com/,pricing,false\n",
-            "skipped",
-            0,
-        ),
-        (
-            "Other,https://example.org/,,true\n",
-            "unchanged",
-            1,
-        ),
+        ("Example,https://example.com/,pricing,false\n", "skipped", 0),
+        ("Other,https://example.org/,,true\n", "unchanged", 1),
     ],
     ids=["disabled", "removed"],
 )
@@ -609,7 +600,7 @@ def test_check_discards_stale_pending_target(
     _write_targets(tmp_path / "targets.csv", targets_csv)
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, snapshot = _write_review_transaction(state, "legacy")
+    metadata, candidate, snapshot = _write_review_transaction(state)
     calls = 0
 
     def fake_monitor(_args: argparse.Namespace) -> dict[str, object]:
@@ -634,7 +625,6 @@ def test_check_discards_stale_pending_target(
     assert not candidate.exists()
     assert snapshot.read_text(encoding="utf-8") == "old\n"
 
-
 @pytest.mark.parametrize(
     "failure_point",
     ["staged-output-fsync", "pending-candidate-fsync"],
@@ -652,7 +642,17 @@ def test_monitor_update_failure_keeps_previous_review_finalizable(
         "target_id": "example",
         "name": "Example",
         "url": "https://example.com/",
-        "watch_focus": "pricing",
+        "interests": [
+            {
+                "name": "Example",
+                "publisher": "",
+                "category": "",
+                "keywords": "",
+                "criteria": "pricing",
+                "priority": None,
+                "enabled": True,
+            }
+        ],
     }
     original_fsync = workspace._fsync_directory  # pyright: ignore[reportPrivateUsage]
     failure_path: Path | None = None
@@ -702,7 +702,6 @@ def test_monitor_update_failure_keeps_previous_review_finalizable(
     assert not metadata.exists()
     assert not candidate.exists()
 
-
 def test_staging_cleanup_failure_does_not_commit_monitor_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -715,7 +714,17 @@ def test_staging_cleanup_failure_does_not_commit_monitor_result(
         "target_id": "example",
         "name": "Example",
         "url": "https://example.com/",
-        "watch_focus": "pricing",
+        "interests": [
+            {
+                "name": "Example",
+                "publisher": "",
+                "category": "",
+                "keywords": "",
+                "criteria": "pricing",
+                "priority": None,
+                "enabled": True,
+            }
+        ],
     }
 
     class FailingTemporaryDirectory:
@@ -752,7 +761,6 @@ def test_staging_cleanup_failure_does_not_commit_monitor_result(
     )
     assert result["action"] == "finalized"
     assert snapshot.read_text(encoding="utf-8") == "new\n"
-
 
 def test_failed_commit_marker_keeps_undo_available_for_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1245,7 +1253,17 @@ def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
         "target_id": "example",
         "name": "Example",
         "url": "https://example.com/",
-        "watch_focus": "pricing",
+        "interests": [
+            {
+                "name": "Example",
+                "publisher": "",
+                "category": "",
+                "keywords": "",
+                "criteria": "pricing",
+                "priority": None,
+                "enabled": True,
+            }
+        ],
     }
     result = _changed_result()
     result["diff"] = 1
@@ -1258,7 +1276,6 @@ def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
             _RUN_ID,
             candidate_data=b"new\n",
         )
-
 
 @pytest.mark.parametrize(
     "fault",
@@ -1348,7 +1365,17 @@ def test_pending_reviews_grouped_without_targets_uses_persisted_context(
     payload.update({
         "name": "Persisted",
         "url": "https://example.com/",
-        "watch_focus": "pricing",
+        "interests": [
+            {
+                "name": "Persisted",
+                "publisher": "",
+                "category": "",
+                "keywords": "",
+                "criteria": "pricing",
+                "priority": None,
+                "enabled": True,
+            }
+        ],
         "diff": "persisted diff",
     })
     metadata.write_text(json.dumps(payload), encoding="utf-8")
@@ -1361,29 +1388,17 @@ def test_pending_reviews_grouped_without_targets_uses_persisted_context(
     review = cast("list[dict[str, object]]", result["reviews"])[0]
     assert review["name"] == "Persisted"
     assert review["url"] == "https://example.com/"
-    assert review["watch_focus"] == "pricing"
+    assert cast("list[dict[str, object]]", review["interests"])[0]["criteria"] == "pricing"
     assert review["diff"] == "persisted diff"
-
 
 def test_pending_review_rejects_candidate_hash_mismatch(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    metadata, candidate, _ = _write_review_transaction(state)
-    payload = json.loads(metadata.read_text(encoding="utf-8"))
-    payload.update({
-        "name": "Example",
-        "url": "https://example.com/",
-        "watch_focus": "pricing",
-        "diff": "diff",
-    })
-    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    _, candidate, _ = _write_review_transaction(state)
     candidate.write_text("tampered\n", encoding="utf-8")
 
     with pytest.raises(WorkspaceError, match="candidate_sha256"):
-        workspace.pending_reviews(
-            tmp_path, targets=tmp_path / "targets.csv", target_id="example"
-        )
-
+        workspace.pending_reviews(tmp_path, target_id="example")
 
 def test_pending_reviews_rejects_unknown_target_id(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
@@ -2089,42 +2104,28 @@ def test_load_targets_rejects_duplicate_and_malformed_rows(
         workspace.load_targets(tmp_path / "targets.csv")
 
 
-@pytest.mark.parametrize(
-    "layout", ["grouped", "legacy", "missing"], ids=["grouped", "legacy", "missing"]
-)
-def test_pending_path_resolver_selects_layout_or_creates_grouped(
-    tmp_path: Path, layout: str
-) -> None:
+def test_pending_path_resolver_uses_current_grouped_layout(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
     pending = state / "pending"
     pending.mkdir(parents=True)
-    if layout == "grouped":
-        (pending / "example").mkdir()
-    elif layout == "legacy":
-        (state / "candidates").mkdir()
-        (pending / "example.json").write_text("{}", encoding="utf-8")
-    if layout == "missing":
-        with pytest.raises(WorkspaceError, match="no valid pending"):
-            workspace._pending_paths(state, "example")  # pyright: ignore[reportPrivateUsage]
-        metadata, candidate = workspace._pending_paths(  # pyright: ignore[reportPrivateUsage]
-            state, "example", create=True
-        )
-        assert metadata == pending / "example" / "state.json"
-        assert candidate == pending / "example" / "candidate.txt"
-    else:
-        metadata, candidate, found = workspace._existing_pending_paths(  # pyright: ignore[reportGeneralTypeIssues, reportPrivateUsage, reportUnknownVariableType]
-            state, "example"
-        )
-        assert found == layout
-        assert metadata.name == (  # pyright: ignore[reportUnknownMemberType]
-            "state.json" if layout == "grouped" else "example.json"
-        )
-        assert (
-            candidate.name == "candidate.txt"  # pyright: ignore[reportUnknownMemberType]
-            if layout == "grouped"
-            else candidate.name == "example.txt"  # pyright: ignore[reportUnknownMemberType]
-        )
 
+    with pytest.raises(WorkspaceError, match="no valid pending"):
+        workspace._pending_paths(state, "example")
+
+    metadata, candidate = workspace._pending_paths(state, "example", create=True)
+    assert metadata == pending / "example" / "state.json"
+    assert candidate == pending / "example" / "candidate.txt"
+    assert workspace._existing_pending_paths(state, "example") == (metadata, candidate)
+
+
+def test_pending_target_listing_rejects_removed_flat_layout(tmp_path: Path) -> None:
+    state = tmp_path / "internal" / "state"
+    pending = state / "pending"
+    pending.mkdir(parents=True)
+    (pending / "example.json").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceError, match="unsupported entry"):
+        workspace._pending_target_ids(state)
 
 @pytest.mark.parametrize(
     "mutate",
@@ -2177,62 +2178,31 @@ def test_read_text_bytes_rejects_invalid_content(
 
 
 @pytest.mark.parametrize(
-    ("kind", "record"),
+    "record",
     [
-        ("not-object", None),
-        ("bad-version", _replace_record(version=True)),
-        ("wrong-target", _replace_record(target_id="other")),
-        ("extra-key", _replace_record(extra="x")),
-        ("bad-layout", _replace_record(layout="other")),
-        ("bad-group-flag", _replace_record(layout="grouped", group_dir_existed=False)),
-        ("bad-backup-type", _replace_record(old_state=1)),
-        ("bad-base64", _replace_record(old_state="%%%")),
-        ("commit-extra-key", _commit_record(extra="x")),
-        ("bad-revision", _commit_record(revision="bad")),
-        ("cleanup-extra-key", _cleanup_record(extra="x")),
-        ("bad-cleanup-purpose", _cleanup_record(purpose="unknown")),
-        (
-            "discard-has-decision",
-            _cleanup_record(purpose="discard", revision=_REVISION),
-        ),
-        ("finalize-bad-revision", _cleanup_record(revision="bad")),
-        ("finalize-bad-material", _cleanup_record(material="yes")),
-        ("finalize-bad-run-id", _cleanup_record(run_id="bad")),
-        ("material-bad-hash", _cleanup_record(material=True, report_sha256="bad")),
-        ("nonmaterial-hash", _cleanup_record(report_sha256="a" * 64)),
-        ("unknown-kind", {"kind": "other", "target_id": "example", "version": 1}),
-    ],
-    ids=[
-        "not-object",
-        "bad-version",
-        "wrong-target",
-        "extra-key",
-        "bad-layout",
-        "bad-group-flag",
-        "bad-backup-type",
-        "bad-base64",
-        "commit-extra-key",
-        "bad-revision",
-        "cleanup-extra-key",
-        "bad-cleanup-purpose",
-        "discard-decision",
-        "finalize-revision",
-        "finalize-material",
-        "finalize-run-id",
-        "material-hash",
-        "nonmaterial-hash",
-        "unknown-kind",
+        None,
+        _replace_record(version=True),
+        _replace_record(target_id="other"),
+        _replace_record(extra="x"),
+        _replace_record(group_dir_existed="yes"),
+        _replace_record(old_state=1),
+        _replace_record(old_state="%%%"),
+        _commit_record(extra="x"),
+        _commit_record(revision="bad"),
+        _cleanup_record(extra="x"),
+        _cleanup_record(purpose="unknown"),
+        _cleanup_record(purpose="discard", revision=_REVISION),
+        _cleanup_record(revision="bad"),
+        _cleanup_record(material="yes"),
+        _cleanup_record(run_id="bad"),
+        _cleanup_record(material=True, report_sha256="bad"),
+        _cleanup_record(report_sha256="a" * 64),
+        {"kind": "other", "target_id": "example", "version": 1},
     ],
 )
-def test_recovery_record_validation_rejects_malformed_shapes(
-    kind: str, record: object
-) -> None:
-    value = record
-    if kind == "not-object":
-        value = None
+def test_recovery_record_validation_rejects_malformed_shapes(record: object) -> None:
     with pytest.raises(WorkspaceError, match="invalid"):
-        workspace._validate_recovery_record(value, "example")  # pyright: ignore[reportPrivateUsage]
-
+        workspace._validate_recovery_record(record, "example")
 
 def test_recovery_backup_size_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(workspace, "_MAX_SNAPSHOT_BYTES", 1)
@@ -2252,16 +2222,15 @@ def test_recovery_backup_size_limit(monkeypatch: pytest.MonkeyPatch) -> None:
             run_id=None,
         ),
         _cleanup_record(material=True, report_sha256="b" * 64),
-        _replace_record(layout="legacy", old_state=base64.b64encode(b"old").decode()),
+        _replace_record(old_state=base64.b64encode(b"old").decode()),
         _commit_record(),
     ],
-    ids=["valid-discard", "valid-finalize", "valid-legacy-replace", "valid-commit"],
+    ids=["valid-discard", "valid-finalize", "valid-replace", "valid-commit"],
 )
 def test_recovery_record_validation_accepts_supported_records(
     record: dict[str, object],
 ) -> None:
-    assert workspace._validate_recovery_record(record, "example") == record  # pyright: ignore[reportPrivateUsage]
-
+    assert workspace._validate_recovery_record(record, "example") == record
 
 @pytest.mark.parametrize(
     ("kind", "message"),
@@ -2474,15 +2443,28 @@ def test_read_decision_rejects_invalid_stdin(
 def _pending_payload(**changes: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "candidate_sha256": "b" * 64,
+        "diff": "diff",
         "diff_truncated": False,
         "expected_sha256": None,
+        "interests": [
+            {
+                "name": "Example",
+                "publisher": "",
+                "category": "",
+                "keywords": "",
+                "criteria": "pricing",
+                "priority": None,
+                "enabled": True,
+            }
+        ],
+        "name": "Example",
         "revision": _REVISION,
         "run_id": _RUN_ID,
         "target_id": "example",
+        "url": "https://example.com/",
     }
     payload.update(changes)
     return payload
-
 
 def _grouped_pending(state: Path, payload: dict[str, object], data: bytes) -> Path:
     target = state / "pending" / "example"
@@ -2933,76 +2915,29 @@ def test_monitor_target_skips_candidate_read_for_unchanged_status(
     assert result["action"] == "unchanged"
 
 
-@pytest.mark.parametrize(
-    ("kind", "message"),
-    [
-        ("target", "pending target"),
-        ("legacy-state", "pending decision"),
-        ("candidates", "state/candidates"),
-        ("candidate", "candidate must"),
-    ],
-    ids=["grouped-target", "legacy-state", "candidate-dir", "candidate-file"],
-)
-def test_pending_cleanup_paths_rejects_unsafe_entries(
-    tmp_path: Path, kind: str, message: str
-) -> None:
-    state = tmp_path / "internal" / "state"
-    pending = state / "pending"
-    pending.mkdir(parents=True)
-    candidates = state / "candidates"
-    candidates.mkdir()
-    if kind == "target":
-        (pending / "example").symlink_to(tmp_path, target_is_directory=True)
-    elif kind == "legacy-state":
-        (pending / "example.json").symlink_to(tmp_path / "missing")
-    elif kind == "candidates":
-        candidates.rmdir()
-        candidates.symlink_to(tmp_path, target_is_directory=True)
-    else:
-        (candidates / "example.txt").symlink_to(tmp_path / "missing")
-    with pytest.raises(WorkspaceError, match=message):
-        workspace._pending_cleanup_paths(state, pending, "example")  # pyright: ignore[reportPrivateUsage]
-
-
-@pytest.mark.parametrize(
-    "fault",
-    ["legacy-unlink", "grouped-remove", "fsync"],
-    ids=["legacy-unlink", "grouped-remove", "directory-fsync"],
-)
+@pytest.mark.parametrize("fault", ["grouped-remove", "fsync"])
 def test_remove_pending_wraps_removal_and_sync_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
     state = tmp_path / "internal" / "state"
-    pending = state / "pending"
-    target = pending / "example"
+    target = state / "pending" / "example"
     target.mkdir(parents=True)
-    if fault == "legacy-unlink":
-        candidates = state / "candidates"
-        candidates.mkdir()
-        (candidates / "example.txt").write_text("candidate", encoding="utf-8")
-        monkeypatch.setattr(
-            Path,
-            "unlink",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
-        )
-    elif fault == "grouped-remove":
+    (target / "state.json").write_text("{}\n", encoding="utf-8")
+    if fault == "grouped-remove":
         monkeypatch.setattr(
             workspace.shutil,
             "rmtree",
-            lambda _path: (_ for _ in ()).throw(OSError("injected")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+            lambda _path: (_ for _ in ()).throw(OSError("injected")),
         )
     else:
-        original_fsync = workspace._fsync_directory
+        monkeypatch.setattr(
+            workspace,
+            "_fsync_directory",
+            lambda _path: (_ for _ in ()).throw(OSError("injected")),
+        )
 
-        def fail_pending_fsync(path: Path) -> None:
-            if path == pending:
-                raise OSError("injected")  # ruff: ignore[raw-string-in-exception]
-            original_fsync(path)
-
-        monkeypatch.setattr(workspace, "_fsync_directory", fail_pending_fsync)
-    with pytest.raises(WorkspaceError, match="cannot (remove|fsync) pending"):  # ruff: ignore[pytest-raises-ambiguous-pattern]
-        workspace._remove_pending(state, "example")  # pyright: ignore[reportPrivateUsage]
-
+    with pytest.raises(WorkspaceError, match="cannot remove pending transaction"):
+        workspace._remove_pending(state, "example")
 
 @pytest.mark.parametrize("fault", ["replace", "fsync"], ids=["replace", "fsync"])
 def test_pending_file_wraps_atomic_write_failures(
@@ -3056,30 +2991,17 @@ def test_decode_recovery_backup_rejects_non_ascii_and_wrong_type() -> None:
 
 
 @pytest.mark.parametrize(
-    ("record", "expected"),
+    "record",
     [
-        (_replace_record(group_dir_existed=True), True),
-        (
-            {
-                "kind": "cleanup",
-                "material": False,
-                "purpose": "finalize",
-                "report_sha256": None,
-                "revision": _REVISION,
-                "run_id": _RUN_ID,
-                "target_id": "example",
-                "version": 1,
-            },
-            True,
-        ),
+        _replace_record(group_dir_existed=True),
+        _cleanup_record(),
     ],
-    ids=["grouped-replacement", "nonmaterial-finalize"],
+    ids=["existing-replacement", "nonmaterial-finalize"],
 )
 def test_recovery_record_validator_accepts_supported_optional_shapes(
-    record: dict[str, object], expected: bool
+    record: dict[str, object],
 ) -> None:
-    assert bool(workspace._validate_recovery_record(record, "example")) is expected  # pyright: ignore[reportPrivateUsage]
-
+    assert workspace._validate_recovery_record(record, "example") == record
 
 def test_read_commit_record_rejects_non_commit_record(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
@@ -3283,37 +3205,36 @@ def test_pending_temporary_cleanup_rejects_invalid_or_unremovable_files(
         workspace._remove_pending_write_temporaries(directory)  # pyright: ignore[reportPrivateUsage]
 
 
-@pytest.mark.parametrize(
-    ("layout", "old_state", "old_candidate"),
-    [("legacy", b"old state", b"old candidate"), ("none", None, None)],
-    ids=["legacy-restore", "none-layout"],
-)
-def test_restore_pending_replacement_restores_legacy_or_absent_layout(
-    tmp_path: Path, layout: str, old_state: bytes | None, old_candidate: bytes | None
+@pytest.mark.parametrize("group_existed", [True, False], ids=["existing", "absent"])
+def test_restore_pending_replacement_restores_current_layout(
+    tmp_path: Path, group_existed: bool
 ) -> None:
     state = tmp_path / "internal" / "state"
-    state.mkdir(parents=True)
     pending = state / "pending"
-    pending.mkdir()
-    candidates = state / "candidates"
-    candidates.mkdir()
-    record = _replace_record(
-        layout=layout,
-        old_state=None if old_state is None else base64.b64encode(old_state).decode(),
-        old_candidate=None
-        if old_candidate is None
-        else base64.b64encode(old_candidate).decode(),
-    )
     grouped = pending / "example"
-    grouped.mkdir()
+    grouped.mkdir(parents=True)
     (grouped / "state.json").write_text("new", encoding="utf-8")
     (grouped / "candidate.txt").write_text("new", encoding="utf-8")
-    workspace._restore_pending_replacement(state, record)  # pyright: ignore[reportPrivateUsage]
-    assert not grouped.exists()
-    if layout == "legacy":
-        assert (pending / "example.json").read_bytes() == old_state
-        assert (candidates / "example.txt").read_bytes() == old_candidate
 
+    old_state = b"old state" if group_existed else None
+    old_candidate = b"old candidate" if group_existed else None
+    record = _replace_record(
+        group_dir_existed=group_existed,
+        old_state=None if old_state is None else base64.b64encode(old_state).decode(),
+        old_candidate=(
+            None
+            if old_candidate is None
+            else base64.b64encode(old_candidate).decode()
+        ),
+    )
+
+    workspace._restore_pending_replacement(state, record)
+
+    if group_existed:
+        assert (grouped / "state.json").read_bytes() == old_state
+        assert (grouped / "candidate.txt").read_bytes() == old_candidate
+    else:
+        assert not grouped.exists()
 
 @pytest.mark.parametrize(
     ("decision", "message"),
@@ -3508,53 +3429,44 @@ def test_replacement_previous_revision_rejects_corrupt_backup(
 
 
 @pytest.mark.parametrize(
-    "mode",
-    ["no-record", "commit-only", "legacy-commit", "cleanup", "replace"],
-    ids=["no-record", "commit-only", "legacy-commit", "cleanup", "replace"],
+    "mode", ["no-record", "commit-only", "cleanup", "replace"]
 )
-def test_recover_pending_completes_noncommit_recovery_records(
+def test_recover_pending_completes_current_recovery_records(
     tmp_path: Path, mode: str
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
     (state / "pending").mkdir()
     if mode == "no-record":
-        assert workspace._recover_pending(state, "example") is None  # pyright: ignore[reportPrivateUsage]
-    elif mode == "commit-only":
+        assert workspace._recover_pending(state, "example") is None
+        return
+    if mode == "commit-only":
         _write_commit(state)
-        assert workspace._recover_pending(state, "example") is None  # pyright: ignore[reportPrivateUsage]
-        assert workspace._read_commit_record(state, "example") is None  # pyright: ignore[reportPrivateUsage]
-    elif mode == "legacy-commit":
-        _write_recovery(
-            state,
-            {
-                "kind": "commit",
-                "revision": _REVISION,
-                "target_id": "example",
-                "version": 1,
-            },
+        assert workspace._recover_pending(state, "example") is None
+        assert workspace._read_commit_record(state, "example") is None
+        return
+    if mode == "cleanup":
+        record = _cleanup_record(
+            purpose="discard",
+            material=None,
+            report_sha256=None,
+            revision=None,
+            run_id=None,
         )
-        assert workspace._recover_pending(state, "example") is None  # pyright: ignore[reportPrivateUsage]
-        assert workspace._read_recovery_record(state, "example") is None  # pyright: ignore[reportPrivateUsage]
-    elif mode == "cleanup":
-        record = {
-            "kind": "cleanup",
-            "material": None,
-            "purpose": "discard",
-            "report_sha256": None,
-            "revision": None,
-            "run_id": None,
-            "target_id": "example",
-            "version": 1,
-        }
-        _write_recovery(state, record)  # pyright: ignore[reportArgumentType]
-        assert workspace._recover_pending(state, "example") == record  # pyright: ignore[reportPrivateUsage]
-        assert workspace._read_recovery_record(state, "example") is None  # pyright: ignore[reportPrivateUsage]
-    else:
-        _write_recovery(state, _replace_record())
-        assert workspace._recover_pending(state, "example") is None  # pyright: ignore[reportPrivateUsage]
-        assert workspace._read_recovery_record(state, "example") is None  # pyright: ignore[reportPrivateUsage]
+        _write_recovery(state, record)
+        assert workspace._recover_pending(state, "example") == record
+        return
 
+    _write_recovery(state, _replace_record())
+    assert workspace._recover_pending(state, "example") is None
+
+
+def test_normal_recovery_file_rejects_commit_record(tmp_path: Path) -> None:
+    state = tmp_path / "internal" / "state"
+    state.mkdir(parents=True)
+    workspace._write_recovery_record_at(state, _commit_record(), commit=False)
+    with pytest.raises(WorkspaceError, match="invalid"):
+        workspace._read_recovery_record(state, "example")
 
 @pytest.mark.parametrize(
     ("case", "revision", "expected"),
@@ -3963,51 +3875,42 @@ def test_pending_temporary_cleanup_skips_entries_removed_during_scan(
 
 
 @pytest.mark.parametrize(
-    "layout",
-    ["grouped-invalid", "unrecognized-file", "candidates-symlink", "fsync"],
-    ids=["grouped-symlink", "nonempty-group", "candidates-symlink", "fsync"],
+    "fault",
+    ["grouped-invalid", "unrecognized-file", "fsync"],
+    ids=["grouped-symlink", "nonempty-group", "fsync"],
 )
-def test_restore_pending_replacement_rejects_unsafe_layout_or_sync_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout: str
+def test_restore_pending_replacement_rejects_unsafe_state_or_sync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
     pending = state / "pending"
     pending.mkdir()
     grouped = pending / "example"
-    if layout == "grouped-invalid":
+    if fault == "grouped-invalid":
         grouped.symlink_to(tmp_path, target_is_directory=True)
         with pytest.raises(WorkspaceError, match="pending target must be"):
-            workspace._restore_pending_replacement(state, _replace_record())  # pyright: ignore[reportPrivateUsage]
+            workspace._restore_pending_replacement(state, _replace_record())
         return
-    if layout == "unrecognized-file":
+    if fault == "unrecognized-file":
         grouped.mkdir()
         (grouped / "keep.txt").write_text("x", encoding="utf-8")
         with pytest.raises(WorkspaceError, match="cannot restore pending target"):
-            workspace._restore_pending_replacement(state, _replace_record())  # pyright: ignore[reportPrivateUsage]
+            workspace._restore_pending_replacement(state, _replace_record())
         return
-    if layout == "candidates-symlink":
-        (state / "candidates").symlink_to(tmp_path, target_is_directory=True)
-        with pytest.raises(WorkspaceError, match="state/candidates"):
-            workspace._restore_pending_replacement(state, _replace_record())  # pyright: ignore[reportPrivateUsage]
-        return
+
     original_fsync = workspace._fsync_directory
 
     def fail_pending(path: Path) -> None:
         if path == pending:
-            raise OSError("injected")  # ruff: ignore[raw-string-in-exception]
+            raise OSError("injected")
         original_fsync(path)
 
     monkeypatch.setattr(workspace, "_fsync_directory", fail_pending)
     with pytest.raises(
         WorkspaceError, match="cannot fsync restored pending transaction"
     ):
-        workspace._restore_pending_replacement(state, _replace_record())  # pyright: ignore[reportPrivateUsage]
-
-
-def _legacy_undo() -> dict[str, object]:
-    return _replace_record(layout="legacy", group_dir_existed=False)
-
+        workspace._restore_pending_replacement(state, _replace_record())
 
 def _valid_payload(data: bytes = b"new candidate") -> dict[str, object]:
     return _pending_payload(candidate_sha256=hashlib.sha256(data).hexdigest())
@@ -4886,35 +4789,27 @@ def _create_interest_review(tmp_path: Path) -> tuple[str, Path, Path, Path]:
         _RUN_ID,
         candidate_data=b"new\n",
     )
-    metadata, candidate = _transaction_paths(state, target_id, "grouped")
+    metadata, candidate = workspace._pending_paths(state, target_id)
     return target_id, metadata, candidate, snapshot
-
 
 @pytest.mark.parametrize(
     ("csv_text", "expected"),
     [
         ("name,url\n Example , https://example.com/ \n", _interest()),
         (
-            (
-                "url,enabled,name,watch_focus\n"
-                "https://example.com/, TrUe ,Example, pricing \n"
-            ),
+            "url,enabled,name,criteria\nhttps://example.com/, TrUe ,Example, pricing \n",
             _interest(criteria="pricing"),
         ),
         (
-            (
-                "\ufeffname,url,criteria,priority,enabled\n"
-                "Example,https://example.com/, pricing ,0002, FALSE \n"
-            ),
+            "\ufeffname,url,criteria,priority,enabled\n"
+            "Example,https://example.com/, pricing ,0002, FALSE \n",
             _interest(criteria="pricing", priority=2, enabled=False),
         ),
         (_ENRICHED_HEADER + "Example,https://example.com/\n", _interest()),
         (
-            (
-                "name,url,publisher,category,keywords,criteria,priority\n"
-                "Example,https://example.com/, Publisher , Category ,"
-                '"a, b / c","first\nsecond",1\n'
-            ),
+            "name,url,publisher,category,keywords,criteria,priority\n"
+            "Example,https://example.com/, Publisher , Category ,"
+            '"a, b / c","first\nsecond",1\n',
             _interest(
                 publisher="Publisher",
                 category="Category",
@@ -4924,16 +4819,14 @@ def _create_interest_review(tmp_path: Path) -> tuple[str, Path, Path, Path]:
             ),
         ),
         (
-            (
-                "name,url,keywords,criteria\n"
-                "\n,,,\nExample,https://example.com/,,mentions 同上 and 〃\n"
-            ),
+            "name,url,keywords,criteria\n"
+            "\n,,,\nExample,https://example.com/,,mentions 同上 and 〃\n",
             _interest(criteria="mentions 同上 and 〃"),
         ),
     ],
     ids=[
         "minimal",
-        "legacy-reordered",
+        "reordered",
         "bom-case-priority",
         "short-optional",
         "quoted",
@@ -4947,9 +4840,7 @@ def test_interest_csv_normalization(
     target = load_targets(tmp_path / "targets.csv")[0]
     assert target["interests"] == [expected]
     assert target["target_id"] == workspace._target_id("https://example.com/")
-    assert target["watch_focus"] == expected["criteria"]
     assert target["enabled"] is expected["enabled"]
-
 
 @pytest.mark.parametrize(
     "priority", ["0", "00", "-1", "+1", "1.0", "1e2", "one", "\u0661", "\uff11"]
@@ -4985,8 +4876,7 @@ def test_invalid_priority_in_later_disabled_row_prevents_mutation(
 
 
 @pytest.mark.parametrize(
-    "field",
-    ["name", "url", "publisher", "category", "keywords", "criteria", "watch_focus"],
+    "field", ["name", "url", "publisher", "category", "keywords", "criteria"]
 )
 @pytest.mark.parametrize("token", ['"', "〃", "同上", "同左"])
 def test_ditto_cells_rejected_with_record_and_field(
@@ -4994,29 +4884,19 @@ def test_ditto_cells_rejected_with_record_and_field(
 ) -> None:
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(
-        ["name", "url", field] if field not in {"name", "url"} else ["name", "url"]
-    )
+    header = ["name", "url", field] if field not in {"name", "url"} else ["name", "url"]
+    writer.writerow(header)
     writer.writerow([])
     values = {"name": "Example", "url": "https://example.com/", field: f" {token} "}
-    writer.writerow([
-        values[key]
-        for key in (
-            ["name", "url", field] if field not in {"name", "url"} else ["name", "url"]
-        )
-    ])
+    writer.writerow([values[key] for key in header])
     (tmp_path / "targets.csv").write_text(output.getvalue(), encoding="utf-8")
     with pytest.raises(WorkspaceError, match=f"row 3: {field}: replace ditto"):
         load_targets(tmp_path / "targets.csv")
 
-
 @pytest.mark.parametrize(
     ("csv_text", "message"),
     [
-        (
-            "name,url,criteria,watch_focus\nExample,https://example.com/,,\n",
-            "criteria and watch_focus",
-        ),
+        ("name,url,watch_focus\nExample,https://example.com/,pricing\n", "unsupported"),
         ("name,url,target_id\nExample,https://example.com/,custom\n", "unsupported"),
         ("name,url\nExample\n", "row 2: url"),
         ('name,url,keywords\nExample,https://example.com/,"unterminated', "CSV record"),
@@ -5024,7 +4904,7 @@ def test_ditto_cells_rejected_with_record_and_field(
         ("name,url\n", "no targets"),
     ],
     ids=[
-        "ambiguous",
+        "removed-column",
         "supplied-id",
         "missing-url",
         "malformed-quote",
@@ -5037,8 +4917,7 @@ def test_enriched_csv_errors(tmp_path: Path, csv_text: str, message: str) -> Non
     with pytest.raises(WorkspaceError, match=message):
         load_targets(tmp_path / "targets.csv")
 
-
-@pytest.mark.parametrize("field", ["keywords", "watch_focus"])
+@pytest.mark.parametrize("field", ["keywords", "criteria"])
 def test_large_csv_text_and_serialized_expansion(tmp_path: Path, field: str) -> None:
     text = "〃x" * 160_000
     (tmp_path / "targets.csv").write_text(
@@ -5063,13 +4942,7 @@ def test_large_csv_text_and_serialized_expansion(tmp_path: Path, field: str) -> 
             target_id=str(target["target_id"]),
         )["reviews"],
     )[0]
-    assert (
-        cast("list[dict[str, object]]", review["interests"])[0][
-            "criteria" if field == "watch_focus" else field
-        ]
-        == text
-    )
-
+    assert cast("list[dict[str, object]]", review["interests"])[0][field] == text
 
 def test_priority_exceeding_python_decimal_limit_round_trips(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -5128,9 +5001,7 @@ def test_repeated_urls_preserve_order_and_display(
         _interest("Second", criteria="second", enabled=enabled),
     ]
     assert targets[0]["name"] == ("Second" if enabled else "First")
-    assert targets[0]["watch_focus"] == ("second" if enabled else "first")
     assert targets[0]["enabled"] is enabled
-
 
 def test_distinct_urls_with_colliding_ids_fail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -5246,7 +5117,7 @@ def test_valid_inactive_configuration_has_no_interests_and_check_discards(
     assert snapshot.read_bytes() == b"old\n"
 
 
-@pytest.mark.parametrize("configuration", [None, "name,url,criteria,watch_focus\n"])
+@pytest.mark.parametrize("configuration", [None, "name,url,unknown\n"])
 def test_unavailable_configuration_keeps_saved_review_and_direct_finalize(
     tmp_path: Path, configuration: str | None
 ) -> None:
@@ -5269,14 +5140,10 @@ def test_unavailable_configuration_keeps_saved_review_and_direct_finalize(
         item["name"] for item in cast("list[dict[str, object]]", review["interests"])
     ] == ["First", "Second"]
     assert [path.read_bytes() for path in (metadata, candidate, snapshot)] == before
-    assert (
-        finalize(
-            tmp_path,
-            {"target_id": target_id, "revision": review["revision"], "material": False},
-        )["action"]
-        == "finalized"
-    )
-
+    assert finalize(
+        tmp_path,
+        {"target_id": target_id, "revision": review["revision"], "material": False},
+    )["action"] == "finalized"
 
 @pytest.mark.parametrize(
     "interests",
@@ -5548,7 +5415,7 @@ def test_check_reconciliation_uses_one_configuration_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = tmp_path / "internal" / "state"
-    _write_review_transaction(state, "legacy")
+    _write_review_transaction(state)
     _write_targets(tmp_path / "targets.csv", "Other,https://other.example/,,false\n")
     original = workspace.load_targets
     calls = 0
