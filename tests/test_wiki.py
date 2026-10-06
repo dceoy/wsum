@@ -218,7 +218,8 @@ def test_init_creates_workspace_and_is_idempotent(tmp_path: Path) -> None:
 
     assert first["created"] == ["SCHEMA.md", "index.md"]
     assert second["created"] == []
-    assert (tmp_path / "output" / "knowledge" / "SCHEMA.md").read_text() == "custom schema\n"
+    schema = tmp_path / "output" / "knowledge" / "SCHEMA.md"
+    assert schema.read_text() == "custom schema\n"
     assert (tmp_path / "output" / "knowledge" / "pages").is_dir()
     assert (tmp_path / "internal" / "wiki").is_dir()
 
@@ -903,7 +904,11 @@ def _too_many_pages(draft: dict[str, Any]) -> None:
     ]
 
 
-_UNKNOWN_LINK = "Old [x](../../../internal/evidence/" + "a" * 64 + "/parent.txt) [[cite:c1]]"
+_UNKNOWN_LINK = (
+    "Old [x](../../../internal/evidence/"
+    + "a" * 64
+    + "/parent.txt) [[cite:c1]]"
+)
 _MUTATIONS: dict[str, _Mutation] = {
     "missing-field": _drop("noop"),
     "wrong-ingestion": _top("ingestion_id", "0" * 64),
@@ -1377,7 +1382,8 @@ def test_ledger_size_limit_is_enforced(
 
 
 def test_exclusive_lock_rejects_concurrent_compilers(env: _Env) -> None:
-    descriptor = os.open(env.root / "internal" / "wiki" / "lock", os.O_RDWR | os.O_CREAT)
+    lock = env.root / "internal" / "wiki" / "lock"
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         with pytest.raises(WikiError, match="holds the lock"):
