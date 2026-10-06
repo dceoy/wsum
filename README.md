@@ -108,10 +108,11 @@ workspace/
 └── internal/
     ├── state/
     │   ├── snapshots/
-    │   └── pending/
-    │       └── <target-id>/
-    │           ├── state.json
-    │           └── candidate.txt
+    │   ├── pending/
+    │   │   └── <target-id>/
+    │   │       ├── state.json
+    │   │       └── candidate.txt
+    │   └── recovery/
     └── evidence/
 ```
 
