@@ -6,14 +6,14 @@ The core skill lives in `skills/web-update-monitor/`. It intentionally has two r
 
 A second composite, `skills/web-update-monitor-llm-wiki/`, compiles durable captured evidence from the core into a source-backed Markdown knowledge base. The core also gains an opt-in `finalize --archive-evidence` output for it.
 
-A thin composite integration skill lives in `skills/web-update-monitor-gws/`. It keeps Google-specific orchestration outside the core while using Google Sheets as the target source and Google Drive for cross-run state plus completed Markdown report delivery.
+A thin composite integration skill lives in `skills/web-update-monitor-gws/`. It keeps Google-specific orchestration outside the core while using Google Sheets as the target source and Google Drive for complete versioned workspace persistence plus completed Markdown report delivery.
 
 ## Agent Skills
 
 The repository ships these canonical skills:
 
 - `skills/web-update-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
-- `skills/web-update-monitor-gws/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract, persists core state as three retained timestamped ZIP generations in Drive, and publishes completed runs as Markdown files in Drive.
+- `skills/web-update-monitor-gws/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract, persists the complete `output/` and `internal/` workspace roots as three retained timestamped ZIP generations in Drive, and publishes completed runs as Markdown files in Drive.
 - `skills/web-update-monitor-llm-wiki/`: a composite skill with one deterministic helper (`scripts/wiki.py`) that turns committed evidence bundles into cited Markdown pages with a processed ledger and recoverable compilation transactions.
 
 To install the core skill in an Agent Skills-compatible runtime, use the `web-update-monitor` package from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain). To use the Google Workspace composite, install **both** `web-update-monitor` and `web-update-monitor-gws`; the composite package intentionally delegates to the core package instead of duplicating its runtime helpers. The LLM wiki composite follows the same rule: install `web-update-monitor` and `web-update-monitor-llm-wiki`, and let the runtime's skill discovery locate the core instead of assuming a sibling path.
@@ -23,14 +23,13 @@ To install the core skill in an Agent Skills-compatible runtime, use the `web-up
 ```mermaid
 flowchart LR
     GS["Google Sheet"] --> CSV["internal/gws/targets.csv"]
-    DS["Google Drive state<br/>state-YYYYMMDDTHHMMSSZ.zip × 3"] <-->|restore / persist| BUNDLE["state bundle"]
-    BUNDLE --> STATE["internal/state/"]
-    BUNDLE --> OUT["internal/gws/outbox/"]
+    DS["Google Drive workspaces/<br/>workspace-YYYYMMDDTHHMMSSZ.zip × 3"] <-->|restore / persist| WS["workspace snapshot"]
+    WS --> WORKSPACE["output/ + internal/"]
     CSV --> CORE["web-update-monitor"]
-    STATE --> CORE
-    CORE --> STATE
+    WORKSPACE --> CORE
+    CORE --> WORKSPACE
     CORE --> REPORT["output/report/<run-id>.md"]
-    OUT -->|restore| REPORT
+    WORKSPACE --> OUT["internal/gws/outbox/"]
     REPORT -->|stage| OUT
     OUT -->|run complete| GMD["Drive Markdown file"]
     GMD --> DR["Google Drive report folder"]
@@ -40,9 +39,9 @@ The core automatically reads newly added navigation links from changed HTML page
 
 The core groups interests by exact trimmed URL and fetches each enabled URL once. Semantic review considers the parent diff and linked evidence for every enabled interest: material for any interest means material for the URL. Write one managed report section explaining the affected interests without repeating the same change, and finalize once per URL.
 
-The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite persists `internal/state/` and `internal/gws/outbox/` as timestamped ZIP generations (`state-YYYYMMDDTHHMMSSZ.zip`), restores the newest generation by filename timestamp, and retains only the three newest committed archives instead of duplicating review metadata in an adapter-owned journal or allowing state archives to accumulate.
+The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite persists the complete `output/` and `internal/` roots as timestamped workspace snapshots (`workspace-YYYYMMDDTHHMMSSZ.zip`), restores the newest generation by filename timestamp, and retains only the three newest committed snapshots. This includes reports, core state, evidence, the cached Google Sheets projection, and the durable delivery outbox; after restore, the Sheet projection is regenerated before pending reconciliation or new fetches.
 
-Markdown remains the canonical core report, durable outbox format, and user-facing Google Drive report format. The composite waits until a run has no pending reviews, then uploads or updates one file named `Web Update Report — <run-id>.md` in the configured report folder. Exact-filename lookup makes retries converge on the same Drive file instead of creating duplicates.
+Markdown remains the canonical core report, durable outbox format, and user-facing Google Drive report format. The outbox is a delivery queue, not a reconstruction source for `output/report/`, because the complete output tree is already restored from the workspace snapshot. The composite waits until a run has no pending reviews, then uploads or updates one file named `Web Update Report — <run-id>.md` in the configured report folder. Exact-filename lookup makes retries converge on the same Drive file instead of creating duplicates.
 
 Read `skills/web-update-monitor-gws/SKILL.md` for connector orchestration and recovery semantics.
 
