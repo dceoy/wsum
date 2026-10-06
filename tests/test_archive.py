@@ -34,7 +34,7 @@ class _Review:
         self.ingestion_id = workspace._ingestion_id(target_id, revision)
         self.bundle = root / "internal" / "evidence" / self.ingestion_id
         self.snapshot = self.state / "snapshots" / f"{target_id}.txt"
-        self.intent = self.state / ".pending-recovery" / f"{target_id}.json"
+        self.intent = self.state / "recovery" / f"{target_id}.json"
         self.pending = self.state / "pending" / target_id
 
     def decision(
