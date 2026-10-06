@@ -403,7 +403,7 @@ class _TextExtractor(HTMLParser):
         self.parts: list[str] = []
         self.links = LinkCollection()
 
-    def handle_starttag(  # ruff: ignore[complex-structure]
+    def handle_starttag(
         self, tag: str, attrs: list[tuple[str, str | None]]
     ) -> None:
         tag = tag.lower()
