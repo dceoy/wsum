@@ -965,7 +965,7 @@ def test_read_helpers_detect_growth_after_stat(
 
     real_open = Path.open
 
-    def growing(self: Path, *args: Any, **kwargs: Any) -> Any:
+    def growing(self: Path, *args: Any, **kwargs: Any) -> Any:  # ruff: ignore[any-type]
         if self == path:
             return io.BytesIO(b"abcdefgh")
         return cast("Any", real_open(self, *args, **kwargs))
@@ -1150,6 +1150,7 @@ def test_receipt_must_match_the_prepared_transaction(
         finalize(tmp_path, review.decision(report=other))
 
     assert review.intent.exists()
+
 
 def test_main_reports_unexpected_io_errors_as_json(
     tmp_path: Path,
