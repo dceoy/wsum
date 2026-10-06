@@ -220,7 +220,7 @@ def test_init_creates_workspace_and_is_idempotent(tmp_path: Path) -> None:
     assert second["created"] == []
     assert (tmp_path / "output" / "knowledge" / "SCHEMA.md").read_text() == "custom schema\n"
     assert (tmp_path / "output" / "knowledge" / "pages").is_dir()
-    assert (tmp_path / "output" / "knowledge" / ".compiler").is_dir()
+    assert (tmp_path / "internal" / "wiki").is_dir()
 
 
 def test_workspace_must_be_a_real_directory(tmp_path: Path) -> None:
@@ -243,6 +243,7 @@ def test_commands_require_initialization(tmp_path: Path) -> None:
 def test_init_rejects_symlinked_knowledge_directory(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
+    (tmp_path / "output").mkdir()
     (tmp_path / "output" / "knowledge").symlink_to(outside)
 
     with pytest.raises(WikiError, match="non-symlink directory"):
