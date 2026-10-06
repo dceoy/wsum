@@ -29,7 +29,6 @@ Compilation is asynchronous and happens after the core's evidence commit. A comp
 
 ```text
 workspace/
-  targets.csv
   reports/
   evidence/          core-owned immutable source record
   .wsum/             core-internal state (never read it)
@@ -40,7 +39,7 @@ workspace/
     .compiler/       ledger.json, transaction.json, lock
 ```
 
-`evidence/` is not copied into a second raw store; citations link to it with relative paths. No wiki fields belong in `targets.csv`: every enabled interest of a shared URL is preserved in the bundle's metadata, and materiality stays one decision per URL.
+`evidence/` is not copied into a second raw store; citations link to it with relative paths. The core target CSV is an explicit external input rather than a workspace file, and no wiki fields belong in that input: every enabled interest of a shared URL is preserved in the bundle's metadata, and materiality stays one decision per URL.
 
 ## Resolve dependencies
 
@@ -54,11 +53,11 @@ The helper has no dependency on the core package; it only reads the digest-verif
 
 ## Run monitoring (delegated to the core)
 
-Follow the core skill's procedure for `check --compact`, `pending`, semantic judgment, and `finalize`, with one change: finalize **material** decisions with the archive option so the evidence commit is part of the core's recoverable finalization:
+Follow the core skill's procedure for explicit `--targets` input, `check --compact`, `pending`, semantic judgment, and `finalize`, with one change: finalize **material** decisions with the archive option so the evidence commit is part of the core's recoverable finalization:
 
 ```bash
 python "$WEB_UPDATE_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSPACE" \
-  finalize --archive-evidence < decision.json
+  finalize --archive-evidence --targets "$TARGETS" < decision.json
 ```
 
 Do not overlap monitoring invocations on one workspace. Monitoring may add new bundles while a compilation is in progress because committed bundles are immutable. First monitor observations create baselines and do not seed the wiki: version 1 is explicitly update-driven, and importing existing documents or historical snapshots is a separate future operation.
