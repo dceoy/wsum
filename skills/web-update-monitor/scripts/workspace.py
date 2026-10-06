@@ -1578,7 +1578,7 @@ def _recover_pending(
     if record is not None and record["kind"] == "archive":
         # An archive obligation completes (or stays blocked) before any other
         # recovery, discard, or replacement may touch the pending evidence.
-        _complete_archive(state.parent, state, record)
+        _complete_archive(state.parent.parent, state, record)
         return None
     commit = _read_commit_record(state, target_id)
     if commit is not None:
