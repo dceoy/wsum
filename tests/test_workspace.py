@@ -2236,7 +2236,9 @@ def test_write_report_reports_fsync_failure_after_replacement(
 def test_promote_snapshot_rejects_symlinked_state_root(tmp_path: Path) -> None:
     outside = tmp_path / "outside-state"
     outside.mkdir()
-    state = tmp_path / "internal" / "state"
+    internal = tmp_path / "internal"
+    internal.mkdir()
+    state = internal / "state"
     state.symlink_to(outside, target_is_directory=True)
     digest = hashlib.sha256(b"next\n").hexdigest()
 
@@ -2489,7 +2491,7 @@ def test_directory_fsync_is_skipped_when_platform_has_no_directory_flag(
 def test_ensure_directory_wraps_filesystem_failures(  # ruff: ignore[complex-structure]
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    path = tmp_path / "internal" / "state"
+    path = tmp_path / "state"
     if failure == "mkdir":
         original_lstat = Path.lstat
 
@@ -3074,7 +3076,7 @@ def test_fsync_directory_handles_optional_open_flags(
 def test_ensure_directory_tolerates_creation_race_and_optional_parent_sync(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    directory = tmp_path / "internal" / "state"
+    directory = tmp_path / "state"
     original_lstat = Path.lstat
     original_mkdir = Path.mkdir
     calls = 0
@@ -3454,7 +3456,7 @@ def test_report_write_validates_and_persists_atomically(
             original_fsync = workspace._fsync_directory
 
             def fail_report_fsync(path: Path) -> None:
-                if path.name == "reports":
+                if path.name == "report":
                     raise OSError("injected")  # ruff: ignore[raw-string-in-exception]
                 original_fsync(path)
 
