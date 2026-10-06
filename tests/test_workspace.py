@@ -381,7 +381,7 @@ def test_finalize_cleanup_failure_is_retryable(
         finalize(tmp_path, decision)
 
     assert failed
-    assert (state / ".pending-recovery" / "example.json").exists()
+    assert (state / "recovery" / "example.json").exists()
     assert snapshot.read_text(encoding="utf-8") == "new\n"
     report = tmp_path / "output" / "report" / f"{_RUN_ID}.md"
     assert "Retry cleanup." in report.read_text(encoding="utf-8")
@@ -397,7 +397,7 @@ def test_finalize_cleanup_failure_is_retryable(
     assert not metadata.exists()
     assert not candidate.exists()
     assert not (state / "pending" / "example").exists()
-    assert not (state / ".pending-recovery" / "example.json").exists()
+    assert not (state / "recovery" / "example.json").exists()
 
 
 def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
@@ -1179,7 +1179,7 @@ def test_failed_commit_marker_keeps_undo_available_for_recovery(
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
     metadata, candidate, _ = _write_review_transaction(state, "grouped")
-    recovery_dir = state / ".pending-recovery"
+    recovery_dir = state / "recovery"
     commit_marker = recovery_dir / "example.json.commit"
     original_fsync = workspace._fsync_directory  # pyright: ignore[reportPrivateUsage]
     original_write = workspace._write_temporary_file  # pyright: ignore[reportPrivateUsage]
@@ -1277,8 +1277,8 @@ def test_finalize_resolves_ambiguous_commit_by_requested_revision(
     state.mkdir(parents=True)
     _, _, snapshot = _write_review_transaction(state, "grouped")
     _leave_ambiguous_replacement(state, monkeypatch)
-    assert (state / ".pending-recovery" / "example.json").exists()
-    assert (state / ".pending-recovery" / "example.json.commit").exists()
+    assert (state / "recovery" / "example.json").exists()
+    assert (state / "recovery" / "example.json.commit").exists()
     with pytest.raises(WorkspaceError, match="requires a decision revision"):
         workspace._recover_pending(  # pyright: ignore[reportPrivateUsage]
             state, "example"
@@ -1304,7 +1304,7 @@ def test_finalize_unrelated_revision_preserves_ambiguous_replacement(
     monkeypatch.undo()
     original_metadata = metadata.read_bytes()
     original_candidate = candidate.read_bytes()
-    recovery_dir = state / ".pending-recovery"
+    recovery_dir = state / "recovery"
 
     with pytest.raises(WorkspaceError, match="does not match pending replacement"):
         finalize(
@@ -1339,7 +1339,7 @@ def test_finalize_rejects_symlinked_pending_ancestor_with_ambiguous_records(
     moved_target = state / "pending" / "example-moved"
     target_dir.replace(moved_target)
     target_dir.symlink_to(moved_target, target_is_directory=True)
-    recovery_dir = state / ".pending-recovery"
+    recovery_dir = state / "recovery"
 
     with pytest.raises(WorkspaceError, match="non-symlink directory"):
         finalize(
@@ -1379,7 +1379,7 @@ def test_finalize_recovers_interrupted_pending_replacement(tmp_path: Path) -> No
     assert snapshot.read_text(encoding="utf-8") == "new\n"
     assert not metadata.exists()
     assert not candidate.exists()
-    assert not (state / ".pending-recovery" / "example.json").exists()
+    assert not (state / "recovery" / "example.json").exists()
 
 
 def test_recovery_removes_temporaries_from_interrupted_initial_write(
@@ -1401,7 +1401,7 @@ def test_recovery_removes_temporaries_from_interrupted_initial_write(
     workspace._recover_pending(state, "example")  # pyright: ignore[reportPrivateUsage]
 
     assert not target_dir.exists()
-    assert not (state / ".pending-recovery" / "example.json").exists()
+    assert not (state / "recovery" / "example.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -1417,7 +1417,7 @@ def test_pending_recovery_rejects_unsafe_record(
     tmp_path: Path, unsafe_record: str, message: str
 ) -> None:
     state = tmp_path / "internal" / "state"
-    recovery_dir = state / ".pending-recovery"
+    recovery_dir = state / "recovery"
     recovery_dir.mkdir(parents=True, mode=0o700)
     record = recovery_dir / "example.json"
     outside = tmp_path / "outside.json"
@@ -1472,7 +1472,7 @@ def test_finalize_rejects_decision_mismatch_for_pending_cleanup(
 
     assert metadata.exists()
     assert candidate.exists()
-    assert (state / ".pending-recovery" / "example.json").exists()
+    assert (state / "recovery" / "example.json").exists()
 
     monkeypatch.undo()
     result = finalize(tmp_path, decision)
@@ -1512,7 +1512,7 @@ def test_check_syncs_new_state_and_grouped_pending_directories(
     assert state in fsynced
     assert pending in fsynced
     assert pending / target_id in fsynced
-    assert state / ".pending-recovery" in fsynced
+    assert state / "recovery" in fsynced
     assert (pending / target_id / "state.json").exists()
 
 
@@ -1967,7 +1967,7 @@ def test_recovery_directory_parent_fsync_retries_after_creation_failure(
             state, record
         )
 
-    recovery_dir = state / ".pending-recovery"
+    recovery_dir = state / "recovery"
     assert recovery_dir.is_dir()
     assert not (recovery_dir / "example.json").exists()
     workspace._write_recovery_record(  # pyright: ignore[reportPrivateUsage]
@@ -2888,7 +2888,7 @@ def test_retire_recovery_record_ignores_unlink_errors_when_requested(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    recovery = state / ".pending-recovery"
+    recovery = state / "recovery"
     recovery.mkdir(mode=0o700)
     path = recovery / "example.json"
     path.write_text(json.dumps(_replace_record()), encoding="utf-8")
@@ -3593,7 +3593,7 @@ def test_recovery_directory_validates_existing_directory(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    recovery = state / ".pending-recovery"
+    recovery = state / "recovery"
     if kind == "symlink":
         recovery.symlink_to(tmp_path, target_is_directory=True)
     elif kind == "permissive":
@@ -3640,7 +3640,7 @@ def test_recovery_record_validator_accepts_supported_optional_shapes(
 
 def test_read_commit_record_rejects_non_commit_record(tmp_path: Path) -> None:
     state = tmp_path / "internal" / "state"
-    recovery = state / ".pending-recovery"
+    recovery = state / "recovery"
     recovery.mkdir(parents=True, mode=0o700)
     path = recovery / "example.json.commit"
     path.write_text(json.dumps(_replace_record()), encoding="utf-8")
@@ -3664,7 +3664,7 @@ def test_recovery_writer_validates_and_wraps_failures(
         with pytest.raises(WorkspaceError, match="pending commit record is invalid"):
             workspace._write_commit_record(state, record)  # pyright: ignore[reportPrivateUsage]
         return
-    recovery = state / ".pending-recovery"
+    recovery = state / "recovery"
     recovery.mkdir(mode=0o700)
     destination = recovery / "example.json"
     if fault == "unsafe-existing":
@@ -3696,7 +3696,7 @@ def test_recovery_retirement_checks_safety_and_optional_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
     state = tmp_path / "internal" / "state"
-    recovery = state / ".pending-recovery"
+    recovery = state / "recovery"
     recovery.mkdir(parents=True, mode=0o700)
     path = recovery / "example.json"
     path.write_text(json.dumps(_replace_record()), encoding="utf-8")
@@ -4410,7 +4410,7 @@ def test_recovery_directory_wraps_second_lstat_failure(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    directory = state / ".pending-recovery"
+    directory = state / "recovery"
     directory.mkdir(mode=0o700)
     original_lstat = Path.lstat
     calls = 0
@@ -6133,7 +6133,7 @@ def test_enriched_replacement_recovery_keeps_both_revision_choices(
         )["reviews"],
     )[0]
     assert review["interests"] == replacement["interests"]
-    assert (state / ".pending-recovery" / f"{target_id}.json").exists()
+    assert (state / "recovery" / f"{target_id}.json").exists()
     chosen = previous if choose_previous else replacement
     assert (
         finalize(
@@ -6145,7 +6145,7 @@ def test_enriched_replacement_recovery_keeps_both_revision_choices(
     assert snapshot.read_bytes() == b"new\n"
     assert not candidate.exists()
     assert not metadata.exists()
-    assert not list((state / ".pending-recovery").iterdir())
+    assert not list((state / "recovery").iterdir())
 
 
 @pytest.mark.parametrize("corruption", ["interests", "link_review", "diff"])
