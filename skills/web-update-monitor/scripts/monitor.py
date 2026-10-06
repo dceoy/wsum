@@ -1057,10 +1057,6 @@ def _sniff_content_type(body: bytes, *, charset: str | None = None) -> str:
         except MonitorError:
             encoding = None
     sample_bytes = body[:8_192]
-    if encoding in {"utf-16-le", "utf-16-be"}:
-        sample_bytes = sample_bytes[: len(sample_bytes) - len(sample_bytes) % 2]
-    elif encoding in {"utf-32-le", "utf-32-be"}:
-        sample_bytes = sample_bytes[: len(sample_bytes) - len(sample_bytes) % 4]
     try:
         sample = (
             # final=False tolerates a multibyte character cut by the prefix bound.
