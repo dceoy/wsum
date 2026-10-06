@@ -965,7 +965,7 @@ def test_read_helpers_detect_growth_after_stat(
 
     real_open = Path.open
 
-    def growing(self: Path, *args: Any, **kwargs: Any) -> Any:  # ruff: ignore[any-type]
+    def growing(self: Path, *args: Any, **kwargs: Any) -> Any:
         if self == path:
             return io.BytesIO(b"abcdefgh")
         return cast("Any", real_open(self, *args, **kwargs))
@@ -1150,24 +1150,6 @@ def test_receipt_must_match_the_prepared_transaction(
         finalize(tmp_path, review.decision(report=other))
 
     assert review.intent.exists()
-
-
-) -> None:
-    review = _legacy_review(tmp_path)
-    _fail_once(monkeypatch, "_write_report")
-    with pytest.raises(WorkspaceError, match="injected"):
-        review.finalize()
-    assert review.snapshot.read_text() == "new\n"
-    assert review.intent.exists()
-
-    result = finalize(tmp_path, review.decision())
-
-    assert result["ingestion_id"] == review.ingestion_id
-    assert (review.bundle / "diff.txt").read_text().startswith("--- ")
-    assert (review.bundle / "committed.json").exists()
-    assert not review.pending.exists()
-    assert not review.intent.exists()
-
 
 def test_main_reports_unexpected_io_errors_as_json(
     tmp_path: Path,
