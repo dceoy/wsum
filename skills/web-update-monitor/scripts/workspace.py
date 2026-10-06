@@ -710,8 +710,10 @@ def _monitor_target(
         )
         result = monitor.run(namespace)
         link_collection = result.get("links")
-        has_links = bool(link_collection) or bool(
-            getattr(link_collection, "omitted_hashes", ())
+        has_links = (
+            bool(link_collection)
+            or bool(getattr(link_collection, "omitted_hashes", ()))
+            or bool(getattr(link_collection, "overflow_count", 0))
         )
         if link_depth > 0 and result.get("status") == "changed" and has_links:
             result["link_review"] = _follow_added_links(
@@ -762,6 +764,7 @@ def _follow_added_links(  # ruff: ignore[too-many-locals, too-many-statements]
     scheduled = len(queue)
     documents: list[dict[str, object]] = []
     omitted = len(omitted_hashes - previous_hashes)
+    omitted += getattr(link_collection, "overflow_count", 0)
     omitted += max(0, len(added) - max_links)
     incomplete = omitted > 0
     deadline = monotonic() + _LINK_TIMEOUT
@@ -797,7 +800,9 @@ def _follow_added_links(  # ruff: ignore[too-many-locals, too-many-statements]
             incomplete = incomplete or truncated
             byte_limit = len(document.body)
             if child_links is not None:
-                child_omitted = len(child_links.omitted_hashes)
+                child_omitted = (
+                    len(child_links.omitted_hashes) + child_links.overflow_count
+                )
                 omitted += child_omitted
                 incomplete = incomplete or child_omitted > 0
                 seen.add(document.source_url.split("#", 1)[0])

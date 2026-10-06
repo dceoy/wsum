@@ -384,12 +384,14 @@ class LinkCollection(dict[str, str]):  # ruff: ignore[subclass-builtin]
         """Create empty link and omission collections."""
         super().__init__()
         self.omitted_hashes: set[str] = set()
+        self.overflow_count = 0
 
 
 def _merge_link_collection(target: dict[str, str], source: LinkCollection) -> None:
     target.update(source)
     if isinstance(target, LinkCollection):
         target.omitted_hashes.update(source.omitted_hashes)
+        target.overflow_count += source.overflow_count
 
 
 class _TextExtractor(HTMLParser):
@@ -400,12 +402,12 @@ class _TextExtractor(HTMLParser):
         self._base_href_seen = False
         self._skip_depth = 0
         self._destination_count = 0
+        self._omitted = hashlib.sha256()
+        self._omitted_count = 0
         self.parts: list[str] = []
         self.links = LinkCollection()
 
-    def handle_starttag(  # ruff: ignore[complex-structure]
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
         if tag in _SKIP_TAGS:
             self._skip_depth += 1
@@ -428,18 +430,37 @@ class _TextExtractor(HTMLParser):
             return
         for name in destinations:
             value = values.get(name)
-            if not value:
-                continue
-            self._destination_count += 1
-            if self._destination_count > _MAX_HTML_DESTINATIONS:
-                raise MonitorError("HTML has too many monitored destinations")
-            destination = urljoin(self._base_url, value.strip())
-            if _destination_has_credentials(destination):
-                raise MonitorError("HTML destination contains credentials")
-            if tag in {"a", "area"}:
-                _collect_link(self.links, destination)
+            if value:
+                self._record_destination(tag, name, value)
+
+    def _record_destination(self, tag: str, name: str, value: str) -> None:
+        self._destination_count += 1
+        destination = urljoin(self._base_url, value.strip())
+        if _destination_has_credentials(destination):
+            raise MonitorError("HTML destination contains credentials")
+        if self._destination_count > _MAX_HTML_DESTINATIONS:
+            # Keep the first destinations; flag the rest as omitted so the
+            # review is marked incomplete instead of failing the target.
             digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
-            self.parts.append(f"\n[{tag}:{name}:sha256:{digest}]\n")
+            self._omitted.update(f"{tag}:{name}:{digest}\n".encode())
+            self._omitted_count += 1
+            self.links.overflow_count += 1
+            return
+        if tag in {"a", "area"}:
+            _collect_link(self.links, destination)
+        digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
+        self.parts.append(f"\n[{tag}:{name}:sha256:{digest}]\n")
+
+    def close(self) -> None:
+        """Finish parsing and record omitted destinations as one bounded marker."""
+        super().close()
+        if self._omitted_count:
+            # Keeps destination-only changes beyond the limit visible to the diff.
+            self.parts.append(
+                f"\n[omitted-destinations:{self._omitted_count}"
+                f":sha256:{self._omitted.hexdigest()}]\n"
+            )
+            self._omitted_count = 0
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
@@ -1057,13 +1078,12 @@ def _sniff_content_type(body: bytes, *, charset: str | None = None) -> str:
         except MonitorError:
             encoding = None
     sample_bytes = body[:8_192]
-    if encoding in {"utf-16-le", "utf-16-be"}:
-        sample_bytes = sample_bytes[: len(sample_bytes) - len(sample_bytes) % 2]
-    elif encoding in {"utf-32-le", "utf-32-be"}:
-        sample_bytes = sample_bytes[: len(sample_bytes) - len(sample_bytes) % 4]
     try:
         sample = (
-            sample_bytes.decode(encoding, errors="strict")
+            # final=False tolerates a multibyte character cut by the prefix bound.
+            codecs.getincrementaldecoder(encoding)(errors="strict").decode(
+                sample_bytes, final=False
+            )
             if encoding is not None
             else sample_bytes.decode("latin-1", errors="strict")
         )

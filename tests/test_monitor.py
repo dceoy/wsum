@@ -1717,11 +1717,63 @@ def test_html_extractor_handles_blocks_skips_and_base_urls(
         assert digest in normalized
 
 
-def test_html_extractor_caps_destination_count(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(monitor, "_MAX_HTML_DESTINATIONS", 0)
+def test_html_extractor_keeps_first_destinations_and_flags_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitor, "_MAX_HTML_DESTINATIONS", 1)
     parser = monitor._TextExtractor("https://example.com/")
-    with pytest.raises(MonitorError, match="too many monitored destinations"):
-        parser.feed('<a href="/one">one</a>')
+    parser.feed('<a href="/one">one</a><a href="/two">two</a><form action="/f"></form>')
+    parser.close()
+    first = monitor.hashlib.sha256(b"https://example.com/one").hexdigest()
+    second = monitor.hashlib.sha256(b"https://example.com/two").hexdigest()
+    assert list(parser.links) == [first]
+    assert parser.links.omitted_hashes == set()
+    assert parser.links.overflow_count == 2
+    text = "".join(parser.parts)
+    assert second not in text
+    assert "[omitted-destinations:2:sha256:" in text
+
+
+def test_html_extractor_overflow_metadata_stays_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitor, "_MAX_HTML_DESTINATIONS", 1)
+    parser = monitor._TextExtractor("https://example.com/")
+    parser.feed("".join(f'<a href="/{index}">x</a>' for index in range(2_000)))
+    parser.close()
+    assert parser.links.omitted_hashes == set()
+    assert parser.links.overflow_count == 1_999
+    assert len(parser.links) == 1
+
+
+def test_html_extractor_rejects_credentials_after_destination_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitor, "_MAX_HTML_DESTINATIONS", 1)
+    parser = monitor._TextExtractor("https://example.com/")
+    fragment = (
+        '<a href="/one">one</a>'
+        '<a href="https://user:pass@example.com/private">secret</a>'
+    )
+    with pytest.raises(MonitorError, match="credentials"):
+        parser.feed(fragment)
+
+
+def test_html_extractor_omitted_destination_change_alters_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitor, "_MAX_HTML_DESTINATIONS", 1)
+
+    def text_for(html: str) -> str:
+        parser = monitor._TextExtractor("https://example.com/")
+        parser.feed(html)
+        parser.close()
+        parser.close()
+        return "".join(parser.parts)
+
+    base = '<a href="/one">one</a><a href="/two">same</a>'
+    assert text_for(base) != text_for(base.replace("/two", "/changed"))
+    assert text_for(base) == text_for(base)
 
 
 @pytest.mark.parametrize(
@@ -2539,6 +2591,20 @@ def test_content_type_parser_wraps_header_value_error(
     monkeypatch.setattr(monitor, "Message", InvalidMessage)
     with pytest.raises(MonitorError, match="content type is invalid"):
         monitor._parse_content_type("bad")  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("prefix", "charset"),
+    [(b"\xef\xbb\xbf", None), (b"", "utf-8")],
+    ids=["utf8-bom", "declared-utf8"],
+)
+def test_sniff_content_type_tolerates_multibyte_cut_at_prefix_bound(
+    prefix: bytes, charset: str | None
+) -> None:
+    body = prefix + b"<!DOCTYPE html><html><body><p>" + "あ".encode() * 5_000
+    with pytest.raises(UnicodeDecodeError):
+        body[:8_192].decode("utf-8")  # prefix ends mid-character
+    assert monitor._sniff_content_type(body, charset=charset) == "text/html"  # pyright: ignore[reportPrivateUsage]
 
 
 def test_sniff_content_type_returns_plain_text_for_invalid_declared_encoding() -> None:

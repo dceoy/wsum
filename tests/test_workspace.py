@@ -5087,6 +5087,50 @@ def test_check_follows_new_atom_xhtml_anchors_with_html_relations(
     assert documents[0]["text"] == "Release details\n"
 
 
+def test_check_marks_omitted_form_destination_change_as_incomplete_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_targets(
+        tmp_path / "targets.csv", "Example,https://example.com/,releases,true\n"
+    )
+    monkeypatch.setattr(workspace.monitor, "_MAX_HTML_DESTINATIONS", 1)
+    page = b'<a href="/one">one</a><form action="/old"></form>'
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        return workspace.monitor.Document(page, url, "text/html")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    baseline = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    assert baseline["action"] == "baseline_created"
+    page = b'<a href="/one">one</a><form action="/new"></form>'
+
+    outcome = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+
+    assert outcome["action"] == "review"
+    review = cast(
+        "list[dict[str, object]]",
+        workspace.pending_reviews(tmp_path, target_id=str(outcome["target_id"]))[
+            "reviews"
+        ],
+    )[0]
+    link_review = cast("dict[str, object]", review["link_review"])
+    assert link_review["incomplete"] is True
+    assert (
+        finalize(
+            tmp_path,
+            {
+                "target_id": review["target_id"],
+                "revision": review["revision"],
+                "material": False,
+            },
+        )["action"]
+        == "manual_review_required"
+    )
+
+
 def test_check_records_new_oversized_link_as_incomplete_review_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
