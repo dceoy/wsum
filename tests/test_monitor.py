@@ -2541,6 +2541,20 @@ def test_content_type_parser_wraps_header_value_error(
         monitor._parse_content_type("bad")  # pyright: ignore[reportPrivateUsage]
 
 
+@pytest.mark.parametrize(
+    ("prefix", "charset"),
+    [(b"\xef\xbb\xbf", None), (b"", "utf-8")],
+    ids=["utf8-bom", "declared-utf8"],
+)
+def test_sniff_content_type_tolerates_multibyte_cut_at_prefix_bound(
+    prefix: bytes, charset: str | None
+) -> None:
+    body = prefix + b"<!DOCTYPE html><html><body><p>" + "あ".encode() * 5_000
+    with pytest.raises(UnicodeDecodeError):
+        body[:8_192].decode("utf-8")  # prefix ends mid-character
+    assert monitor._sniff_content_type(body, charset=charset) == "text/html"  # pyright: ignore[reportPrivateUsage]
+
+
 def test_sniff_content_type_returns_plain_text_for_invalid_declared_encoding() -> None:
     assert monitor._sniff_content_type(b"\xff", charset="ascii") == "text/plain"  # pyright: ignore[reportPrivateUsage]
 

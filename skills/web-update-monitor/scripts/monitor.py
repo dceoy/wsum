@@ -1063,7 +1063,10 @@ def _sniff_content_type(body: bytes, *, charset: str | None = None) -> str:
         sample_bytes = sample_bytes[: len(sample_bytes) - len(sample_bytes) % 4]
     try:
         sample = (
-            sample_bytes.decode(encoding, errors="strict")
+            # final=False tolerates a multibyte character cut by the prefix bound.
+            codecs.getincrementaldecoder(encoding)(errors="strict").decode(
+                sample_bytes, final=False
+            )
             if encoding is not None
             else sample_bytes.decode("latin-1", errors="strict")
         )
