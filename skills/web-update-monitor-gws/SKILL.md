@@ -209,7 +209,7 @@ This keeps the connector/composite boundary small:
 
 Do not publish a run while `pending` still lists any review with the same `run_id`. A later material finalize from that run may change the canonical Markdown report.
 
-After restore and pending reconciliation, enumerate canonical regular files directly under `output/report/`. For each `<run-id>.md`, validate the run ID with the core format and deliver it only when no pending review has the same `run_id`:
+After restore and pending reconciliation, enumerate canonical regular files directly under `output/report/`. For each filename matching the core run-ID form `YYYYMMDDTHHMMSSZ-xxxxxxxx.md` (eight lowercase hexadecimal suffix characters), reject malformed names and deliver the report only when no pending review has the same `run_id`:
 
 1. Treat `output/report/<run-id>.md` as the canonical source. Never reconstruct or duplicate it into composite state.
 2. Use the stable Drive filename `Web Update Report — <run-id>.md`.
