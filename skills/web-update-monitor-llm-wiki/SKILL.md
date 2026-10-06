@@ -16,12 +16,12 @@ The core `web-update-monitor` skill keeps owning detection, semantic materiality
 ```mermaid
 flowchart LR
     CSV["selected target CSV"] --> CORE["web-update-monitor<br/>--targets … check + finalize --archive-evidence"]
-    CORE --> EV["evidence/&lt;ingestion-id&gt;/<br/>(immutable, receipt-gated)"]
+    CORE --> EV["internal/evidence/&lt;ingestion-id&gt;/<br/>(immutable, receipt-gated)"]
     EV --> LIST["wiki.py list"]
     LIST --> AGENT["Agent: bounded reads,<br/>routing, drafting"]
     AGENT --> VAL["wiki.py validate / apply"]
-    VAL --> WAL["knowledge/.compiler/<br/>transaction + ledger"]
-    WAL --> KB["knowledge/<br/>SCHEMA.md, index.md, pages/"]
+    VAL --> WAL["internal/wiki/<br/>transaction + ledger"]
+    WAL --> KB["output/knowledge/<br/>SCHEMA.md, index.md, pages/"]
 ```
 
 Compilation is asynchronous and happens after the core's evidence commit. A compilation failure never blocks future monitoring, accepted snapshots, or run reports; the bundle simply stays queued.
@@ -30,17 +30,19 @@ Compilation is asynchronous and happens after the core's evidence commit. A comp
 
 ```text
 workspace/
-  reports/
-  evidence/          core-owned immutable source record
-  state/             core-internal state (never read it)
-  knowledge/
-    SCHEMA.md        human-readable editorial rules
-    index.md         page index maintained by drafts
-    pages/           <page-id>.md
-    .compiler/       ledger.json, transaction.json, lock
+  output/
+    report/
+    knowledge/
+      SCHEMA.md      human-readable editorial rules
+      index.md       page index maintained by drafts
+      pages/         <page-id>.md
+  internal/
+    state/           core-internal mutable state (never read it)
+    evidence/        core-owned immutable source record
+    wiki/            ledger.json, transaction.json, lock
 ```
 
-The selected target CSV is a separate input path passed to the core; it may be outside this workspace. `evidence/` is not copied into a second raw store; citations link to it with relative paths. No wiki fields belong in the selected target CSV: every enabled interest of a shared URL is preserved in the bundle's metadata, and materiality stays one decision per URL.
+The selected target CSV is a separate input path passed to the core; it may be outside this workspace. `internal/evidence/` is not copied into a second raw store; citations link to it with relative paths. No wiki fields belong in the selected target CSV: every enabled interest of a shared URL is preserved in the bundle's metadata, and materiality stays one decision per URL.
 
 ## Resolve dependencies
 
@@ -50,7 +52,7 @@ Resolve the installed `web-update-monitor` skill through the runtime's skill dis
 python "$WEB_UPDATE_MONITOR_LLM_WIKI_SKILL_DIR/scripts/wiki.py" --workspace "$WORKSPACE" <command>
 ```
 
-The helper has no dependency on the core package; it only reads the digest-verified `evidence/` artifacts.
+The helper has no dependency on the core package; it only reads the digest-verified `internal/evidence/` artifacts.
 
 ## Run monitoring (delegated to the core)
 
@@ -63,7 +65,7 @@ python "$WEB_UPDATE_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSP
 
 Do not overlap monitoring invocations on one workspace. Monitoring may add new bundles while a compilation is in progress because committed bundles are immutable. First monitor observations create baselines and do not seed the wiki: version 1 is explicitly update-driven, and importing existing documents or historical snapshots is a separate future operation.
 
-Reports are presentation artifacts. Never compile from `reports/` or from CSV keywords.
+Reports are presentation artifacts. Never compile from `output/report/` or from CSV keywords.
 
 ## Initialize
 
@@ -71,7 +73,7 @@ Reports are presentation artifacts. Never compile from `reports/` or from CSV ke
 python "$WEB_UPDATE_MONITOR_LLM_WIKI_SKILL_DIR/scripts/wiki.py" --workspace "$WORKSPACE" init
 ```
 
-`init` is idempotent: it creates `knowledge/`, a default `SCHEMA.md`, `index.md`, `pages/`, and `.compiler/` without overwriting user content. Users may edit `SCHEMA.md` and pages between helper mutations and while a draft is being written.
+`init` is idempotent: it creates `output/knowledge/` with `SCHEMA.md`, `index.md`, and `pages/`, plus `internal/wiki/` for compiler state, without overwriting user content. Users may edit `output/knowledge/SCHEMA.md` and pages between helper mutations and while a draft is being written.
 
 ## Compile one ingestion at a time
 
@@ -102,7 +104,7 @@ python "$WEB_UPDATE_MONITOR_LLM_WIKI_SKILL_DIR/scripts/wiki.py" --workspace "$WO
    Reuse existing page IDs and avoid duplicate pages. One source may affect several pages. Never regenerate the wiki wholesale and never delete or rename pages in version 1.
 
 5. **Read a consistent draft base.** `base --page <id> ...` returns, under the lock, the current schema, index, and requested pages (at most 8) with their SHA-256 hashes (`null` for an absent page). Use these hashes as `expected_sha256` values. The helper does not hold the lock while you draft.
-6. **Draft** following `knowledge/SCHEMA.md`.
+6. **Draft** following `output/knowledge/SCHEMA.md`.
 7. **Validate** (`validate`, no mutation) then **apply** (`apply`), each reading the draft JSON from stdin:
 
    ```bash
@@ -155,13 +157,13 @@ If required evidence or affected pages cannot fit the supported workflow (a line
 wiki.py --workspace "$WORKSPACE" block --ingestion-id <id> --reason "<why it cannot be compiled>"
 ```
 
-Blocked ingestions appear under `blocked` in `list` and stay unprocessed; a later successful `apply` clears the block. Evidence is never pruned automatically in version 1: tell the user when `evidence/` is growing and defer retention policy to them.
+Blocked ingestions appear under `blocked` in `list` and stay unprocessed; a later successful `apply` clears the block. Evidence is never pruned automatically in version 1: tell the user when `internal/evidence/` is growing and defer retention policy to them.
 
 ## Idempotency, edits, and recovery
 
-- **Lock.** Deterministic mutations take a process-owned exclusive `flock` on `knowledge/.compiler/lock`, released on process exit; the helper fails explicitly on platforms without it. Another holder produces a clear error.
+- **Lock.** Deterministic mutations take a process-owned exclusive `flock` on `internal/wiki/lock`, released on process exit; the helper fails explicitly on platforms without it. Another holder produces a clear error.
 - **Concurrent drafts.** `apply` revalidates the schema hash, the index hash, every page's expected hash (including expected absence for new pages), and the processed ledger under the lock. If another invocation already completed this ingestion, it returns the recorded result without applying the stale draft. A pre-apply conflict leaves all files unchanged; re-run `base` and redraft against the user's current content.
-- **Write-ahead transaction.** Before the first replacement the exact validated bytes, their old/new hashes, the schema hash, and a transaction digest are persisted in `.compiler/transaction.json`. Each destination is replaced atomically, then the ingestion is durably recorded in `ledger.json`, then the transaction is retired. Ledger entries bind the ingestion ID, evidence manifest digest, schema hash, and transaction digest.
+- **Write-ahead transaction.** Before the first replacement the exact validated bytes, their old/new hashes, the schema hash, and a transaction digest are persisted in `internal/wiki/transaction.json`. Each destination is replaced atomically, then the ingestion is durably recorded in `internal/wiki/ledger.json`, then the transaction is retired. Ledger entries bind the ingestion ID, evidence manifest digest, schema hash, and transaction digest.
 - **Recovery.** A leftover transaction replays: each destination must equal its expected old hash or its planned new hash. A durable ledger entry that matches the transaction retires it without replaying, preserving later user edits; a mismatching ledger entry fails closed. Recovery never asks for a different draft.
 - **Third-hash conflict.** If a destination matches neither hash, or `SCHEMA.md` changed since the transaction was frozen, recovery stops and keeps the transaction. Reconcile explicitly:
   1. Run `status`; it lists every destination as `old`, `new`, or `conflict`, with the planned content for conflicts (and whether the schema changed).
