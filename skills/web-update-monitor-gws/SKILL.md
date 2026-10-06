@@ -217,7 +217,7 @@ When a run has an outbox report and no pending review with the same `run_id`:
 1. Treat `.wsum-google-workspace/outbox/<run-id>.md` as the canonical source.
 2. Use the stable Drive filename `Web Update Report — <run-id>.md`.
 3. Before creating anything, list the configured destination folder for both the exact Markdown filename and the prior-version Google Doc title `Web Update Report — <run-id>`.
-4. If any exact-title legacy Google Doc exists, stop delivery, report its Drive file ID, and keep the outbox intact until the user explicitly chooses how to reconcile it. Do not create a Markdown duplicate or modify or delete the legacy Doc automatically. This migration check uses Drive listing and does not require the Google Docs connector.
+4. If any exact-title legacy Google Doc exists, stop delivery, report all matching Drive file IDs, and keep the outbox intact. Ask the user either to verify that the legacy Doc contains the final report and authorize treating it as delivered, then remove the outbox entry and commit a new timestamped state archive without uploading Markdown, or to archive/rename the legacy Doc before resuming Markdown delivery. Never create an automatic duplicate or modify or delete the legacy Doc. This migration check uses Drive listing and does not require the Google Docs connector.
 5. If no legacy Google Doc and no exact Markdown filename exist, upload one Markdown file containing the complete canonical report and capture its Drive file ID.
 6. If no legacy Google Doc and exactly one Markdown file matches, reuse that exact Drive file ID and replace its content with the complete canonical Markdown report so retries converge on the same file.
 7. If multiple exact Markdown filenames exist, stop delivery and report the ambiguity instead of creating another file.
@@ -238,7 +238,7 @@ Do not convert the report to a Google Doc or create an additional presentation c
 - A run still has pending reviews: keep its Markdown outbox durable and do not publish the Drive report yet.
 - Drive Markdown upload/update or read-back verification fails: keep the durable Markdown outbox and retry delivery only.
 - Drive Markdown delivery succeeds but outbox cleanup persistence fails: reuse the exact-filename file on retry and replace its content idempotently.
-- A prior-version Google Doc with the exact legacy title exists: report its Drive file ID, keep the outbox durable, and wait for explicit user reconciliation before creating or changing any report file.
+- A prior-version Google Doc with the exact legacy title exists: report all matching Drive file IDs, keep the outbox durable, and wait for the user to verify the legacy report and authorize cleanup or archive/rename it before Markdown delivery.
 - Multiple exact-filename report files exist: stop delivery and surface the ambiguity.
 - Snapshot conflict: discard only the conflicted pending transaction through the core API, persist that cleanup, then let a later check refetch it.
 - Manual review required: keep the transaction pending; other targets can still be monitored because core `check` skips only targets that already have pending reviews.
