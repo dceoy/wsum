@@ -434,6 +434,8 @@ class _TextExtractor(HTMLParser):
     def _record_destination(self, tag: str, name: str, value: str) -> None:
         self._destination_count += 1
         destination = urljoin(self._base_url, value.strip())
+        if _destination_has_credentials(destination):
+            raise MonitorError("HTML destination contains credentials")
         if self._destination_count > _MAX_HTML_DESTINATIONS:
             # Keep the first destinations; flag the rest as omitted so the
             # review is marked incomplete instead of failing the target.
@@ -443,8 +445,6 @@ class _TextExtractor(HTMLParser):
             if tag in {"a", "area"}:
                 self.links.omitted_hashes.add(digest)
             return
-        if _destination_has_credentials(destination):
-            raise MonitorError("HTML destination contains credentials")
         if tag in {"a", "area"}:
             _collect_link(self.links, destination)
         digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
