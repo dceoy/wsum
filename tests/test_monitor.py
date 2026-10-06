@@ -1727,7 +1727,8 @@ def test_html_extractor_keeps_first_destinations_and_flags_the_rest(
     first = monitor.hashlib.sha256(b"https://example.com/one").hexdigest()
     second = monitor.hashlib.sha256(b"https://example.com/two").hexdigest()
     assert list(parser.links) == [first]
-    assert parser.links.omitted_hashes == {second}
+    form = monitor.hashlib.sha256(b"https://example.com/f").hexdigest()
+    assert parser.links.omitted_hashes == {second, form}
     text = "".join(parser.parts)
     assert second not in text
     assert "[omitted-destinations:2:sha256:" in text

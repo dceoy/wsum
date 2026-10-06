@@ -442,8 +442,7 @@ class _TextExtractor(HTMLParser):
             digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
             self._omitted.update(f"{tag}:{name}:{digest}\n".encode())
             self._omitted_count += 1
-            if tag in {"a", "area"}:
-                self.links.omitted_hashes.add(digest)
+            self.links.omitted_hashes.add(digest)
             return
         if tag in {"a", "area"}:
             _collect_link(self.links, destination)
