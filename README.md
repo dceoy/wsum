@@ -6,14 +6,14 @@ The core skill lives in `skills/web-update-monitor/`. It intentionally has two r
 
 A second composite, `skills/web-update-monitor-llm-wiki/`, compiles durable captured evidence from the core into a source-backed Markdown knowledge base. The core also gains an opt-in `finalize --archive-evidence` output for it.
 
-A thin composite integration skill lives in `skills/web-update-monitor-gws/`. It keeps Google-specific orchestration outside the core while using Google Sheets as the target source, Google Drive for cross-run state, and Google Docs for completed report delivery.
+A thin composite integration skill lives in `skills/web-update-monitor-gws/`. It keeps Google-specific orchestration outside the core while using Google Sheets as the target source and Google Drive for cross-run state plus completed Markdown report delivery.
 
 ## Agent Skills
 
 The repository ships these canonical skills:
 
 - `skills/web-update-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
-- `skills/web-update-monitor-gws/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract, persists core state as three retained timestamped ZIP generations in Drive, and publishes completed runs as Google Docs.
+- `skills/web-update-monitor-gws/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract, persists core state as three retained timestamped ZIP generations in Drive, and publishes completed runs as Markdown files in Drive.
 - `skills/web-update-monitor-llm-wiki/`: a composite skill with one deterministic helper (`scripts/wiki.py`) that turns committed evidence bundles into cited Markdown pages with a processed ledger and recoverable compilation transactions.
 
 To install the core skill in an Agent Skills-compatible runtime, use the `web-update-monitor` package from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain). To use the Google Workspace composite, install **both** `web-update-monitor` and `web-update-monitor-gws`; the composite package intentionally delegates to the core package instead of duplicating its runtime helpers. The LLM wiki composite follows the same rule: install `web-update-monitor` and `web-update-monitor-llm-wiki`, and let the runtime's skill discovery locate the core instead of assuming a sibling path.
@@ -32,8 +32,8 @@ flowchart LR
     CORE --> REPORT["reports/<run-id>.md"]
     OUT -->|restore| REPORT
     REPORT -->|stage| OUT
-    OUT -->|run complete| GDOC["Google Doc"]
-    GDOC --> DR["Google Drive report folder"]
+    OUT -->|run complete| GMD["Drive Markdown file"]
+    GMD --> DR["Google Drive report folder"]
 ```
 
 The core automatically reads newly added navigation links from changed HTML pages and RSS/Atom feeds, including linked PDFs. Traversal defaults to depth 1 and at most 100 fetched links per target; `check --link-depth <N> --max-links <N>` changes those run-level limits, and depth 0 disables linked-document fetching. It stores child evidence in the parent pending transaction and includes it in the same semantic review. Initial observations establish the parent baseline without following existing links.
@@ -42,7 +42,7 @@ The core groups interests by exact trimmed URL and fetches each enabled URL once
 
 The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite persists the core `.wsum/` state and durable Markdown outbox as timestamped ZIP generations (`state-YYYYMMDDTHHMMSSZ.zip`), restores the newest generation by filename timestamp, and retains only the three newest committed archives instead of duplicating review metadata in an adapter-owned journal or allowing state archives to accumulate.
 
-Markdown remains the canonical core report and durable outbox format. The composite waits until a run has no pending reviews, then creates or updates one Google Doc named `Web Update Report — <run-id>` in the configured report folder. Exact-title lookup makes retries converge on the same Doc instead of creating duplicates.
+Markdown remains the canonical core report, durable outbox format, and user-facing Google Drive report format. The composite waits until a run has no pending reviews, then uploads or updates one file named `Web Update Report — <run-id>.md` in the configured report folder. Exact-filename lookup makes retries converge on the same Drive file instead of creating duplicates.
 
 Read `skills/web-update-monitor-gws/SKILL.md` for connector orchestration and recovery semantics.
 
