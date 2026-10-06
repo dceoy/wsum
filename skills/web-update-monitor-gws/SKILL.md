@@ -22,9 +22,7 @@ flowchart LR
     WORKSPACE --> CORE
     CORE --> WORKSPACE
     CORE --> REPORT["output/report/<run-id>.md"]
-    WORKSPACE --> OUT["internal/gws/outbox/"]
-    REPORT -->|stage durable Markdown| OUT
-    OUT -->|run complete| GMD["Drive Markdown file"]
+    REPORT -->|run complete| GMD["Drive Markdown file"]
     GMD --> DR["Google Drive report folder"]
 ```
 
@@ -63,7 +61,7 @@ Use a monotonic UTC generation timestamp in the filename as `workspace-YYYYMMDDT
 Each ZIP is a self-contained workspace generation. Archive every regular file below these workspace roots:
 
 - `output/`: all user-facing generated artifacts, including `output/report/`
-- `internal/`: all implementation data, including core state, evidence, the Google Workspace projection, and the durable delivery outbox
+- `internal/`: all implementation data, including core state, evidence, and the Google Workspace projection
 
 Exclude only hidden temporary files created for atomic replacement or other explicitly transient scratch artifacts. Preserve file bytes exactly; do not require archived workspace files to be UTF-8. The restored `internal/gws/targets.csv` is only a cached projection: after restore, the Google Sheet remains authoritative and the projection must be regenerated and atomically replaced before pending reconciliation, finalization, or new fetches.
 
@@ -145,7 +143,7 @@ The Spreadsheet is authoritative for target configuration; `internal/gws/targets
 
 ## Reconcile and resume before new work
 
-After the current Sheet has been projected successfully, use the already restored `output/` and `internal/` trees directly. Do not reconstruct `output/report/` from the outbox. The outbox remains only the durable delivery queue for reports that are not safe to forget yet.
+After the current Sheet has been projected successfully, use the already restored `output/` and `internal/` trees directly. The canonical `output/report/<run-id>.md` files are already durable because the complete `output/` tree is included in every committed workspace snapshot. Do not create a second composite-owned report queue or staging copy.
 
 List pending handles through the core API, passing the current projection so review metadata is refreshed from the Sheet:
 
@@ -178,12 +176,12 @@ Missing/invalid projection is distinct from valid absence. Core `pending` may pr
 
 After every finalize:
 
-- material: copy the complete current `output/report/<run-id>.md` to `internal/gws/outbox/<run-id>.md`
-- non-material: leave any existing outbox for that run unchanged
+- material: keep the complete canonical report only at `output/report/<run-id>.md`; do not copy or stage it elsewhere
+- non-material: create no report-delivery artifact
 - `manual_review_required`: leave the core transaction pending
 - `snapshot_conflict`: discard that stale core transaction with the core `discard` command so a later check can refetch it
 
-Commit the complete workspace as a new timestamped Drive workspace snapshot after each state-changing operation before relying on the local session.
+Commit the complete workspace as a new timestamped Drive workspace snapshot after each state-changing operation before relying on the local session. Once that snapshot verifies, any canonical report it contains can be rediscovered and delivered after a later restart without a separate queue.
 
 ## Run the core monitor efficiently
 
@@ -211,19 +209,18 @@ This keeps the connector/composite boundary small:
 
 Do not publish a run while `pending` still lists any review with the same `run_id`. A later material finalize from that run may change the canonical Markdown report.
 
-When a run has an outbox report and no pending review with the same `run_id`:
+After restore and pending reconciliation, enumerate canonical regular files directly under `output/report/`. For each `<run-id>.md`, validate the run ID with the core format and deliver it only when no pending review has the same `run_id`:
 
-1. Treat `internal/gws/outbox/<run-id>.md` as the canonical source.
+1. Treat `output/report/<run-id>.md` as the canonical source. Never reconstruct or duplicate it into composite state.
 2. Use the stable Drive filename `Web Update Report — <run-id>.md`.
 3. Before creating anything, list the configured destination folder for both the exact Markdown filename and the prior-version Google Doc title `Web Update Report — <run-id>`.
-4. If any exact-title legacy Google Doc exists, stop delivery, report all matching Drive file IDs, and keep the outbox intact. Ask the user either to verify that the legacy Doc contains the final report and authorize treating it as delivered, then remove the outbox entry and commit a new timestamped workspace snapshot without uploading Markdown, or to archive/rename the legacy Doc before resuming Markdown delivery. Never create an automatic duplicate or modify or delete the legacy Doc. This migration check uses Drive listing and does not require the Google Docs connector.
+4. If any exact-title legacy Google Doc exists, stop delivery for that run, report all matching Drive file IDs, and require the user to archive or rename the legacy Doc before Markdown delivery. Never create an automatic duplicate or modify or delete the legacy Doc. This migration check uses Drive listing and does not require the Google Docs connector.
 5. If no legacy Google Doc and no exact Markdown filename exist, upload one Markdown file containing the complete canonical report and capture its Drive file ID.
-6. If no legacy Google Doc and exactly one Markdown file matches, reuse that exact Drive file ID and replace its content with the complete canonical Markdown report so retries converge on the same file.
-7. If multiple exact Markdown filenames exist, stop delivery and report the ambiguity instead of creating another file.
-8. Read the delivered file back by its exact Drive file ID and verify its byte length and SHA-256 against the canonical outbox bytes.
-9. After delivery is confirmed, remove the outbox entry and commit a new timestamped Drive workspace snapshot.
+6. If no legacy Google Doc and exactly one Markdown file matches, read it by exact Drive file ID. If its byte length and SHA-256 already match the canonical report, treat delivery as complete; otherwise replace that same file's content with the complete canonical report.
+7. If multiple exact Markdown filenames exist, stop delivery for that run and report the ambiguity instead of creating another file.
+8. After any create or replacement, read the delivered file back by its exact Drive file ID and verify its byte length and SHA-256 against the canonical report bytes.
 
-The exact Markdown filename is the current-format delivery idempotency key, while the Drive file ID is the mutation target after lookup. The prior exact-title Google Doc is a migration conflict to reconcile, not an automatic update target. Do not infer identity from modified time or listing order.
+The exact Markdown filename is the current-format delivery idempotency key, while the Drive file ID is the mutation target after lookup. Delivery does not mutate the local workspace, so successful delivery requires no follow-up workspace snapshot. A failed delivery is retried by rediscovering the same canonical report from the already persisted `output/` tree. The prior exact-title Google Doc is a migration conflict to reconcile, not an automatic update target. Do not infer identity from modified time or listing order.
 
 Do not convert the report to a Google Doc or create an additional presentation copy. The uploaded Markdown file is the user-facing Google Workspace report artifact and remains the same format as the core report.
 
@@ -233,11 +230,11 @@ Do not convert the report to a Google Doc or create an additional presentation c
 - Workspace ZIP or manifest validation failure: do not start from an empty baseline and do not silently fall back to an older snapshot.
 - Pending review exists: first reconcile it against the current authoritative Sheet projection, discard it if removed or disabled, otherwise resume it through the core API without refetching that target.
 - A workspace change succeeds locally but Drive workspace persistence fails before the new snapshot verifies: do not treat the local mutation as durable; recover from the newest previously committed workspace snapshot.
-- Report staging or workspace persistence fails after material finalize: do not delete the previously committed workspace generation.
-- A run still has pending reviews: keep its Markdown outbox durable and do not publish the Drive report yet.
-- Drive Markdown upload/update or read-back verification fails: keep the durable Markdown outbox and retry delivery only.
-- Drive Markdown delivery succeeds but outbox cleanup persistence fails: reuse the exact-filename file on retry and replace its content idempotently.
-- A prior-version Google Doc with the exact legacy title exists: report all matching Drive file IDs, keep the outbox durable, and wait for the user to verify the legacy report and authorize cleanup or archive/rename it before Markdown delivery.
+- Workspace persistence fails after material finalize: do not treat the local report or state transition as durable; recover from the newest previously committed workspace snapshot.
+- A run still has pending reviews: keep its canonical report in the persisted `output/` tree and do not publish the Drive report yet.
+- Drive Markdown upload/update or read-back verification fails: leave the workspace unchanged and retry delivery from the canonical persisted report on a later invocation.
+- Drive Markdown delivery succeeds: no workspace cleanup or additional persistence is required.
+- A prior-version Google Doc with the exact legacy title exists: report all matching Drive file IDs and require the user to archive or rename it before Markdown delivery.
 - Multiple exact-filename report files exist: stop delivery and surface the ambiguity.
 - Snapshot conflict: discard only the conflicted pending transaction through the core API, persist that cleanup, then let a later check refetch it.
 - Manual review required: keep the transaction pending; other targets can still be monitored because core `check` skips only targets that already have pending reviews.
