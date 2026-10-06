@@ -211,7 +211,12 @@ This keeps the connector/composite boundary small:
 Use `internal/gws/delivery.json` as the only durable delivery marker. Keep this exact logical shape:
 
 ```json
-{"version":1,"reports":{"<run-id>":"<sha256>"}}
+{
+  "version": 1,
+  "reports": {
+    "<run-id>": "<sha256>"
+  }
+}
 ```
 
 Each key is a valid core run ID and each value is the lowercase SHA-256 of the complete canonical `output/report/<run-id>.md` bytes that were verified as delivered. Reject unknown top-level fields, malformed run IDs, malformed digests, non-string values, and a ledger entry whose digest no longer matches its canonical local report. Update the ledger by atomic replacement and persist the complete workspace immediately after the update. The ledger may grow with delivered runs, but it stores only one run ID and digest per report rather than another Markdown copy.
