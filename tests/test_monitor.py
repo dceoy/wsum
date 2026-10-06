@@ -1733,6 +1733,19 @@ def test_html_extractor_keeps_first_destinations_and_flags_the_rest(
     assert "[omitted-destinations:2:sha256:" in text
 
 
+def test_html_extractor_rejects_credentials_after_destination_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitor, "_MAX_HTML_DESTINATIONS", 1)
+    parser = monitor._TextExtractor("https://example.com/")
+    fragment = (
+        '<a href="/one">one</a>'
+        '<a href="https://user:pass@example.com/private">secret</a>'
+    )
+    with pytest.raises(MonitorError, match="credentials"):
+        parser.feed(fragment)
+
+
 def test_html_extractor_omitted_destination_change_alters_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
