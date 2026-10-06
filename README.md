@@ -29,9 +29,7 @@ flowchart LR
     WORKSPACE --> CORE
     CORE --> WORKSPACE
     CORE --> REPORT["output/report/<run-id>.md"]
-    WORKSPACE --> OUT["internal/gws/outbox/"]
-    REPORT -->|stage| OUT
-    OUT -->|run complete| GMD["Drive Markdown file"]
+    REPORT -->|run complete| GMD["Drive Markdown file"]
     GMD --> DR["Google Drive report folder"]
 ```
 
@@ -39,9 +37,9 @@ The core automatically reads newly added navigation links from changed HTML page
 
 The core groups interests by exact trimmed URL and fetches each enabled URL once. Semantic review considers the parent diff and linked evidence for every enabled interest: material for any interest means material for the URL. Write one managed report section explaining the affected interests without repeating the same change, and finalize once per URL.
 
-The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite persists the complete `output/` and `internal/` roots as timestamped workspace snapshots (`workspace-YYYYMMDDTHHMMSSZ.zip`), restores the newest generation by filename timestamp, and retains only the three newest committed snapshots. This includes reports, core state, evidence, the cached Google Sheets projection, and the durable delivery outbox; after restore, the Sheet projection is regenerated before pending reconciliation or new fetches.
+The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite persists the complete `output/` and `internal/` roots as timestamped workspace snapshots (`workspace-YYYYMMDDTHHMMSSZ.zip`), restores the newest generation by filename timestamp, and retains only the three newest committed snapshots. This includes reports, core state, evidence, and the cached Google Sheets projection; after restore, the Sheet projection is regenerated before pending reconciliation or new fetches.
 
-Markdown remains the canonical core report, durable outbox format, and user-facing Google Drive report format. The outbox is a delivery queue, not a reconstruction source for `output/report/`, because the complete output tree is already restored from the workspace snapshot. The composite waits until a run has no pending reviews, then uploads or updates one file named `Web Update Report — <run-id>.md` in the configured report folder. Exact-filename lookup makes retries converge on the same Drive file instead of creating duplicates.
+Markdown remains the canonical core and user-facing Google Drive report format. Because each committed workspace snapshot already contains the complete `output/` tree, the composite delivers completed `output/report/<run-id>.md` files directly without a second report queue or staging copy. It waits until a run has no pending reviews, then uploads or verifies one file named `Web Update Report — <run-id>.md` in the configured report folder. Exact-filename lookup plus byte verification makes retries converge on the same Drive file instead of creating duplicates.
 
 Read `skills/web-update-monitor-gws/SKILL.md` for connector orchestration and recovery semantics.
 
