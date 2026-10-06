@@ -403,9 +403,7 @@ class _TextExtractor(HTMLParser):
         self.parts: list[str] = []
         self.links = LinkCollection()
 
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
         if tag in _SKIP_TAGS:
             self._skip_depth += 1
