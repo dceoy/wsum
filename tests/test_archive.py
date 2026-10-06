@@ -243,7 +243,8 @@ def test_archive_finalize_commits_bundle(tmp_path: Path) -> None:
     assert receipt["ingestion_id"] == review.ingestion_id
     assert receipt["material"] is True
     assert review.snapshot.read_text() == "new\n"
-    assert "Plans changed." in (tmp_path / "output" / "report" / f"{_RUN_ID}.md").read_text()
+    report = tmp_path / "output" / "report" / f"{_RUN_ID}.md"
+    assert "Plans changed." in report.read_text()
     assert not review.pending.exists()
     assert not review.intent.exists()
     assert workspace._read_receipt(tmp_path, review.ingestion_id) is not None
@@ -364,7 +365,8 @@ def test_recovery_after_report_before_receipt(
     result = review.finalize()
 
     assert result["ingestion_id"] == review.ingestion_id
-    assert (tmp_path / "output" / "report" / f"{_RUN_ID}.md").read_text().count("Plans") == 1
+    report = tmp_path / "output" / "report" / f"{_RUN_ID}.md"
+    assert report.read_text().count("Plans") == 1
 
 
 def test_recovery_after_receipt_before_cleanup(
