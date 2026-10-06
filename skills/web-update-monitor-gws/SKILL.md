@@ -85,7 +85,7 @@ Before installing any archive content:
 - verify each workspace file's byte length and SHA-256 and require it to decode as UTF-8
 - restore into a fresh local workspace and install files only after the complete archive validates
 
-If the newest archive fails validation, fail closed and report the older retained generation as a rollback candidate when it independently validates. Never silently fall back to an older generation and never start from an empty baseline.
+If the newest archive fails validation, fail closed and report each independently valid older retained generation as a rollback candidate. Never silently fall back to an older generation and never start from an empty baseline.
 
 ### Persist
 
@@ -99,7 +99,7 @@ Persist after every state-changing operation before relying on the local session
 6. Treat the verified new archive as the committed latest generation.
 7. Delete the oldest archives by their exact Drive file IDs until exactly the three newest committed generations remain. Never delete the immediately previous generation before the new one has passed read-back verification.
 
-If the upload result is ambiguous, query the exact generated filename. Continue only when exactly one file exists and its downloaded bytes match the locally computed length and SHA-256 and pass full archive validation. If none or multiple exist, or the digest differs, stop without cleanup; do not issue a second create for the same filename.
+If the upload result is ambiguous, query the exact generated filename. Continue only when exactly one file exists, download it by its Drive file ID, confirm its bytes match the locally computed length and SHA-256, and pass full archive validation. If none or multiple exist, or the digest differs, stop without cleanup; do not issue a second create for the same filename.
 
 A failure before step 6 leaves all previously committed generations untouched. A failure during step 7 may temporarily leave more than three archives; the next successful persistence run must perform the same oldest-first cleanup after committing its new archive. Cleanup failure must not invalidate the newly verified latest state.
 
