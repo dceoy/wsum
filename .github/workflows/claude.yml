@@ -31,7 +31,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      id-token: write
       actions: read
     uses: dceoy/pr-loop/.github/workflows/claude-code-review.yml@main  # zizmor: ignore[unpinned-uses]
     secrets:
