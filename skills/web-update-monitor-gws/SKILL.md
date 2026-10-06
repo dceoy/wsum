@@ -16,7 +16,7 @@ Keep Google integration outside the core monitor. The core `web-update-monitor` 
 ```mermaid
 flowchart LR
     GS["Google Sheet"] -->|project| CSV["targets.csv"]
-    DS["Google Drive state folder<br/>state-0.zip / state-1.zip / current.json"] <-->|restore / persist| BUNDLE["state bundle"]
+    DS["Google Drive state folder<br/>state-YYYYMMDDTHHMMSSZ.zip × 2"] <-->|restore / persist| BUNDLE["state bundle"]
     BUNDLE --> STATE[".wsum/"]
     BUNDLE --> OUT[".wsum-google-workspace/outbox/"]
     CSV --> CORE["web-update-monitor"]
