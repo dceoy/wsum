@@ -211,8 +211,8 @@ tempCodeRunnerFile.py
 
 # Website monitor operational data and secrets
 targets.csv
-reports/
-state/
+output/
+internal/
 browser-profiles/
 fetched/
 snapshots/
