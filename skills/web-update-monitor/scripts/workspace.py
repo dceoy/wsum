@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 
 import monitor
 
-_TARGETS_FILE = "targets.csv"
+_TARGETS_LABEL = "targets input"
 _STATE_DIR = ".wsum"
 _PENDING_RECOVERY_DIR = ".pending-recovery"
 _MAX_CSV_BYTES = 1024 * 1024
@@ -185,19 +185,21 @@ def _read_csv(path: Path) -> str:
     try:
         info = path.lstat()
     except OSError as exc:
-        raise WorkspaceError(f"{_TARGETS_FILE} is missing") from exc
+        raise WorkspaceError(f"{_TARGETS_LABEL} is missing") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise WorkspaceError(f"{_TARGETS_FILE} must be a regular non-symlink file")
+        raise WorkspaceError(
+            f"{_TARGETS_LABEL} must be a regular non-symlink file"
+        )
     if info.st_size <= 0 or info.st_size > _MAX_CSV_BYTES:
-        raise WorkspaceError(f"{_TARGETS_FILE} size is invalid")
+        raise WorkspaceError(f"{_TARGETS_LABEL} size is invalid")
     try:
         with path.open("rb") as stream:
             data = stream.read(_MAX_CSV_BYTES + 1)
         if len(data) > _MAX_CSV_BYTES:
-            raise WorkspaceError(f"{_TARGETS_FILE} size is invalid")
+            raise WorkspaceError(f"{_TARGETS_LABEL} size is invalid")
         return data.decode("utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
-        raise WorkspaceError(f"{_TARGETS_FILE} must be UTF-8 CSV") from exc
+        raise WorkspaceError(f"{_TARGETS_LABEL} must be UTF-8 CSV") from exc
 
 
 def _parse_enabled(value: str, row_number: int) -> bool:
@@ -275,14 +277,14 @@ def _integer_text_limit() -> Generator[None]:
 def _validate_target_header(fieldnames: list[str] | None) -> list[str]:
     """Validate the supported, unambiguous CSV header."""
     if fieldnames is None or len(fieldnames) != len(set(fieldnames)):
-        raise WorkspaceError(f"{_TARGETS_FILE} must have a unique header row")
+        raise WorkspaceError(f"{_TARGETS_LABEL} must have a unique header row")
     fields = set(fieldnames)
     if not _REQUIRED_FIELDS.issubset(fields):
-        raise WorkspaceError(f"{_TARGETS_FILE} requires name and url columns")
+        raise WorkspaceError(f"{_TARGETS_LABEL} requires name and url columns")
     if fields - _ALLOWED_FIELDS:
-        raise WorkspaceError(f"{_TARGETS_FILE} contains unsupported columns")
+        raise WorkspaceError(f"{_TARGETS_LABEL} contains unsupported columns")
     if {"criteria", "watch_focus"}.issubset(fields):
-        raise WorkspaceError(f"{_TARGETS_FILE} cannot contain criteria and watch_focus")
+        raise WorkspaceError(f"{_TARGETS_LABEL} cannot contain criteria and watch_focus")
     return fieldnames
 
 
@@ -359,13 +361,13 @@ def _group_target_interests(
     return targets
 
 
-def load_targets(workspace: str | Path) -> list[dict[str, object]]:
-    """Load, validate, and normalize all interests from ``targets.csv``."""
-    root = _workspace(workspace)
+def load_targets(targets: str | Path) -> list[dict[str, object]]:
+    """Load, validate, and normalize all interests from an explicit CSV input."""
+    path = Path(targets)
     previous_limit = csv.field_size_limit(_MAX_CSV_BYTES)
     row_number = 1
     try:
-        reader = csv.reader(io.StringIO(_read_csv(root / _TARGETS_FILE)), strict=True)
+        reader = csv.reader(io.StringIO(_read_csv(path)), strict=True)
         fieldnames = _validate_target_header(next(reader, None))
         rows: list[tuple[str, dict[str, object]]] = []
         with _integer_text_limit():
@@ -378,7 +380,7 @@ def load_targets(workspace: str | Path) -> list[dict[str, object]]:
     finally:
         csv.field_size_limit(previous_limit)
     if not rows:
-        raise WorkspaceError(f"{_TARGETS_FILE} contains no targets")
+        raise WorkspaceError(f"{_TARGETS_LABEL} contains no targets")
     return _group_target_interests(rows)
 
 
@@ -1795,17 +1797,22 @@ def _compact_review(review: Mapping[str, object]) -> dict[str, object]:
 
 def check(
     workspace: str | Path,
+    targets: str | Path,
     *,
     compact: bool = False,
     link_depth: int = _DEFAULT_LINK_DEPTH,
     max_links: int = _MAX_LINKS,
 ) -> dict[str, object]:
-    """Check targets without refetching any target that already has a review."""
+    """Check explicit target input without refetching existing pending reviews."""
     _validate_link_options(link_depth, max_links)
     root = _workspace(workspace)
-    targets = load_targets(root)
-    targets_by_id = {str(target["target_id"]): target for target in targets}
-    existing = _collect_pending_reviews(root, _target_review_contexts(targets))
+    loaded_targets = load_targets(targets)
+    targets_by_id = {
+        str(target["target_id"]): target for target in loaded_targets
+    }
+    existing = _collect_pending_reviews(
+        root, _target_review_contexts(loaded_targets)
+    )
     existing_reviews = cast("list[dict[str, object]]", existing["reviews"])
     retained_reviews: list[dict[str, object]] = []
     pending_ids: set[str] = set()
@@ -1821,7 +1828,7 @@ def check(
     state = _state_dir(root)
     run_id = _new_run_id()
     outcomes: list[dict[str, object]] = list(retained_reviews)
-    for target in targets:
+    for target in loaded_targets:
         if str(target["target_id"]) in pending_ids:
             continue
         if target["action"] == "skip_disabled":
@@ -2017,13 +2024,17 @@ def _target_review_contexts(
     }
 
 
-def _current_review_contexts(root: Path) -> dict[str, dict[str, object]] | None:
-    """Return current CSV review context keyed by stable target ID."""
+def _current_review_contexts(
+    targets: str | Path | None,
+) -> dict[str, dict[str, object]] | None:
+    """Return review context from an explicit CSV input when available."""
+    if targets is None:
+        return None
     try:
-        targets = load_targets(root)
+        loaded_targets = load_targets(targets)
     except WorkspaceError:
         return None
-    return _target_review_contexts(targets)
+    return _target_review_contexts(loaded_targets)
 
 
 def _saved_review_context(
@@ -2147,12 +2158,15 @@ def _prepare_pending_for_read(state: Path, target_id: str) -> None:
 
 
 def pending_reviews(
-    workspace: str | Path, *, target_id: str | None = None
+    workspace: str | Path,
+    *,
+    targets: str | Path | None = None,
+    target_id: str | None = None,
 ) -> dict[str, object]:
     """Return resumable pending reviews without refetching monitored targets."""
     root = _workspace(workspace)
     return _collect_pending_reviews(
-        root, _current_review_contexts(root), target_id=target_id
+        root, _current_review_contexts(targets), target_id=target_id
     )
 
 
@@ -2672,11 +2686,16 @@ def _complete_archive(
 
 
 def _prepare_archive(
-    root: Path, state: Path, target_id: str, report: str
+    root: Path,
+    state: Path,
+    target_id: str,
+    report: str,
+    targets: str | Path,
 ) -> dict[str, object]:
     """Validate and freeze one material decision, then complete its archive."""
     target = next(
-        (item for item in load_targets(root) if item["target_id"] == target_id), None
+        (item for item in load_targets(targets) if item["target_id"] == target_id),
+        None,
     )
     if target is None or target["action"] == "skip_disabled":
         raise WorkspaceError(
@@ -2844,6 +2863,7 @@ def finalize(
     payload: Mapping[str, object],
     *,
     archive_evidence: bool = False,
+    targets: str | Path | None = None,
 ) -> dict[str, object]:
     """Apply one semantic decision and safely advance its baseline.
 
@@ -2895,7 +2915,11 @@ def finalize(
         return {"action": "manual_review_required", "target_id": target_id}
 
     if archive_evidence and report is not None:
-        return _prepare_archive(root, state, target_id, report)
+        if targets is None:
+            raise WorkspaceError(
+                "targets input is required when starting evidence archival"
+            )
+        return _prepare_archive(root, state, target_id, report, targets)
 
     promoted = _promote_snapshot(
         state,
@@ -2942,11 +2966,13 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     check_parser = subparsers.add_parser("check")
+    check_parser.add_argument("--targets", required=True)
     check_parser.add_argument("--compact", action="store_true")
     check_parser.add_argument("--link-depth", type=int, default=_DEFAULT_LINK_DEPTH)
     check_parser.add_argument("--max-links", type=int, default=_MAX_LINKS)
 
     pending_parser = subparsers.add_parser("pending")
+    pending_parser.add_argument("--targets")
     pending_parser.add_argument("--target-id")
 
     discard_parser = subparsers.add_parser("discard")
@@ -2954,6 +2980,7 @@ def _parser() -> argparse.ArgumentParser:
 
     finalize_parser = subparsers.add_parser("finalize")
     finalize_parser.add_argument("--archive-evidence", action="store_true")
+    finalize_parser.add_argument("--targets")
     return parser
 
 
@@ -2964,12 +2991,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "check":
             result = check(
                 args.workspace,
+                args.targets,
                 compact=args.compact,
                 link_depth=args.link_depth,
                 max_links=args.max_links,
             )
         elif args.command == "pending":
-            result = pending_reviews(args.workspace, target_id=args.target_id)
+            result = pending_reviews(
+                args.workspace, targets=args.targets, target_id=args.target_id
+            )
         elif args.command == "discard":
             result = discard_pending(args.workspace, args.target_id)
         else:
@@ -2977,6 +3007,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.workspace,
                 _read_decision(),
                 archive_evidence=args.archive_evidence,
+                targets=args.targets,
             )
     except (WorkspaceError, OSError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)

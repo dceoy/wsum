@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import workspace
-from workspace import WorkspaceError, check, finalize, load_targets
+from workspace import WorkspaceError, finalize
 
 if TYPE_CHECKING:
     import argparse
@@ -25,6 +25,18 @@ if TYPE_CHECKING:
 
 
 _RUN_ID = "20261001T000000Z-deadbeef"
+
+
+def _targets_path(root: Path) -> Path:
+    return root / "targets.csv"
+
+
+def load_targets(root: Path) -> list[dict[str, object]]:
+    return workspace.load_targets(_targets_path(root))
+
+
+def check(root: Path, **kwargs: Any) -> dict[str, object]:
+    return workspace.check(root, _targets_path(root), **kwargs)
 
 
 def _write_targets(path: Path, rows: str) -> None:
@@ -88,6 +100,16 @@ def _write_review_transaction(
         payload["run_id"] = run_id
     metadata.write_text(json.dumps(payload), encoding="utf-8")
     return metadata, candidate_path, snapshot
+
+
+def test_load_targets_accepts_explicit_nondefault_filename(tmp_path: Path) -> None:
+    source = tmp_path / "watch-list.csv"
+    _write_targets(source, "Example,https://example.com/,pricing,true\n")
+
+    targets = workspace.load_targets(source)
+
+    assert targets[0]["name"] == "Example"
+    assert not (tmp_path / "targets.csv").exists()
 
 
 def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) -> None:
@@ -1549,7 +1571,7 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
     ]
     assert "diff" not in reviews[0]
 
-    pending = workspace.pending_reviews(tmp_path, target_id=target_id)
+    pending = workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=target_id)
     full = cast("list[dict[str, object]]", pending["reviews"])[0]
     assert full["run_id"] == _RUN_ID
     assert full["target_id"] == target_id
@@ -1581,7 +1603,7 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
         }
     ]
 
-    refreshed = workspace.pending_reviews(tmp_path, target_id=target_id)
+    refreshed = workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=target_id)
     refreshed_full = cast("list[dict[str, object]]", refreshed["reviews"])[0]
     assert refreshed_full["revision"] == reviews[0]["revision"]
     assert refreshed_full["run_id"] == _RUN_ID
@@ -1606,7 +1628,7 @@ def test_pending_reviews_recovers_partial_replacement_before_listing(
     group.mkdir()
     (group / "candidate.txt").write_text("partial\n", encoding="utf-8")
 
-    assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+    assert workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path)) == {"reviews": []}
     assert not group.exists()
     assert (
         workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
@@ -1626,7 +1648,7 @@ def test_pending_reviews_legacy_reconstructs_diff_and_context(tmp_path: Path) ->
     state.mkdir()
     _write_review_transaction(state, "legacy", target_id=target_id)
 
-    pending = workspace.pending_reviews(tmp_path, target_id=target_id)
+    pending = workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=target_id)
     review = cast("list[dict[str, object]]", pending["reviews"])[0]
 
     assert review["run_id"] == _RUN_ID
@@ -1653,7 +1675,7 @@ def test_discard_pending_clears_conflicted_review(tmp_path: Path) -> None:
     assert not metadata.exists()
     assert not candidate.exists()
     assert snapshot.read_text(encoding="utf-8") == "old\n"
-    assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+    assert workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path)) == {"reviews": []}
 
 
 def test_pending_target_listing_rejects_hidden_unsafe_entry(tmp_path: Path) -> None:
@@ -1665,7 +1687,7 @@ def test_pending_target_listing_rejects_hidden_unsafe_entry(tmp_path: Path) -> N
     (pending / ".unsafe").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(WorkspaceError, match="unsafe entry"):
-        workspace.pending_reviews(tmp_path)
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path))
 
 
 def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
@@ -1715,7 +1737,7 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
         outside.mkdir()
         pending.symlink_to(outside, target_is_directory=True)
         with pytest.raises(WorkspaceError, match="non-symlink"):
-            workspace.pending_reviews(tmp_path)
+            workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path))
         return
 
     pending.mkdir()
@@ -1729,7 +1751,7 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
 
         monkeypatch.setattr(Path, "lstat", fail_pending)
         with pytest.raises(WorkspaceError, match="pending directory is unavailable"):
-            workspace.pending_reviews(tmp_path)
+            workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path))
         return
 
     if fault == "list":
@@ -1742,7 +1764,7 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
 
         monkeypatch.setattr(Path, "iterdir", fail_list)
         with pytest.raises(WorkspaceError, match="cannot list pending directory"):
-            workspace.pending_reviews(tmp_path)
+            workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path))
         return
 
     entry = pending / (".orphan.tmp" if fault == "hidden-temp" else "unexpected.txt")
@@ -1757,13 +1779,13 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
 
         monkeypatch.setattr(Path, "lstat", fail_entry)
         with pytest.raises(WorkspaceError, match="cannot stat pending entry"):
-            workspace.pending_reviews(tmp_path)
+            workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path))
         return
     if fault == "hidden-temp":
-        assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+        assert workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path)) == {"reviews": []}
         return
     with pytest.raises(WorkspaceError, match="unsafe entry"):
-        workspace.pending_reviews(tmp_path)
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path))
 
 
 def test_pending_reviews_grouped_without_targets_uses_persisted_context(
@@ -1781,11 +1803,11 @@ def test_pending_reviews_grouped_without_targets_uses_persisted_context(
     })
     metadata.write_text(json.dumps(payload), encoding="utf-8")
 
-    listed = workspace.pending_reviews(tmp_path)
+    listed = workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path))
     handle = cast("list[dict[str, object]]", listed["reviews"])[0]
     assert handle["name"] == "Persisted"
 
-    result = workspace.pending_reviews(tmp_path, target_id="example")
+    result = workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id="example")
     review = cast("list[dict[str, object]]", result["reviews"])[0]
     assert review["name"] == "Persisted"
     assert review["url"] == "https://example.com/"
@@ -1800,7 +1822,7 @@ def test_pending_reviews_legacy_without_targets_uses_safe_fallback(
     state.mkdir()
     _write_review_transaction(state, "legacy")
 
-    result = workspace.pending_reviews(tmp_path, target_id="example")
+    result = workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id="example")
     review = cast("list[dict[str, object]]", result["reviews"])[0]
 
     assert review["name"] == "example"
@@ -1895,7 +1917,7 @@ def test_pending_reviews_rejects_unknown_target_id(tmp_path: Path) -> None:
     state.mkdir()
 
     with pytest.raises(WorkspaceError, match="no valid pending"):
-        workspace.pending_reviews(tmp_path, target_id="example")
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id="example")
 
 
 def test_main_discard_command_emits_json(
@@ -1992,7 +2014,7 @@ def test_check_migrates_legacy_pending_on_successful_changed_result(
 
 
 def test_main_reports_invalid_workspace(capsys: pytest.CaptureFixture[str]) -> None:
-    assert workspace.main(["--workspace", "/missing", "check"]) == 2
+    assert workspace.main(["--workspace", "/missing", "check", "--targets", "/missing/targets.csv"]) == 2
     assert "workspace must be an existing directory" in capsys.readouterr().err
 
 
@@ -2546,9 +2568,9 @@ def test_load_targets_handles_header_rows_and_empty_records(
     (tmp_path / "targets.csv").write_text(csv_text, encoding="utf-8")
     if message:
         with pytest.raises(WorkspaceError, match=message):
-            workspace.load_targets(tmp_path)
+            workspace.load_targets(_targets_path(tmp_path))
     else:
-        result = workspace.load_targets(tmp_path)
+        result = workspace.load_targets(_targets_path(tmp_path))
         assert len(result) == 1
         assert result[0]["enabled"] is True
 
@@ -2600,7 +2622,7 @@ def test_load_targets_rejects_duplicate_and_malformed_rows(
 ) -> None:
     (tmp_path / "targets.csv").write_text(header + rows, encoding="utf-8")
     with pytest.raises(WorkspaceError, match=message):
-        workspace.load_targets(tmp_path)
+        workspace.load_targets(_targets_path(tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -2916,12 +2938,12 @@ def test_main_success_emits_json(
     (tmp_path / "targets.csv").write_text(
         "name,url,enabled\nExample,https://example.com/,false\n", encoding="utf-8"
     )
-    assert workspace.main(["--workspace", str(tmp_path), "check"]) == 0
+    assert workspace.main(["--workspace", str(tmp_path), "check", "--targets", str(_targets_path(tmp_path))]) == 0
     captured = capsys.readouterr()
     assert '"action": "skipped"' in captured.out
     assert not captured.err
 
-    assert workspace.main(["--workspace", str(tmp_path), "pending"]) == 0
+    assert workspace.main(["--workspace", str(tmp_path), "pending", "--targets", str(_targets_path(tmp_path))]) == 0
     captured = capsys.readouterr()
     assert captured.out.strip() == '{"reviews": []}'
     assert not captured.err
@@ -3080,7 +3102,7 @@ def test_load_targets_rejects_invalid_schema_and_row_values(
 ) -> None:
     (tmp_path / "targets.csv").write_text(csv_text, encoding="utf-8")
     with pytest.raises(WorkspaceError, match=message):
-        workspace.load_targets(tmp_path)
+        workspace.load_targets(_targets_path(tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -4291,7 +4313,7 @@ def test_load_targets_rejects_non_string_csv_values(
 
     monkeypatch.setattr(workspace.csv, "reader", fake_reader)
     with pytest.raises(WorkspaceError, match="invalid CSV value"):
-        workspace.load_targets(tmp_path)
+        workspace.load_targets(_targets_path(tmp_path))
 
 
 def test_existing_pending_paths_requires_legacy_candidate_directory(
@@ -4765,7 +4787,14 @@ def test_module_entry_point_runs_cli(
     monkeypatch.setattr(
         workspace.sys,
         "argv",
-        ["workspace.py", "--workspace", str(tmp_path), "check"],
+        [
+            "workspace.py",
+            "--workspace",
+            str(tmp_path),
+            "check",
+            "--targets",
+            str(_targets_path(tmp_path)),
+        ],
     )
     with pytest.raises(SystemExit) as exit_info:
         runpy.run_path(str(Path(workspace.__file__)), run_name="__main__")
@@ -5112,7 +5141,7 @@ def test_check_marks_omitted_form_destination_change_as_incomplete_review(
     assert outcome["action"] == "review"
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=str(outcome["target_id"]))[
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=str(outcome["target_id"]))[
             "reviews"
         ],
     )[0]
@@ -5158,7 +5187,7 @@ def test_check_records_new_oversized_link_as_incomplete_review_evidence(
     assert calls == ["https://example.com/", "https://example.com/"]
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=str(outcome["target_id"]))[
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=str(outcome["target_id"]))[
             "reviews"
         ],
     )[0]
@@ -5256,7 +5285,7 @@ def test_link_review_transaction_survives_resume_and_promotes_identity_baseline(
     target_id = str(outcome["target_id"])
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=target_id)["reviews"],
     )[0]
     context = cast("dict[str, object]", review["link_review"])
     assert context["incomplete"] is failed
@@ -5283,7 +5312,7 @@ def test_link_review_transaction_survives_resume_and_promotes_identity_baseline(
         })
         assert finalize(tmp_path, decision)["action"] == "finalized"
     if not failed and not material:
-        assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+        assert workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path)) == {"reviews": []}
         assert not list((tmp_path / "reports").glob("*.md"))
     assert (
         cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]["action"]
@@ -5476,7 +5505,7 @@ def test_invalid_priority_in_later_disabled_row_prevents_mutation(
     assert [path.read_bytes() for path in (metadata, candidate, snapshot)] == before
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=target_id)["reviews"],
     )[0]
     assert [
         item["name"] for item in cast("list[dict[str, object]]", review["interests"])
@@ -5556,7 +5585,7 @@ def test_large_csv_text_and_serialized_expansion(tmp_path: Path, field: str) -> 
     assert metadata.stat().st_size > 1024 * 1024
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=str(target["target_id"]))[
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=str(target["target_id"]))[
             "reviews"
         ],
     )[0]
@@ -5593,6 +5622,8 @@ def test_priority_exceeding_python_decimal_limit_round_trips(
             "--workspace",
             str(tmp_path),
             "pending",
+            "--targets",
+            str(_targets_path(tmp_path)),
             "--target-id",
             str(target["target_id"]),
         ])
@@ -5698,7 +5729,7 @@ def test_metadata_changes_replace_context_without_rewriting_transaction(
     }
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=target_id)["reviews"],
     )[0]
     interests = cast("list[dict[str, object]]", review["interests"])
     assert [item["name"] for item in interests] == expected_names
@@ -5724,7 +5755,7 @@ def test_valid_inactive_configuration_has_no_interests_and_check_discards(
     (tmp_path / "targets.csv").write_text(_ENRICHED_HEADER + rows, encoding="utf-8")
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=target_id)["reviews"],
     )[0]
     assert review["interests"] == []
     assert metadata.exists()
@@ -5749,7 +5780,7 @@ def test_unavailable_configuration_keeps_saved_review_and_direct_finalize(
         check(tmp_path)
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=target_id)["reviews"],
     )[0]
     assert [
         item["name"] for item in cast("list[dict[str, object]]", review["interests"])
@@ -5783,7 +5814,7 @@ def test_legacy_scalar_review_synthesizes_interest(
     metadata.write_text(json.dumps(payload), encoding="utf-8")
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id="example")["reviews"],
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id="example")["reviews"],
     )[0]
     assert review["interests"] == [_interest("Saved", criteria="rules")]
     assert (
@@ -5970,7 +6001,7 @@ def test_shared_url_fetch_and_finalization_use_one_transaction_and_section(
     report = Path(str(result["report_path"])).read_text(encoding="utf-8")
     assert report.count("## API") == 1
     assert report.count(":start -->") == 1
-    assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+    assert workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path)) == {"reviews": []}
 
 
 @pytest.mark.parametrize(
@@ -5998,7 +6029,7 @@ def test_enriched_replacement_recovery_keeps_both_revision_choices(
     (tmp_path / "targets.csv").unlink()
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=target_id)["reviews"],
     )[0]
     assert review["interests"] == replacement["interests"]
     assert (state / ".pending-recovery" / f"{target_id}.json").exists()
@@ -6031,7 +6062,7 @@ def test_enriched_committed_recovery_rejects_malformed_review_metadata(
         state, _commit_record(target_id=target_id, revision=payload["revision"])
     )
     with pytest.raises(WorkspaceError, match="committed replacement is incomplete"):
-        workspace.pending_reviews(tmp_path, target_id=target_id)
+        workspace.pending_reviews(tmp_path, targets=_targets_path(tmp_path), target_id=target_id)
     with pytest.raises(WorkspaceError, match="committed replacement is incomplete"):
         finalize(
             tmp_path,
