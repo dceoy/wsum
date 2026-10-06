@@ -383,9 +383,8 @@ def test_finalize_cleanup_failure_is_retryable(
     assert failed
     assert (state / ".pending-recovery" / "example.json").exists()
     assert snapshot.read_text(encoding="utf-8") == "new\n"
-    assert "Retry cleanup." in (tmp_path / "output" / "report" / f"{_RUN_ID}.md").read_text(
-        encoding="utf-8"
-    )
+    report = tmp_path / "output" / "report" / f"{_RUN_ID}.md"
+    assert "Retry cleanup." in report.read_text(encoding="utf-8")
 
     result = finalize(tmp_path, decision)
 
@@ -5995,16 +5994,23 @@ def test_pending_serialized_size_boundary_preserves_existing_transaction(
     monkeypatch.setattr(workspace, "_MAX_SNAPSHOT_BYTES", size - extra_bytes)
     if extra_bytes:
         with pytest.raises(WorkspaceError, match="pending decision size"):
-            workspace._write_pending_transaction(tmp_path / "internal" / "state", payload, b"new\n")
+            workspace._write_pending_transaction(
+                tmp_path / "internal" / "state", payload, b"new\n"
+            )
         with pytest.raises(WorkspaceError, match="pending decision size"):
             workspace._read_pending(tmp_path / "internal" / "state", target_id)
         assert not workspace._replacement_matches_commit(
-            tmp_path / "internal" / "state", target_id, {"revision": payload["revision"]}
+            tmp_path / "internal" / "state",
+            target_id,
+            {"revision": payload["revision"]},
         )
         assert [path.read_bytes() for path in (metadata, candidate, snapshot)] == before
     else:
         assert workspace._serialize_pending(payload) == metadata.read_bytes()
-        assert workspace._read_pending(tmp_path / "internal" / "state", target_id) == payload
+        assert (
+            workspace._read_pending(tmp_path / "internal" / "state", target_id)
+            == payload
+        )
 
 
 @pytest.mark.parametrize(
