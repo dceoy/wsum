@@ -51,7 +51,7 @@ class _Env:
             workspace.load_targets(root / "targets.csv")[0]["target_id"]
         )
         self.current = "baseline\n"
-        snapshots = root / "state" / "snapshots"
+        snapshots = root / "internal" / "state" / "snapshots"
         snapshots.mkdir(parents=True)
         (snapshots / f"{self.target_id}.txt").write_text(self.current)
         self.serial = 0
@@ -82,7 +82,7 @@ class _Env:
         if link_review is not None:
             result["link_review"] = link_review
         review = workspace._handle_monitor_result(
-            self.root / "state",
+            self.root / "internal" / "state",
             target,
             result,
             _RUN_ID,
@@ -104,10 +104,10 @@ class _Env:
 
     @property
     def knowledge(self) -> Path:
-        return self.root / "knowledge"
+        return self.root / "output" / "knowledge"
 
     def bundle(self, ingestion_id: str) -> Path:
-        return self.root / "evidence" / ingestion_id
+        return self.root / "internal" / "evidence" / ingestion_id
 
     def base(self, *page_ids: str) -> dict[str, Any]:
         return wiki.base(self.root, list(page_ids))
@@ -212,15 +212,15 @@ def _fail_write(
 
 def test_init_creates_workspace_and_is_idempotent(tmp_path: Path) -> None:
     first = wiki.init(tmp_path)
-    (tmp_path / "knowledge" / "SCHEMA.md").write_text("custom schema\n")
+    (tmp_path / "output" / "knowledge" / "SCHEMA.md").write_text("custom schema\n")
 
     second = wiki.init(tmp_path)
 
     assert first["created"] == ["SCHEMA.md", "index.md"]
     assert second["created"] == []
-    assert (tmp_path / "knowledge" / "SCHEMA.md").read_text() == "custom schema\n"
-    assert (tmp_path / "knowledge" / "pages").is_dir()
-    assert (tmp_path / "knowledge" / ".compiler").is_dir()
+    assert (tmp_path / "output" / "knowledge" / "SCHEMA.md").read_text() == "custom schema\n"
+    assert (tmp_path / "output" / "knowledge" / "pages").is_dir()
+    assert (tmp_path / "output" / "knowledge" / ".compiler").is_dir()
 
 
 def test_workspace_must_be_a_real_directory(tmp_path: Path) -> None:
@@ -243,7 +243,7 @@ def test_commands_require_initialization(tmp_path: Path) -> None:
 def test_init_rejects_symlinked_knowledge_directory(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
-    (tmp_path / "knowledge").symlink_to(outside)
+    (tmp_path / "output" / "knowledge").symlink_to(outside)
 
     with pytest.raises(WikiError, match="non-symlink directory"):
         wiki.init(tmp_path)
@@ -331,9 +331,9 @@ def test_list_reports_invalid_bundles_and_skips_uncommitted_ones(env: _Env) -> N
     good = env.commit("good\n")
     bad = env.commit("bad\n", when="2026-10-01T00:00:05+00:00")
     (env.bundle(bad) / "parent.txt").write_text("tampered\n")
-    (env.root / "evidence" / "notes.txt").write_text("not a bundle")
+    (env.root / "internal" / "evidence" / "notes.txt").write_text("not a bundle")
     # A staged core transaction has no receipt yet; it is not corruption.
-    (env.root / "evidence" / ("f" * 64)).mkdir()
+    (env.root / "internal" / "evidence" / ("f" * 64)).mkdir()
 
     listed = wiki.list_ingestions(env.root)
 
@@ -605,7 +605,7 @@ def test_load_bundle_rejects_unsafe_locations(env: _Env, tmp_path: Path) -> None
     bundle.unlink()
     moved.rename(bundle)
 
-    evidence = env.root / "evidence"
+    evidence = env.root / "internal" / "evidence"
     evidence.rename(tmp_path / "evidence-moved")
     with pytest.raises(WikiError, match="evidence directory is unavailable"):
         wiki.show(env.root, ingestion)
@@ -704,7 +704,7 @@ def test_apply_renders_citations_and_records_the_ledger(env: _Env) -> None:
     assert page.startswith("# Plans\n\n")
     link = (
         f"[evidence {ingestion[:12]} parent.txt L1-2]"
-        f'(../../evidence/{ingestion}/parent.txt "{_URL}")'
+        f'(../../../internal/evidence/{ingestion}/parent.txt "{_URL}")'
     )
     assert link in page
     assert "[[cite:" not in page
@@ -714,7 +714,7 @@ def test_apply_renders_citations_and_records_the_ledger(env: _Env) -> None:
     assert entry["pages"] == ["pages/other.md", "pages/plans.md"]
     assert entry["page_hashes"]["pages/plans.md"] == _sha(page)
     assert set(entry["page_hashes"]) == {"index.md", "pages/other.md", "pages/plans.md"}
-    assert not (env.knowledge / ".compiler" / "transaction.json").exists()
+    assert not (env.root / "internal" / "wiki" / "transaction.json").exists()
     assert wiki.list_ingestions(env.root)["eligible"] == []
     assert wiki.status(env.root) == {"blocked": 0, "processed": 1, "transaction": None}
 
@@ -902,7 +902,7 @@ def _too_many_pages(draft: dict[str, Any]) -> None:
     ]
 
 
-_UNKNOWN_LINK = "Old [x](../../evidence/" + "a" * 64 + "/parent.txt) [[cite:c1]]"
+_UNKNOWN_LINK = "Old [x](../../../internal/evidence/" + "a" * 64 + "/parent.txt) [[cite:c1]]"
 _MUTATIONS: dict[str, _Mutation] = {
     "missing-field": _drop("noop"),
     "wrong-ingestion": _top("ingestion_id", "0" * 64),
@@ -1150,7 +1150,7 @@ def test_crash_before_journal_cleanup_preserves_later_user_edits(
     monkeypatch.setattr(Path, "unlink", failing_unlink)
     _apply(env, draft)
     monkeypatch.undo()
-    assert (env.knowledge / ".compiler" / "transaction.json").exists()
+    assert (env.root / "internal" / "wiki" / "transaction.json").exists()
     page = env.knowledge / "pages" / "plans.md"
     page.write_text("# Plans\n\nUser rewrote this page.\n")
 
@@ -1158,7 +1158,7 @@ def test_crash_before_journal_cleanup_preserves_later_user_edits(
 
     assert recovered["action"] == "recovered"
     assert page.read_text() == "# Plans\n\nUser rewrote this page.\n"
-    assert not (env.knowledge / ".compiler" / "transaction.json").exists()
+    assert not (env.root / "internal" / "wiki" / "transaction.json").exists()
     assert wiki.recover(env.root)["action"] == "nothing_to_recover"
 
 
@@ -1222,7 +1222,7 @@ def _break_transaction(env: _Env, monkeypatch: pytest.MonkeyPatch) -> Path:
     with pytest.raises(WikiError, match="injected"):
         _apply(env, env.draft(ingestion, [_page()]))
     monkeypatch.undo()
-    return env.knowledge / ".compiler" / "transaction.json"
+    return env.root / "internal" / "wiki" / "transaction.json"
 
 
 def test_ledger_and_transaction_mismatch_fails_closed(
@@ -1248,7 +1248,7 @@ def test_ledger_and_transaction_mismatch_fails_closed(
         "processed": {txn["ingestion_id"]: entry},
         "blocked": {},
     }
-    (env.knowledge / ".compiler" / "ledger.json").write_text(json.dumps(ledger))
+    (env.root / "internal" / "wiki" / "ledger.json").write_text(json.dumps(ledger))
 
     with pytest.raises(WikiError, match="ledger and transaction mismatch"):
         wiki.recover(env.root)
@@ -1359,7 +1359,7 @@ def test_transaction_that_is_not_json_fails_closed(
     ],
 )
 def test_corrupt_ledger_fails_closed(env: _Env, content: str) -> None:
-    (env.knowledge / ".compiler" / "ledger.json").write_text(content)
+    (env.root / "internal" / "wiki" / "ledger.json").write_text(content)
 
     with pytest.raises(WikiError, match="compiler ledger is invalid"):
         wiki.status(env.root)
@@ -1376,7 +1376,7 @@ def test_ledger_size_limit_is_enforced(
 
 
 def test_exclusive_lock_rejects_concurrent_compilers(env: _Env) -> None:
-    descriptor = os.open(env.knowledge / ".compiler" / "lock", os.O_RDWR | os.O_CREAT)
+    descriptor = os.open(env.root / "internal" / "wiki" / "lock", os.O_RDWR | os.O_CREAT)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         with pytest.raises(WikiError, match="holds the lock"):
@@ -1807,7 +1807,7 @@ def test_full_ledger_fails_before_any_page_is_written(
         _apply(env, draft)
 
     assert not list((env.knowledge / "pages").glob("*.md"))
-    assert not (env.knowledge / ".compiler" / "transaction.json").exists()
+    assert not (env.root / "internal" / "wiki" / "transaction.json").exists()
     assert wiki.status(env.root)["transaction"] is None
     assert wiki.status(env.root)["processed"] == 0
 
@@ -1860,7 +1860,7 @@ _LEDGER_ENTRY_TAMPERS: dict[str, dict[str, object]] = {
 def test_malformed_processed_entries_fail_closed(env: _Env, name: str) -> None:
     ingestion = env.commit("alpha\n")
     _apply(env, env.draft(ingestion, [_page()]))
-    ledger_path = env.knowledge / ".compiler" / "ledger.json"
+    ledger_path = env.root / "internal" / "wiki" / "ledger.json"
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     changes = dict(_LEDGER_ENTRY_TAMPERS[name])
     if "__replace__" in changes:
@@ -1881,7 +1881,7 @@ def test_malformed_processed_entries_fail_closed(env: _Env, name: str) -> None:
 def test_processed_and_blocked_keys_must_be_ingestion_ids(env: _Env) -> None:
     ingestion = env.commit("alpha\n")
     _apply(env, env.draft(ingestion, [_page()]))
-    ledger_path = env.knowledge / ".compiler" / "ledger.json"
+    ledger_path = env.root / "internal" / "wiki" / "ledger.json"
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     ledger["processed"]["not-a-hash"] = ledger["processed"].pop(ingestion)
     ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
