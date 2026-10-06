@@ -213,6 +213,7 @@ tempCodeRunnerFile.py
 targets.csv
 output/
 internal/
+.wsum/
 browser-profiles/
 fetched/
 snapshots/
