@@ -2,7 +2,7 @@
 name: web-update-monitor-gws
 description: Compose Google Workspace connectors with web-update-monitor so a Google Sheet supplies targets while Google Drive persists complete versioned monitor workspaces and completed Markdown reports.
 license: MIT
-compatibility: Requires the installed web-update-monitor skill, local scratch storage, Google Sheets connector read access to the source spreadsheet, and Google Drive connector binary upload/download plus read/write access to dedicated workspace and report folders.
+compatibility: Requires the installed web-update-monitor skill, local scratch storage, Google Sheets connector read access to the source spreadsheet, and Google Drive connector binary upload/download plus read/write access to dedicated `workspaces/` and report folders.
 ---
 
 # Google Workspace Web Update Monitor
@@ -39,17 +39,17 @@ Resolve these values from the user's request or Routine configuration:
 - source Google Spreadsheet
 - worksheet or range containing targets, readable through the Google Sheets connector
 - destination Google Drive folder for Markdown reports
-- dedicated Google Drive workspaces folder for this logical monitor
+- dedicated Google Drive `workspaces/` folder for this logical monitor
 - installed `web-update-monitor` skill root resolved through runtime skill discovery
 - local scratch workspace for the current run
 
-Use a stable workspace key for one logical monitor. Do not share one workspace folder between unrelated target sets.
+Use a stable workspace key for one logical monitor. Do not share one `workspaces/` folder between unrelated target sets.
 
 Never put connector credentials, access tokens, cookies, or other secrets into the workspace or Drive snapshots.
 
 ## Persist the complete cross-run workspace
 
-Persist the monitor workspace as timestamped ZIP snapshots in the dedicated Drive workspaces folder. Keep at most the three most recent committed snapshots:
+Persist the monitor workspace as timestamped ZIP snapshots in the dedicated Drive `workspaces/` folder. Keep at most the three most recent committed snapshots:
 
 ```text
 workspaces/
@@ -71,7 +71,7 @@ Place a UTF-8 `manifest.json` at the ZIP root. It must contain a schema version,
 
 ### Restore
 
-List the entire dedicated workspaces folder. If no timestamped workspace snapshot exists, initialize a new monitor only when the folder is empty. If any other file exists—including legacy `state-YYYYMMDDTHHMMSSZ.zip` generations or individually mirrored files from older layouts—fail closed without creating or deleting anything. Report that legacy storage needs explicit migration or configure a new, empty workspace folder; never mistake it for an empty monitor.
+List the entire dedicated Drive `workspaces/` folder. If no timestamped workspace snapshot exists, initialize a new monitor only when the folder is empty. If any other file exists—including legacy `state-YYYYMMDDTHHMMSSZ.zip` generations or individually mirrored files from older layouts—fail closed without creating or deleting anything. Report that legacy storage needs explicit migration or configure a new, empty `workspaces/` folder; never mistake it for an empty monitor.
 
 When timestamped snapshots exist, consider only files whose names exactly match `workspace-YYYYMMDDTHHMMSSZ.zip`, parse their timestamps strictly, and select the newest snapshot by its filename timestamp. Google Drive allows duplicate names, so require exactly one Drive file ID for each timestamp; duplicate files for one generation fail closed. Download the selected snapshot by its exact file ID. Do not use Drive modified time or listing order to choose the active workspace.
 
