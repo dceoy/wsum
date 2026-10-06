@@ -271,7 +271,13 @@ class _Workspace:
         self.verified: set[tuple[str, str]] = set()
 
     def require_initialized(self) -> None:
-        for path in (self.knowledge, self.pages, self.compiler):
+        for path in (
+            self.output,
+            self.knowledge,
+            self.pages,
+            self.internal,
+            self.compiler,
+        ):
             info = _lstat(path)
             _require(
                 info is not None
