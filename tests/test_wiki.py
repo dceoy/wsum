@@ -47,7 +47,9 @@ class _Env:
             _HEADER + f"Plans,{_URL},Vendor,Product,plans,Limits,1,true\n",
             encoding="utf-8",
         )
-        self.target_id = str(workspace.load_targets(root)[0]["target_id"])
+        self.target_id = str(
+            workspace.load_targets(root / "targets.csv")[0]["target_id"]
+        )
         self.current = "baseline\n"
         snapshots = root / ".wsum" / "snapshots"
         snapshots.mkdir(parents=True)
@@ -69,7 +71,7 @@ class _Env:
         """
         self.serial += 1
         _Clock.value = datetime.fromisoformat(when)
-        target = workspace.load_targets(self.root)[0]
+        target = workspace.load_targets(self.root / "targets.csv")[0]
         result: dict[str, object] = {
             "status": "changed",
             "sha256": hashlib.sha256(text.encode()).hexdigest(),
@@ -94,6 +96,7 @@ class _Env:
                 "material": True,
                 "report": f"## Change {self.serial}\n",
             },
+            targets=self.root / "targets.csv",
             archive_evidence=True,
         )
         self.current = text

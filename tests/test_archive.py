@@ -51,7 +51,10 @@ class _Review:
 
     def finalize(self, **changes: object) -> dict[str, object]:
         return finalize(
-            self.root, self.decision(**cast("Any", changes)), archive_evidence=True
+            self.root,
+            self.decision(**cast("Any", changes)),
+            targets=self.root / "targets.csv",
+            archive_evidence=True,
         )
 
 
@@ -76,7 +79,7 @@ def _review(
     truncated: bool = False,
 ) -> _Review:
     _targets(root)
-    target = workspace.load_targets(root)[0]
+    target = workspace.load_targets(root / "targets.csv")[0]
     target_id = str(target["target_id"])
     snapshots = root / ".wsum" / "snapshots"
     snapshots.mkdir(parents=True)
@@ -411,7 +414,7 @@ def test_recovery_via_check_resumes_archive_before_refetch(
         _unchanged,
     )
 
-    outcome = check(tmp_path)
+    outcome = check(tmp_path, tmp_path / "targets.csv")
 
     assert outcome["targets"]
     assert (review.bundle / "committed.json").exists()
@@ -430,7 +433,7 @@ def test_retry_after_cleanup_returns_same_receipt(tmp_path: Path) -> None:
 def test_retry_does_not_touch_newer_pending_revision(tmp_path: Path) -> None:
     review = _review(tmp_path)
     first = review.finalize()
-    target = workspace.load_targets(tmp_path)[0]
+    target = workspace.load_targets(tmp_path / "targets.csv")[0]
     newer = workspace._handle_monitor_result(
         review.state,
         target,
@@ -647,8 +650,12 @@ def test_inactive_target_or_invalid_configuration_archives_nothing(
     else:
         (tmp_path / "targets.csv").write_text(text, encoding="utf-8")
 
-    with pytest.raises(WorkspaceError):
-        review.finalize()
+    if text is None:
+        with pytest.raises(WorkspaceError):
+            finalize(tmp_path, review.decision(), archive_evidence=True)
+    else:
+        with pytest.raises(WorkspaceError):
+            review.finalize()
 
     assert not (tmp_path / "evidence").exists()
     assert not review.intent.exists()
@@ -729,16 +736,18 @@ def test_blocked_archive_does_not_stop_pending_listing_or_check(
     _prepare_blocked(review, monkeypatch)
     monkeypatch.setattr(workspace, "_promote_snapshot", _conflicting_promotion)
 
-    listing = workspace.pending_reviews(tmp_path)
+    listing = workspace.pending_reviews(tmp_path, targets=tmp_path / "targets.csv")
     assert listing["reviews"] == []
     blocked = cast("list[dict[str, str]]", listing["blocked"])
     assert blocked[0]["target_id"] == review.target_id
     assert "snapshot conflict" in blocked[0]["error"]
 
     with pytest.raises(WorkspaceError, match="snapshot conflict"):
-        workspace.pending_reviews(tmp_path, target_id=review.target_id)
+        workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv", target_id=review.target_id
+        )
 
-    outcome = check(tmp_path)
+    outcome = check(tmp_path, tmp_path / "targets.csv")
     targets = cast("list[dict[str, str]]", outcome["targets"])
     assert targets[0]["action"] == "error"
     assert "snapshot conflict" in targets[0]["error"]
@@ -757,7 +766,7 @@ def test_non_archive_recovery_failure_still_propagates(
     monkeypatch.setattr(workspace, "_prepare_pending_for_read", broken)
 
     with pytest.raises(WorkspaceError, match="plain failure"):
-        workspace.pending_reviews(tmp_path)
+        workspace.pending_reviews(tmp_path, targets=tmp_path / "targets.csv")
     assert review.pending.exists()
 
 
@@ -783,7 +792,7 @@ def test_pending_replacement_cannot_bypass_archive_obligation(
 ) -> None:
     review = _review(tmp_path)
     _prepare_blocked(review, monkeypatch)
-    target = workspace.load_targets(tmp_path)[0]
+    target = workspace.load_targets(tmp_path / "targets.csv")[0]
 
     outcome = workspace._handle_monitor_result(
         review.state,
@@ -1085,6 +1094,8 @@ def test_main_finalize_archive_evidence_flag(
     status = workspace.main([
         "--workspace",
         str(tmp_path),
+        "--targets",
+        str(tmp_path / "targets.csv"),
         "finalize",
         "--archive-evidence",
     ])
@@ -1142,7 +1153,7 @@ def test_receipt_must_match_the_prepared_transaction(
 def _legacy_review(root: Path) -> _Review:
     # A pending record with only the base fields has no stored diff.
     _targets(root)
-    target_id = str(workspace.load_targets(root)[0]["target_id"])
+    target_id = str(workspace.load_targets(root / "targets.csv")[0]["target_id"])
     state = root / ".wsum"
     snapshots = state / "snapshots"
     snapshots.mkdir(parents=True)
@@ -1193,7 +1204,13 @@ def test_main_reports_unexpected_io_errors_as_json(
 
     monkeypatch.setattr(workspace, "check", failing)
 
-    status = workspace.main(["--workspace", str(tmp_path), "check"])
+    status = workspace.main([
+        "--workspace",
+        str(tmp_path),
+        "--targets",
+        str(tmp_path / "targets.csv"),
+        "check",
+    ])
 
     assert status == 2
     assert json.loads(capsys.readouterr().err) == {"error": "disk exploded"}
