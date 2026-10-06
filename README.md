@@ -22,14 +22,14 @@ To install the core skill in an Agent Skills-compatible runtime, use the `web-up
 
 ```mermaid
 flowchart LR
-    GS["Google Sheet"] --> CSV["targets.csv"]
+    GS["Google Sheet"] --> CSV["internal/gws/targets.csv"]
     DS["Google Drive state<br/>state-YYYYMMDDTHHMMSSZ.zip × 3"] <-->|restore / persist| BUNDLE["state bundle"]
-    BUNDLE --> STATE["state/"]
-    BUNDLE --> OUT["durable Markdown outbox"]
+    BUNDLE --> STATE["internal/state/"]
+    BUNDLE --> OUT["internal/gws/outbox/"]
     CSV --> CORE["web-update-monitor"]
     STATE --> CORE
     CORE --> STATE
-    CORE --> REPORT["reports/<run-id>.md"]
+    CORE --> REPORT["output/report/<run-id>.md"]
     OUT -->|restore| REPORT
     REPORT -->|stage| OUT
     OUT -->|run complete| GMD["Drive Markdown file"]
@@ -40,7 +40,7 @@ The core automatically reads newly added navigation links from changed HTML page
 
 The core groups interests by exact trimmed URL and fetches each enabled URL once. Semantic review considers the parent diff and linked evidence for every enabled interest: material for any interest means material for the URL. Write one managed report section explaining the affected interests without repeating the same change, and finalize once per URL.
 
-The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite persists the core `state/` state and durable Markdown outbox as timestamped ZIP generations (`state-YYYYMMDDTHHMMSSZ.zip`), restores the newest generation by filename timestamp, and retains only the three newest committed archives instead of duplicating review metadata in an adapter-owned journal or allowing state archives to accumulate.
+The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite persists `internal/state/` and `internal/gws/outbox/` as timestamped ZIP generations (`state-YYYYMMDDTHHMMSSZ.zip`), restores the newest generation by filename timestamp, and retains only the three newest committed archives instead of duplicating review metadata in an adapter-owned journal or allowing state archives to accumulate.
 
 Markdown remains the canonical core report, durable outbox format, and user-facing Google Drive report format. The composite waits until a run has no pending reviews, then uploads or updates one file named `Web Update Report — <run-id>.md` in the configured report folder. Exact-filename lookup makes retries converge on the same Drive file instead of creating duplicates.
 
@@ -51,10 +51,10 @@ Read `skills/web-update-monitor-gws/SKILL.md` for connector orchestration and re
 ```mermaid
 flowchart LR
     CSV["selected target CSV"] --> CORE["web-update-monitor"]
-    CORE -->|"finalize --archive-evidence"| EV["evidence/&lt;ingestion-id&gt;/"]
-    CORE --> REPORT["reports/&lt;run-id&gt;.md"]
+    CORE -->|"finalize --archive-evidence"| EV["internal/evidence/&lt;ingestion-id&gt;/"]
+    CORE --> REPORT["output/report/&lt;run-id&gt;.md"]
     EV -->|"list / read / validate / apply"| WIKI["web-update-monitor-llm-wiki"]
-    WIKI --> KB["knowledge/<br/>SCHEMA.md, index.md, pages/"]
+    WIKI --> KB["output/knowledge/<br/>SCHEMA.md, index.md, pages/"]
 ```
 
 Detection, semantic materiality review, and one report per run stay in the core. With `finalize --archive-evidence`, a material decision also commits **captured evidence**: the complete normalized parent candidate, the bounded diff, exactly the retained linked-document excerpts with their completeness flags, digests, the enabled-interest context, and a commit receipt. The archive obligation is part of the core's existing recoverable finalization: a versioned intent freezes the decision, evidence is staged, the snapshot and report are applied, and `committed.json` is published last. `check`, `discard`, pending replacement, and later finalizations recover an outstanding intent first, so a crash can neither erase the only evidence nor leave an accepted snapshot without it. Ordinary `finalize` and the Google Workspace composite are unchanged unless they opt in.
@@ -99,37 +99,40 @@ Columns and parsing rules:
 - A URL is enabled when any interest is enabled. Review only enabled interests. The scalar display name and compatibility `watch_focus` use the first enabled interest (or first interest when all are disabled); the full `interests` collection is authoritative.
 - Never put credentials, cookies, tokens, or secrets in URLs or CSV cells.
 
-The workspace contains generated reports and internal state. The selected target CSV is a separate input:
+The workspace separates user-facing artifacts from implementation data at the root. The selected target CSV is a separate input:
 
 ```text
 workspace/
-├── reports/
-└── state/
-    ├── snapshots/
-    └── pending/
-        └── <target-id>/
-            ├── state.json
-            └── candidate.txt
+├── output/
+│   └── report/
+└── internal/
+    ├── state/
+    │   ├── snapshots/
+    │   └── pending/
+    │       └── <target-id>/
+    │           ├── state.json
+    │           └── candidate.txt
+    └── evidence/
 ```
 
-Edit the selected CSV when changing core monitoring targets. In the Google Workspace composite workflow, the authoritative Spreadsheet still projects to `$WORKSPACE/targets.csv`, which is passed explicitly to the core. `state/` is internal state and should not be edited manually.
+Users normally read only `output/`; `internal/` is managed by the skills and should not be edited manually. Edit the selected CSV when changing core monitoring targets. In the Google Workspace composite workflow, the authoritative Spreadsheet projects to `$WORKSPACE/internal/gws/targets.csv`, which is passed explicitly to the core.
 
 ### Generated files
 
 The workspace contains user-facing reports and internal state. The target CSV is a separate user-facing input:
 
 - selected target CSV: the source of truth for monitored targets in the core workflow. The agent may create or edit the selected file when the user changes monitoring configuration. Composite integrations may generate a CSV from an external authoritative source.
-- `reports/<run-id>.md`: the user-facing output. One report is created per `check` run only when at least one material change is finalized. The run ID has the form `YYYYMMDDTHHMMSSZ-xxxxxxxx`. Material targets from the same run are merged into this file.
-- `state/snapshots/<target-id>.txt`: the accepted normalized baseline for each target. A first observation creates it; later finalized observations replace it atomically, including non-material changes.
-- `state/pending/<target-id>/candidate.txt`: the normalized changed candidate awaiting semantic review.
-- `state/pending/<target-id>/state.json`: review transaction state linking the candidate to its run, revision, expected baseline hash, candidate hash, diff-truncation status, enabled-interest context, and bounded linked-document evidence or individual child errors. Interest metadata is normalized to exactly `name,publisher,category,keywords,criteria,priority,enabled`; text is trimmed, unspecified text is blank, priority is an integer or null, and enabled is Boolean. The complete serialized pending record is bounded by the existing 40 MiB transaction-backup ceiling, including JSON escaping and object overhead; interests have no separate 1 MiB serialized cap.
-- `evidence/<ingestion-id>/`: optional captured-evidence bundles (`metadata.json`, `parent.txt`, `diff.txt`, `links.json`, `committed.json`) written only by `finalize --archive-evidence` for material decisions. These are supported output artifacts outside `state/`; consumers accept only digest-verified bundles with a receipt and never read internal pending files. Evidence is never pruned automatically, so surface its storage growth.
+- `output/report/<run-id>.md`: the user-facing output. One report is created per `check` run only when at least one material change is finalized. The run ID has the form `YYYYMMDDTHHMMSSZ-xxxxxxxx`. Material targets from the same run are merged into this file.
+- `internal/state/snapshots/<target-id>.txt`: the accepted normalized baseline for each target. A first observation creates it; later finalized observations replace it atomically, including non-material changes.
+- `internal/state/pending/<target-id>/candidate.txt`: the normalized changed candidate awaiting semantic review.
+- `internal/state/pending/<target-id>/state.json`: review transaction state linking the candidate to its run, revision, expected baseline hash, candidate hash, diff-truncation status, enabled-interest context, and bounded linked-document evidence or individual child errors. Interest metadata is normalized to exactly `name,publisher,category,keywords,criteria,priority,enabled`; text is trimmed, unspecified text is blank, priority is an integer or null, and enabled is Boolean. The complete serialized pending record is bounded by the existing 40 MiB transaction-backup ceiling, including JSON escaping and object overhead; interests have no separate 1 MiB serialized cap.
+- `internal/evidence/<ingestion-id>/`: optional captured-evidence bundles (`metadata.json`, `parent.txt`, `diff.txt`, `links.json`, `committed.json`) written only by `finalize --archive-evidence` for material decisions. These are supported output artifacts under `internal/` but outside mutable state; consumers accept only digest-verified bundles with a receipt and never read internal pending files. Evidence is never pruned automatically, so surface its storage growth.
 
-Each `state/pending/<target-id>/` directory is one uncommitted review transaction. It survives the `check` → review → `finalize` boundary and is removed as a directory after successful finalization. `state/snapshots/` is the only internal state that persists across completed transactions.
+Each `internal/state/pending/<target-id>/` directory is one uncommitted review transaction. It survives the `check` → review → `finalize` boundary and is removed as a directory after successful finalization. `internal/state/snapshots/` is the only core state that persists across completed transactions.
 
-Reviews created with the previous `state/pending/<target-id>.json` and `state/candidates/<target-id>.txt` layout remain finalizable after an upgrade; new transactions use the grouped directory layout.
+Reviews created with the previous `internal/state/pending/<target-id>.json` and `internal/state/candidates/<target-id>.txt` layout remain finalizable after an upgrade; new transactions use the grouped directory layout.
 
-The helper may briefly create hidden `*.tmp` files next to the report, snapshot, or pending-state file being replaced. Keeping these temporary files in the destination directory preserves same-filesystem atomic replacement; they are not collected under a shared `state/tmp/`.
+The helper may briefly create hidden `*.tmp` files next to the report, snapshot, or pending-state file being replaced. Keeping these temporary files in the destination directory preserves same-filesystem atomic replacement; they are not collected under a shared `internal/state/tmp/`.
 
 ## Agent workflow
 
@@ -162,7 +165,7 @@ python skills/web-update-monitor/scripts/workspace.py \
   finalize < decision.json
 ```
 
-The facade verifies the review revision, promotes the candidate snapshot, merges material target sections into `reports/<run-id>.md` only after successful promotion, and clears pending state. Multiple material targets from the same check run therefore produce one report file. If report persistence fails after promotion, retain the pending state and retry. A truncated parent diff or incomplete linked evidence cannot be finalized as non-material; it stops for manual review instead. Child failures do not fail the parent check or other targets. New links are traversed breadth-first at depth 1 by default, bounded to 100 fetched links per target by default, 60 seconds of fetching, 2 MiB per child / 10 MiB total fetched content, and 8 KiB per child / 64 KiB total review text. `--link-depth` changes the traversal depth and `--max-links` changes the fetched-link cap from 1 through 100. Existing public-IP, redirect, normalization, and credential checks apply to child requests. No additional CSV columns or persistent link sidecars are needed: destination hashes already advance atomically with accepted parent snapshots.
+The facade verifies the review revision, promotes the candidate snapshot, merges material target sections into `output/report/<run-id>.md` only after successful promotion, and clears pending state. Multiple material targets from the same check run therefore produce one report file. If report persistence fails after promotion, retain the pending state and retry. A truncated parent diff or incomplete linked evidence cannot be finalized as non-material; it stops for manual review instead. Child failures do not fail the parent check or other targets. New links are traversed breadth-first at depth 1 by default, bounded to 100 fetched links per target by default, 60 seconds of fetching, 2 MiB per child / 10 MiB total fetched content, and 8 KiB per child / 64 KiB total review text. `--link-depth` changes the traversal depth and `--max-links` changes the fetched-link cap from 1 through 100. Existing public-IP, redirect, normalization, and credential checks apply to child requests. No additional CSV columns or persistent link sidecars are needed: destination hashes already advance atomically with accepted parent snapshots.
 
 ## Development and validation
 
@@ -187,4 +190,4 @@ Browser-rendered targets are outside the CSV workspace workflow. Do not auto-esc
 
 ## Repository boundary
 
-Do not commit operational target CSV files (regardless of filename), fetched production content, snapshots, reports, `state/`, credentials, browser profiles, or other deployment data. The example CSV is tracked documentation data.
+Do not commit operational target CSV files (regardless of filename), fetched production content, `output/`, `internal/`, credentials, browser profiles, or other deployment data. The example CSV is tracked documentation data.
