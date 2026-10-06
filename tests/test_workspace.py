@@ -97,7 +97,7 @@ def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) ->
         "Disabled,https://example.org/,,false\n",
     )
 
-    targets = load_targets(tmp_path)
+    targets = load_targets(tmp_path / "targets.csv")
 
     assert [target["action"] for target in targets] == ["monitor", "skip_disabled"]
     assert targets[0]["watch_focus"] == "pricing"
@@ -109,7 +109,7 @@ def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) ->
         tmp_path / "targets.csv",
         "Renamed,https://example.com/,pricing,true\n",
     )
-    assert load_targets(tmp_path)[0]["target_id"] == first_id
+    assert load_targets(tmp_path / "targets.csv")[0]["target_id"] == first_id
 
 
 @pytest.mark.parametrize(
@@ -141,7 +141,7 @@ def test_load_targets_rejects_invalid_csv(
     (tmp_path / "targets.csv").write_text(header + rows, encoding="utf-8")
 
     with pytest.raises(WorkspaceError, match=message):
-        load_targets(tmp_path)
+        load_targets(tmp_path / "targets.csv")
 
 
 @pytest.mark.parametrize(
@@ -158,7 +158,7 @@ def test_load_targets_rejects_unsafe_urls(tmp_path: Path, url: str) -> None:
     _write_targets(tmp_path / "targets.csv", f"Example,{url},,true\n")
 
     with pytest.raises(WorkspaceError):
-        load_targets(tmp_path)
+        load_targets(tmp_path / "targets.csv")
 
 
 def test_handle_monitor_result_promotes_baseline(tmp_path: Path) -> None:
@@ -917,7 +917,7 @@ def test_check_batches_targets_and_contains_failures(
 
     monkeypatch.setattr(workspace, "_monitor_target", fake_monitor)
 
-    result = check(tmp_path)
+    result = check(tmp_path, tmp_path / "targets.csv")
     outcomes = cast("list[dict[str, object]]", result["targets"])
 
     assert result["run_id"] == _RUN_ID
@@ -943,7 +943,12 @@ def test_check_rejects_invalid_link_options(
 ) -> None:
     _write_targets(tmp_path / "targets.csv", "Example,https://example.com/,,true\n")
     with pytest.raises(WorkspaceError, match=message):
-        check(tmp_path, link_depth=link_depth, max_links=max_links)
+        check(
+            tmp_path,
+            tmp_path / "targets.csv",
+            link_depth=link_depth,
+            max_links=max_links,
+        )
 
 
 def test_check_reuses_pending_target_and_fetches_other_targets(
@@ -953,7 +958,7 @@ def test_check_reuses_pending_target_and_fetches_other_targets(
         tmp_path / "targets.csv",
         "Example,https://example.com/,pricing,true\nOther,https://example.org/,,true\n",
     )
-    targets = load_targets(tmp_path)
+    targets = load_targets(tmp_path / "targets.csv")
     target_id = str(targets[0]["target_id"])
     other_id = str(targets[1]["target_id"])
     state = tmp_path / ".wsum"
@@ -976,7 +981,7 @@ def test_check_reuses_pending_target_and_fetches_other_targets(
 
     monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
 
-    result = check(tmp_path)
+    result = check(tmp_path, tmp_path / "targets.csv")
     outcomes = cast("list[dict[str, object]]", result["targets"])
 
     assert calls == 1
@@ -1040,7 +1045,7 @@ def test_check_discards_stale_pending_target(
 
     monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
 
-    result = check(tmp_path)
+    result = check(tmp_path, tmp_path / "targets.csv")
     outcomes = cast("list[dict[str, object]]", result["targets"])
 
     assert calls == expected_monitor_calls
@@ -1498,9 +1503,9 @@ def test_check_syncs_new_state_and_grouped_pending_directories(
     monkeypatch.setattr(workspace, "_fsync_directory", record_fsync)
     monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
 
-    result = check(tmp_path)
+    result = check(tmp_path, tmp_path / "targets.csv")
 
-    target_id = str(load_targets(tmp_path)[0]["target_id"])
+    target_id = str(load_targets(tmp_path / "targets.csv")[0]["target_id"])
     state = tmp_path / ".wsum"
     pending = state / "pending"
     assert result["targets"][0]["action"] == "review"  # type: ignore[index]
@@ -1521,7 +1526,7 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
     state = tmp_path / ".wsum"
     snapshots = state / "snapshots"
     snapshots.mkdir(parents=True)
-    target_id = str(load_targets(tmp_path)[0]["target_id"])
+    target_id = str(load_targets(tmp_path / "targets.csv")[0]["target_id"])
     (snapshots / f"{target_id}.txt").write_text("old\n", encoding="utf-8")
 
     def fake_monitor(args: argparse.Namespace) -> dict[str, object]:
@@ -1531,7 +1536,7 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
     monkeypatch.setattr(workspace, "_new_run_id", lambda: _RUN_ID)
     monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
 
-    result = check(tmp_path, compact=True)
+    result = check(tmp_path, tmp_path / "targets.csv", compact=True)
     reviews = [
         item
         for item in cast("list[dict[str, object]]", result["targets"])
@@ -1549,7 +1554,9 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
     ]
     assert "diff" not in reviews[0]
 
-    pending = workspace.pending_reviews(tmp_path, target_id=target_id)
+    pending = workspace.pending_reviews(
+        tmp_path, targets=tmp_path / "targets.csv", target_id=target_id
+    )
     full = cast("list[dict[str, object]]", pending["reviews"])[0]
     assert full["run_id"] == _RUN_ID
     assert full["target_id"] == target_id
@@ -1564,7 +1571,7 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
         "Renamed,https://example.com/,security,true\n",
     )
 
-    resumed = check(tmp_path, compact=True)
+    resumed = check(tmp_path, tmp_path / "targets.csv", compact=True)
     resumed_reviews = [
         item
         for item in cast("list[dict[str, object]]", resumed["targets"])
@@ -1581,7 +1588,9 @@ def test_check_compact_returns_handles_and_pending_returns_full_review(
         }
     ]
 
-    refreshed = workspace.pending_reviews(tmp_path, target_id=target_id)
+    refreshed = workspace.pending_reviews(
+        tmp_path, targets=tmp_path / "targets.csv", target_id=target_id
+    )
     refreshed_full = cast("list[dict[str, object]]", refreshed["reviews"])[0]
     assert refreshed_full["revision"] == reviews[0]["revision"]
     assert refreshed_full["run_id"] == _RUN_ID
@@ -1606,7 +1615,9 @@ def test_pending_reviews_recovers_partial_replacement_before_listing(
     group.mkdir()
     (group / "candidate.txt").write_text("partial\n", encoding="utf-8")
 
-    assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+    assert workspace.pending_reviews(tmp_path, targets=tmp_path / "targets.csv") == {
+        "reviews": []
+    }
     assert not group.exists()
     assert (
         workspace._read_recovery_record(  # pyright: ignore[reportPrivateUsage]
@@ -1621,12 +1632,14 @@ def test_pending_reviews_legacy_reconstructs_diff_and_context(tmp_path: Path) ->
     _write_targets(
         tmp_path / "targets.csv", "Example,https://example.com/,pricing,true\n"
     )
-    target_id = str(load_targets(tmp_path)[0]["target_id"])
+    target_id = str(load_targets(tmp_path / "targets.csv")[0]["target_id"])
     state = tmp_path / ".wsum"
     state.mkdir()
     _write_review_transaction(state, "legacy", target_id=target_id)
 
-    pending = workspace.pending_reviews(tmp_path, target_id=target_id)
+    pending = workspace.pending_reviews(
+        tmp_path, targets=tmp_path / "targets.csv", target_id=target_id
+    )
     review = cast("list[dict[str, object]]", pending["reviews"])[0]
 
     assert review["run_id"] == _RUN_ID
@@ -1653,7 +1666,9 @@ def test_discard_pending_clears_conflicted_review(tmp_path: Path) -> None:
     assert not metadata.exists()
     assert not candidate.exists()
     assert snapshot.read_text(encoding="utf-8") == "old\n"
-    assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+    assert workspace.pending_reviews(tmp_path, targets=tmp_path / "targets.csv") == {
+        "reviews": []
+    }
 
 
 def test_pending_target_listing_rejects_hidden_unsafe_entry(tmp_path: Path) -> None:
@@ -1665,7 +1680,7 @@ def test_pending_target_listing_rejects_hidden_unsafe_entry(tmp_path: Path) -> N
     (pending / ".unsafe").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(WorkspaceError, match="unsafe entry"):
-        workspace.pending_reviews(tmp_path)
+        workspace.pending_reviews(tmp_path, targets=tmp_path / "targets.csv")
 
 
 def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
@@ -1715,7 +1730,7 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
         outside.mkdir()
         pending.symlink_to(outside, target_is_directory=True)
         with pytest.raises(WorkspaceError, match="non-symlink"):
-            workspace.pending_reviews(tmp_path)
+            workspace.pending_reviews(tmp_path, targets=tmp_path / "targets.csv")
         return
 
     pending.mkdir()
@@ -1729,7 +1744,7 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
 
         monkeypatch.setattr(Path, "lstat", fail_pending)
         with pytest.raises(WorkspaceError, match="pending directory is unavailable"):
-            workspace.pending_reviews(tmp_path)
+            workspace.pending_reviews(tmp_path, targets=tmp_path / "targets.csv")
         return
 
     if fault == "list":
@@ -1742,7 +1757,7 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
 
         monkeypatch.setattr(Path, "iterdir", fail_list)
         with pytest.raises(WorkspaceError, match="cannot list pending directory"):
-            workspace.pending_reviews(tmp_path)
+            workspace.pending_reviews(tmp_path, targets=tmp_path / "targets.csv")
         return
 
     entry = pending / (".orphan.tmp" if fault == "hidden-temp" else "unexpected.txt")
@@ -1757,13 +1772,15 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
 
         monkeypatch.setattr(Path, "lstat", fail_entry)
         with pytest.raises(WorkspaceError, match="cannot stat pending entry"):
-            workspace.pending_reviews(tmp_path)
+            workspace.pending_reviews(tmp_path, targets=tmp_path / "targets.csv")
         return
     if fault == "hidden-temp":
-        assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+        assert workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv"
+        ) == {"reviews": []}
         return
     with pytest.raises(WorkspaceError, match="unsafe entry"):
-        workspace.pending_reviews(tmp_path)
+        workspace.pending_reviews(tmp_path, targets=tmp_path / "targets.csv")
 
 
 def test_pending_reviews_grouped_without_targets_uses_persisted_context(
@@ -1887,7 +1904,9 @@ def test_pending_review_rejects_candidate_hash_mismatch(tmp_path: Path) -> None:
     candidate.write_text("tampered\n", encoding="utf-8")
 
     with pytest.raises(WorkspaceError, match="candidate_sha256"):
-        workspace.pending_reviews(tmp_path, target_id="example")
+        workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv", target_id="example"
+        )
 
 
 def test_pending_reviews_rejects_unknown_target_id(tmp_path: Path) -> None:
@@ -1895,7 +1914,9 @@ def test_pending_reviews_rejects_unknown_target_id(tmp_path: Path) -> None:
     state.mkdir()
 
     with pytest.raises(WorkspaceError, match="no valid pending"):
-        workspace.pending_reviews(tmp_path, target_id="example")
+        workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv", target_id="example"
+        )
 
 
 def test_main_discard_command_emits_json(
@@ -1991,8 +2012,24 @@ def test_check_migrates_legacy_pending_on_successful_changed_result(
     assert not legacy_candidate.exists()
 
 
-def test_main_reports_invalid_workspace(capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_requires_targets_and_reports_invalid_workspace(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     assert workspace.main(["--workspace", "/missing", "check"]) == 2
+    assert json.loads(capsys.readouterr().err) == {
+        "error": "--targets is required for check"
+    }
+
+    assert (
+        workspace.main([
+            "--workspace",
+            "/missing",
+            "--targets",
+            "/missing/targets.csv",
+            "check",
+        ])
+        == 2
+    )
     assert "workspace must be an existing directory" in capsys.readouterr().err
 
 
@@ -2546,9 +2583,9 @@ def test_load_targets_handles_header_rows_and_empty_records(
     (tmp_path / "targets.csv").write_text(csv_text, encoding="utf-8")
     if message:
         with pytest.raises(WorkspaceError, match=message):
-            workspace.load_targets(tmp_path)
+            workspace.load_targets(tmp_path / "targets.csv")
     else:
-        result = workspace.load_targets(tmp_path)
+        result = workspace.load_targets(tmp_path / "targets.csv")
         assert len(result) == 1
         assert result[0]["enabled"] is True
 
@@ -2600,7 +2637,7 @@ def test_load_targets_rejects_duplicate_and_malformed_rows(
 ) -> None:
     (tmp_path / "targets.csv").write_text(header + rows, encoding="utf-8")
     with pytest.raises(WorkspaceError, match=message):
-        workspace.load_targets(tmp_path)
+        workspace.load_targets(tmp_path / "targets.csv")
 
 
 @pytest.mark.parametrize(
@@ -2916,12 +2953,30 @@ def test_main_success_emits_json(
     (tmp_path / "targets.csv").write_text(
         "name,url,enabled\nExample,https://example.com/,false\n", encoding="utf-8"
     )
-    assert workspace.main(["--workspace", str(tmp_path), "check"]) == 0
+    assert (
+        workspace.main([
+            "--workspace",
+            str(tmp_path),
+            "--targets",
+            str(tmp_path / "targets.csv"),
+            "check",
+        ])
+        == 0
+    )
     captured = capsys.readouterr()
     assert '"action": "skipped"' in captured.out
     assert not captured.err
 
-    assert workspace.main(["--workspace", str(tmp_path), "pending"]) == 0
+    assert (
+        workspace.main([
+            "--workspace",
+            str(tmp_path),
+            "--targets",
+            str(tmp_path / "targets.csv"),
+            "pending",
+        ])
+        == 0
+    )
     captured = capsys.readouterr()
     assert captured.out.strip() == '{"reviews": []}'
     assert not captured.err
@@ -3080,7 +3135,7 @@ def test_load_targets_rejects_invalid_schema_and_row_values(
 ) -> None:
     (tmp_path / "targets.csv").write_text(csv_text, encoding="utf-8")
     with pytest.raises(WorkspaceError, match=message):
-        workspace.load_targets(tmp_path)
+        workspace.load_targets(tmp_path / "targets.csv")
 
 
 @pytest.mark.parametrize(
@@ -4291,7 +4346,7 @@ def test_load_targets_rejects_non_string_csv_values(
 
     monkeypatch.setattr(workspace.csv, "reader", fake_reader)
     with pytest.raises(WorkspaceError, match="invalid CSV value"):
-        workspace.load_targets(tmp_path)
+        workspace.load_targets(tmp_path / "targets.csv")
 
 
 def test_existing_pending_paths_requires_legacy_candidate_directory(
@@ -4765,7 +4820,14 @@ def test_module_entry_point_runs_cli(
     monkeypatch.setattr(
         workspace.sys,
         "argv",
-        ["workspace.py", "--workspace", str(tmp_path), "check"],
+        [
+            "workspace.py",
+            "--workspace",
+            str(tmp_path),
+            "--targets",
+            str(tmp_path / "targets.csv"),
+            "check",
+        ],
     )
     with pytest.raises(SystemExit) as exit_info:
         runpy.run_path(str(Path(workspace.__file__)), run_name="__main__")
@@ -5023,12 +5085,14 @@ def test_check_can_disable_link_following(
         return workspace.monitor.Document(parent, url, "text/html")
 
     monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
-    baseline = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    baseline = cast(
+        "list[dict[str, object]]", check(tmp_path, tmp_path / "targets.csv")["targets"]
+    )[0]
     assert baseline["action"] == "baseline_created"
     parent += b'<a href="/new">new</a>'
     outcome = cast(
         "list[dict[str, object]]",
-        check(tmp_path, link_depth=0)["targets"],
+        check(tmp_path, tmp_path / "targets.csv", link_depth=0)["targets"],
     )[0]
 
     assert outcome["action"] == "review"
@@ -5063,7 +5127,9 @@ def test_check_follows_new_atom_xhtml_anchors_with_html_relations(
         return workspace.monitor.Document(b"Release details", url, "text/plain")
 
     monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
-    baseline = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    baseline = cast(
+        "list[dict[str, object]]", check(tmp_path, tmp_path / "targets.csv")["targets"]
+    )[0]
     assert baseline["action"] == "baseline_created"
     assert calls == ["https://example.com/feed"]
 
@@ -5073,7 +5139,9 @@ def test_check_follows_new_atom_xhtml_anchors_with_html_relations(
         f'<a href="/release" rel="{relation}">Details</a>'
         "</div></content></entry></feed>"
     ).encode()
-    outcome = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    outcome = cast(
+        "list[dict[str, object]]", check(tmp_path, tmp_path / "targets.csv")["targets"]
+    )[0]
 
     assert outcome["action"] == "review"
     assert calls == [
@@ -5103,18 +5171,24 @@ def test_check_marks_omitted_form_destination_change_as_incomplete_review(
         return workspace.monitor.Document(page, url, "text/html")
 
     monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
-    baseline = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    baseline = cast(
+        "list[dict[str, object]]", check(tmp_path, tmp_path / "targets.csv")["targets"]
+    )[0]
     assert baseline["action"] == "baseline_created"
     page = b'<a href="/one">one</a><form action="/new"></form>'
 
-    outcome = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    outcome = cast(
+        "list[dict[str, object]]", check(tmp_path, tmp_path / "targets.csv")["targets"]
+    )[0]
 
     assert outcome["action"] == "review"
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=str(outcome["target_id"]))[
-            "reviews"
-        ],
+        workspace.pending_reviews(
+            tmp_path,
+            targets=tmp_path / "targets.csv",
+            target_id=str(outcome["target_id"]),
+        )["reviews"],
     )[0]
     link_review = cast("dict[str, object]", review["link_review"])
     assert link_review["incomplete"] is True
@@ -5148,19 +5222,25 @@ def test_check_records_new_oversized_link_as_incomplete_review_evidence(
         return workspace.monitor.Document(parent, url, "text/html")
 
     monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
-    baseline = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    baseline = cast(
+        "list[dict[str, object]]", check(tmp_path, tmp_path / "targets.csv")["targets"]
+    )[0]
     assert baseline["action"] == "baseline_created"
     parent += b'<a href="https://example.com/' + b"x" * 4096 + b'">long</a>'
 
-    outcome = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    outcome = cast(
+        "list[dict[str, object]]", check(tmp_path, tmp_path / "targets.csv")["targets"]
+    )[0]
 
     assert outcome["action"] == "review"
     assert calls == ["https://example.com/", "https://example.com/"]
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=str(outcome["target_id"]))[
-            "reviews"
-        ],
+        workspace.pending_reviews(
+            tmp_path,
+            targets=tmp_path / "targets.csv",
+            target_id=str(outcome["target_id"]),
+        )["reviews"],
     )[0]
     link_review = cast("dict[str, object]", review["link_review"])
     assert link_review == {"documents": [], "omitted": 1, "incomplete": True}
@@ -5237,16 +5317,17 @@ def test_link_review_transaction_survives_resume_and_promotes_identity_baseline(
         return workspace.monitor.Document(b"Release details", url, "text/plain")
 
     monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
-    baseline = check(tmp_path)
+    baseline = check(tmp_path, tmp_path / "targets.csv")
     assert (
         cast("list[dict[str, object]]", baseline["targets"])[0]["action"]
         == "baseline_created"
     )
     assert calls == ["https://example.com/"]
     parent += b'<a href="/new">new</a>'
-    outcome = cast("list[dict[str, object]]", check(tmp_path, compact=True)["targets"])[
-        0
-    ]
+    outcome = cast(
+        "list[dict[str, object]]",
+        check(tmp_path, tmp_path / "targets.csv", compact=True)["targets"],
+    )[0]
     assert "link_review" not in outcome
     assert calls == [
         "https://example.com/",
@@ -5256,13 +5337,18 @@ def test_link_review_transaction_survives_resume_and_promotes_identity_baseline(
     target_id = str(outcome["target_id"])
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+        workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv", target_id=target_id
+        )["reviews"],
     )[0]
     context = cast("dict[str, object]", review["link_review"])
     assert context["incomplete"] is failed
     assert (
         "link_review"
-        not in cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+        not in cast(
+            "list[dict[str, object]]",
+            check(tmp_path, tmp_path / "targets.csv")["targets"],
+        )[0]
     )
     assert len(calls) == 3
     decision: dict[str, object] = {
@@ -5283,14 +5369,21 @@ def test_link_review_transaction_survives_resume_and_promotes_identity_baseline(
         })
         assert finalize(tmp_path, decision)["action"] == "finalized"
     if not failed and not material:
-        assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+        assert workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv"
+        ) == {"reviews": []}
         assert not list((tmp_path / "reports").glob("*.md"))
     assert (
-        cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]["action"]
+        cast(
+            "list[dict[str, object]]",
+            check(tmp_path, tmp_path / "targets.csv")["targets"],
+        )[0]["action"]
         == "unchanged"
     )
     parent += b"<p>Minor page edit</p>"
-    next_review = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    next_review = cast(
+        "list[dict[str, object]]", check(tmp_path, tmp_path / "targets.csv")["targets"]
+    )[0]
     assert next_review["link_review"] == {
         "documents": [],
         "omitted": 0,
@@ -5370,7 +5463,7 @@ def _create_interest_review(tmp_path: Path) -> tuple[str, Path, Path, Path]:
         + "Disabled,https://vendor.example/updates,,,,,3,false\n",
         encoding="utf-8",
     )
-    target = load_targets(tmp_path)[0]
+    target = load_targets(tmp_path / "targets.csv")[0]
     target_id = str(target["target_id"])
     state = tmp_path / ".wsum"
     snapshots = state / "snapshots"
@@ -5445,7 +5538,7 @@ def test_interest_csv_normalization(
     tmp_path: Path, csv_text: str, expected: dict[str, object]
 ) -> None:
     (tmp_path / "targets.csv").write_text(csv_text, encoding="utf-8")
-    target = load_targets(tmp_path)[0]
+    target = load_targets(tmp_path / "targets.csv")[0]
     assert target["interests"] == [expected]
     assert target["target_id"] == workspace._target_id("https://example.com/")
     assert target["watch_focus"] == expected["criteria"]
@@ -5472,11 +5565,13 @@ def test_invalid_priority_in_later_disabled_row_prevents_mutation(
     monkeypatch.setattr(workspace.monitor, "run", forbidden)
     monkeypatch.setattr(workspace, "discard_pending", forbidden)
     with pytest.raises(WorkspaceError, match="row 3: priority"):
-        check(tmp_path)
+        check(tmp_path, tmp_path / "targets.csv")
     assert [path.read_bytes() for path in (metadata, candidate, snapshot)] == before
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+        workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv", target_id=target_id
+        )["reviews"],
     )[0]
     assert [
         item["name"] for item in cast("list[dict[str, object]]", review["interests"])
@@ -5506,7 +5601,7 @@ def test_ditto_cells_rejected_with_record_and_field(
     ])
     (tmp_path / "targets.csv").write_text(output.getvalue(), encoding="utf-8")
     with pytest.raises(WorkspaceError, match=f"row 3: {field}: replace ditto"):
-        load_targets(tmp_path)
+        load_targets(tmp_path / "targets.csv")
 
 
 @pytest.mark.parametrize(
@@ -5534,7 +5629,7 @@ def test_ditto_cells_rejected_with_record_and_field(
 def test_enriched_csv_errors(tmp_path: Path, csv_text: str, message: str) -> None:
     (tmp_path / "targets.csv").write_text(csv_text, encoding="utf-8")
     with pytest.raises(WorkspaceError, match=message):
-        load_targets(tmp_path)
+        load_targets(tmp_path / "targets.csv")
 
 
 @pytest.mark.parametrize("field", ["keywords", "watch_focus"])
@@ -5545,7 +5640,7 @@ def test_large_csv_text_and_serialized_expansion(tmp_path: Path, field: str) -> 
         encoding="utf-8",
     )
     previous_limit = workspace.csv.field_size_limit()
-    target = load_targets(tmp_path)[0]
+    target = load_targets(tmp_path / "targets.csv")[0]
     assert workspace.csv.field_size_limit() == previous_limit
     state = tmp_path / ".wsum"
     state.mkdir()
@@ -5556,9 +5651,11 @@ def test_large_csv_text_and_serialized_expansion(tmp_path: Path, field: str) -> 
     assert metadata.stat().st_size > 1024 * 1024
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=str(target["target_id"]))[
-            "reviews"
-        ],
+        workspace.pending_reviews(
+            tmp_path,
+            targets=tmp_path / "targets.csv",
+            target_id=str(target["target_id"]),
+        )["reviews"],
     )[0]
     assert (
         cast("list[dict[str, object]]", review["interests"])[0][
@@ -5576,7 +5673,7 @@ def test_priority_exceeding_python_decimal_limit_round_trips(
         f"name,url,priority\nExample,https://example.com/,{digits}\n",
         encoding="utf-8",
     )
-    target = load_targets(tmp_path)[0]
+    target = load_targets(tmp_path / "targets.csv")[0]
     state = tmp_path / ".wsum"
     state.mkdir()
     workspace._handle_monitor_result(
@@ -5592,6 +5689,8 @@ def test_priority_exceeding_python_decimal_limit_round_trips(
         workspace.main([
             "--workspace",
             str(tmp_path),
+            "--targets",
+            str(tmp_path / "targets.csv"),
             "pending",
             "--target-id",
             str(target["target_id"]),
@@ -5612,7 +5711,7 @@ def test_repeated_urls_preserve_order_and_display(
         f"Second,https://example.com/,second,{str(enabled).lower()}\n",
         encoding="utf-8",
     )
-    targets = load_targets(tmp_path)
+    targets = load_targets(tmp_path / "targets.csv")
     assert [item["url"] for item in targets] == [
         "https://example.com/",
         "https://other.example/",
@@ -5635,7 +5734,7 @@ def test_distinct_urls_with_colliding_ids_fail(
     )
     monkeypatch.setattr(workspace, "_target_id", lambda _url: "collision")  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     with pytest.raises(WorkspaceError, match="duplicate_target_id"):
-        check(tmp_path)
+        check(tmp_path, tmp_path / "targets.csv")
 
 
 @pytest.mark.parametrize(
@@ -5685,9 +5784,10 @@ def test_metadata_changes_replace_context_without_rewriting_transaction(
         pytest.fail("pending targets must not be refetched")
 
     monkeypatch.setattr(workspace.monitor, "run", forbidden)
-    handle = cast("list[dict[str, object]]", check(tmp_path, compact=True)["targets"])[
-        0
-    ]
+    handle = cast(
+        "list[dict[str, object]]",
+        check(tmp_path, tmp_path / "targets.csv", compact=True)["targets"],
+    )[0]
     assert set(handle) == {
         "action",
         "run_id",
@@ -5698,11 +5798,15 @@ def test_metadata_changes_replace_context_without_rewriting_transaction(
     }
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+        workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv", target_id=target_id
+        )["reviews"],
     )[0]
     interests = cast("list[dict[str, object]]", review["interests"])
     assert [item["name"] for item in interests] == expected_names
-    assert interests == workspace._enabled_interests(load_targets(tmp_path)[0])
+    assert interests == workspace._enabled_interests(
+        load_targets(tmp_path / "targets.csv")[0]
+    )
     assert review["name"] == expected_names[0]
     for key in ("revision", "run_id", "diff", "diff_truncated", "link_review"):
         assert review[key] == stored[key]
@@ -5724,11 +5828,13 @@ def test_valid_inactive_configuration_has_no_interests_and_check_discards(
     (tmp_path / "targets.csv").write_text(_ENRICHED_HEADER + rows, encoding="utf-8")
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+        workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv", target_id=target_id
+        )["reviews"],
     )[0]
     assert review["interests"] == []
     assert metadata.exists()
-    check(tmp_path)
+    check(tmp_path, tmp_path / "targets.csv")
     assert not metadata.exists()
     assert not candidate.exists()
     assert snapshot.read_bytes() == b"old\n"
@@ -5746,10 +5852,12 @@ def test_unavailable_configuration_keeps_saved_review_and_direct_finalize(
     else:
         path.write_text(configuration, encoding="utf-8")
     with pytest.raises(WorkspaceError):
-        check(tmp_path)
+        check(tmp_path, tmp_path / "targets.csv")
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+        workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv", target_id=target_id
+        )["reviews"],
     )[0]
     assert [
         item["name"] for item in cast("list[dict[str, object]]", review["interests"])
@@ -5783,7 +5891,9 @@ def test_legacy_scalar_review_synthesizes_interest(
     metadata.write_text(json.dumps(payload), encoding="utf-8")
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id="example")["reviews"],
+        workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv", target_id="example"
+        )["reviews"],
     )[0]
     assert review["interests"] == [_interest("Saved", criteria="rules")]
     assert (
@@ -5935,11 +6045,16 @@ def test_shared_url_fetch_and_finalization_use_one_transaction_and_section(
 
     monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
     assert (
-        cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]["action"]
+        cast(
+            "list[dict[str, object]]",
+            check(tmp_path, tmp_path / "targets.csv")["targets"],
+        )[0]["action"]
         == "baseline_created"
     )
     parent = b"Breaking API change\n"
-    review = cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]
+    review = cast(
+        "list[dict[str, object]]", check(tmp_path, tmp_path / "targets.csv")["targets"]
+    )[0]
     assert calls == ["https://vendor.example/updates"] * 2
     assert review["interests"] == [
         _interest(
@@ -5970,7 +6085,9 @@ def test_shared_url_fetch_and_finalization_use_one_transaction_and_section(
     report = Path(str(result["report_path"])).read_text(encoding="utf-8")
     assert report.count("## API") == 1
     assert report.count(":start -->") == 1
-    assert workspace.pending_reviews(tmp_path) == {"reviews": []}
+    assert workspace.pending_reviews(tmp_path, targets=tmp_path / "targets.csv") == {
+        "reviews": []
+    }
 
 
 @pytest.mark.parametrize(
@@ -5998,7 +6115,9 @@ def test_enriched_replacement_recovery_keeps_both_revision_choices(
     (tmp_path / "targets.csv").unlink()
     review = cast(
         "list[dict[str, object]]",
-        workspace.pending_reviews(tmp_path, target_id=target_id)["reviews"],
+        workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv", target_id=target_id
+        )["reviews"],
     )[0]
     assert review["interests"] == replacement["interests"]
     assert (state / ".pending-recovery" / f"{target_id}.json").exists()
@@ -6031,7 +6150,9 @@ def test_enriched_committed_recovery_rejects_malformed_review_metadata(
         state, _commit_record(target_id=target_id, revision=payload["revision"])
     )
     with pytest.raises(WorkspaceError, match="committed replacement is incomplete"):
-        workspace.pending_reviews(tmp_path, target_id=target_id)
+        workspace.pending_reviews(
+            tmp_path, targets=tmp_path / "targets.csv", target_id=target_id
+        )
     with pytest.raises(WorkspaceError, match="committed replacement is incomplete"):
         finalize(
             tmp_path,
@@ -6061,7 +6182,10 @@ def test_check_reconciliation_uses_one_configuration_snapshot(
 
     monkeypatch.setattr(workspace, "load_targets", load_once)
     assert (
-        cast("list[dict[str, object]]", check(tmp_path)["targets"])[0]["action"]
+        cast(
+            "list[dict[str, object]]",
+            check(tmp_path, tmp_path / "targets.csv")["targets"],
+        )[0]["action"]
         == "skipped"
     )
     assert calls == 1

@@ -2,7 +2,7 @@
 
 Local-first Agent Skills for detecting meaningful updates on public websites and documents.
 
-The core skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns CSV/state/report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The agent edits the target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
+The core skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns target CSV validation, state, and report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The target CSV path is passed explicitly to the core and is independent of the workspace used for state and reports. The agent edits the selected target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
 
 A second composite, `skills/web-update-monitor-llm-wiki/`, compiles durable captured evidence from the core into a source-backed Markdown knowledge base. The core also gains an opt-in `finalize --archive-evidence` output for it.
 
@@ -50,7 +50,7 @@ Read `skills/web-update-monitor-gws/SKILL.md` for connector orchestration and re
 
 ```mermaid
 flowchart LR
-    CSV["targets.csv"] --> CORE["web-update-monitor"]
+    CSV["selected target CSV"] --> CORE["web-update-monitor"]
     CORE -->|"finalize --archive-evidence"| EV["evidence/&lt;ingestion-id&gt;/"]
     CORE --> REPORT["reports/&lt;run-id&gt;.md"]
     EV -->|"list / read / validate / apply"| WIKI["web-update-monitor-llm-wiki"]
@@ -65,7 +65,14 @@ Read `skills/web-update-monitor-llm-wiki/SKILL.md` for the compilation workflow,
 
 ## Workspace
 
-Use a local folder with a `targets.csv` file. A template is available at `skills/web-update-monitor/examples/targets.csv`.
+Pass the target CSV and the state/report workspace as separate inputs. The CSV may have any filename and may live outside the workspace. Relative `--targets` paths are resolved from the process working directory. A template is available at `skills/web-update-monitor/examples/targets.csv`.
+
+```bash
+python skills/web-update-monitor/scripts/workspace.py \
+  --workspace /path/to/workspace --targets /path/to/monitored-sites.csv check --compact
+```
+
+There is no implicit `workspace/targets.csv` lookup: `check` requires `--targets`. `pending` may omit it only to inspect or recover a saved review, and a new `finalize --archive-evidence` requires the currently selected CSV. State and report files remain under `--workspace`.
 
 ```csv
 name,url,publisher,category,keywords,criteria,priority,enabled
@@ -92,11 +99,10 @@ Columns and parsing rules:
 - A URL is enabled when any interest is enabled. Review only enabled interests. The scalar display name and compatibility `watch_focus` use the first enabled interest (or first interest when all are disabled); the full `interests` collection is authoritative.
 - Never put credentials, cookies, tokens, or secrets in URLs or CSV cells.
 
-The workspace evolves into:
+The workspace contains generated reports and internal state. The selected target CSV is a separate input:
 
 ```text
 workspace/
-├── targets.csv
 ├── reports/
 └── .wsum/
     ├── snapshots/
@@ -106,13 +112,13 @@ workspace/
             └── candidate.txt
 ```
 
-Users may edit `targets.csv` when using the core skill directly. In the Google Workspace composite workflow, regenerate it from the authoritative Spreadsheet instead. `.wsum/` is internal state and should not be edited manually.
+Edit the selected CSV when changing core monitoring targets. In the Google Workspace composite workflow, the authoritative Spreadsheet still projects to `$WORKSPACE/targets.csv`, which is passed explicitly to the core. `.wsum/` is internal state and should not be edited manually.
 
 ### Generated files
 
-The workspace contains one user-facing input, user-facing reports, and internal state:
+The workspace contains user-facing reports and internal state. The target CSV is a separate user-facing input:
 
-- `targets.csv`: the user-facing source of truth for monitored targets in the core workflow. The agent may create or edit it when the user changes monitoring configuration. Composite integrations may generate it from an external authoritative source.
+- selected target CSV: the source of truth for monitored targets in the core workflow. The agent may create or edit the selected file when the user changes monitoring configuration. Composite integrations may generate a CSV from an external authoritative source.
 - `reports/<run-id>.md`: the user-facing output. One report is created per `check` run only when at least one material change is finalized. The run ID has the form `YYYYMMDDTHHMMSSZ-xxxxxxxx`. Material targets from the same run are merged into this file.
 - `.wsum/snapshots/<target-id>.txt`: the accepted normalized baseline for each target. A first observation creates it; later finalized observations replace it atomically, including non-material changes.
 - `.wsum/pending/<target-id>/candidate.txt`: the normalized changed candidate awaiting semantic review.
@@ -127,7 +133,7 @@ The helper may briefly create hidden `*.tmp` files next to the report, snapshot,
 
 ## Agent workflow
 
-Read `skills/web-update-monitor/SKILL.md` for the complete core procedure. At a high level, the agent edits `targets.csv` when requested, checks enabled targets, reviews bounded parent diffs and newly linked document contents for materiality, and contributes each material target to one run-level Markdown report. The helper handles deterministic state transitions and per-target errors.
+Read `skills/web-update-monitor/SKILL.md` for the complete core procedure. At a high level, the agent edits the selected target CSV when requested, passes its path to the core, checks enabled targets, reviews bounded parent diffs and newly linked document contents for materiality, and contributes each material target to one run-level Markdown report. The helper handles deterministic state transitions and per-target errors.
 
 ## Deterministic workspace facade
 
@@ -135,14 +141,15 @@ For development or agent orchestration, run:
 
 ```bash
 python skills/web-update-monitor/scripts/workspace.py \
-  --workspace /path/to/workspace check --compact
+  --workspace /path/to/workspace --targets /path/to/monitored-sites.csv check --compact
 ```
 
 The compact form keeps batch output small. Existing pending targets are returned as review handles without refetching, while unrelated targets continue normally. Fetch one pending review's bounded diff on demand:
 
 ```bash
 python skills/web-update-monitor/scripts/workspace.py \
-  --workspace /path/to/workspace pending --target-id <target-id>
+  --workspace /path/to/workspace --targets /path/to/monitored-sites.csv \
+  pending --target-id <target-id>
 ```
 
 Before semantic judgment or automated finalization, validate the current configuration. Full pending reviews replace stored interests with the complete current enabled-interest collection without rewriting candidate bytes, hashes, revision, original run ID, or diff/link evidence and without refetching. Valid removed/all-disabled URL groups expose no active interests and must be discarded through the core API; `check` performs that reconciliation automatically. Missing/invalid configuration makes `check` fail before fetching or configuration-driven mutation. `pending` remains available for inspection/recovery with saved context, and legacy direct finalization remains supported.
@@ -151,7 +158,8 @@ After the agent decides whether a change is material for any enabled interest, i
 
 ```bash
 python skills/web-update-monitor/scripts/workspace.py \
-  --workspace /path/to/workspace finalize < decision.json
+  --workspace /path/to/workspace --targets /path/to/monitored-sites.csv \
+  finalize < decision.json
 ```
 
 The facade verifies the review revision, promotes the candidate snapshot, merges material target sections into `reports/<run-id>.md` only after successful promotion, and clears pending state. Multiple material targets from the same check run therefore produce one report file. If report persistence fails after promotion, retain the pending state and retry. A truncated parent diff or incomplete linked evidence cannot be finalized as non-material; it stops for manual review instead. Child failures do not fail the parent check or other targets. New links are traversed breadth-first at depth 1 by default, bounded to 100 fetched links per target by default, 60 seconds of fetching, 2 MiB per child / 10 MiB total fetched content, and 8 KiB per child / 64 KiB total review text. `--link-depth` changes the traversal depth and `--max-links` changes the fetched-link cap from 1 through 100. Existing public-IP, redirect, normalization, and credential checks apply to child requests. No additional CSV columns or persistent link sidecars are needed: destination hashes already advance atomically with accepted parent snapshots.
@@ -179,4 +187,4 @@ Browser-rendered targets are outside the CSV workspace workflow. Do not auto-esc
 
 ## Repository boundary
 
-Do not commit fetched production content, `targets.csv`, snapshots, reports, `.wsum/`, credentials, browser profiles, or other deployment data.
+Do not commit operational target CSV files (regardless of filename), fetched production content, snapshots, reports, `.wsum/`, credentials, browser profiles, or other deployment data. The example CSV is tracked documentation data.

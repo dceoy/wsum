@@ -15,7 +15,8 @@ The core `web-update-monitor` skill keeps owning detection, semantic materiality
 
 ```mermaid
 flowchart LR
-    CORE["web-update-monitor<br/>check + finalize --archive-evidence"] --> EV["evidence/&lt;ingestion-id&gt;/<br/>(immutable, receipt-gated)"]
+    CSV["selected target CSV"] --> CORE["web-update-monitor<br/>--targets … check + finalize --archive-evidence"]
+    CORE --> EV["evidence/&lt;ingestion-id&gt;/<br/>(immutable, receipt-gated)"]
     EV --> LIST["wiki.py list"]
     LIST --> AGENT["Agent: bounded reads,<br/>routing, drafting"]
     AGENT --> VAL["wiki.py validate / apply"]
@@ -29,7 +30,6 @@ Compilation is asynchronous and happens after the core's evidence commit. A comp
 
 ```text
 workspace/
-  targets.csv
   reports/
   evidence/          core-owned immutable source record
   .wsum/             core-internal state (never read it)
@@ -40,7 +40,7 @@ workspace/
     .compiler/       ledger.json, transaction.json, lock
 ```
 
-`evidence/` is not copied into a second raw store; citations link to it with relative paths. No wiki fields belong in `targets.csv`: every enabled interest of a shared URL is preserved in the bundle's metadata, and materiality stays one decision per URL.
+The selected target CSV is a separate input path passed to the core; it may be outside this workspace. `evidence/` is not copied into a second raw store; citations link to it with relative paths. No wiki fields belong in the selected target CSV: every enabled interest of a shared URL is preserved in the bundle's metadata, and materiality stays one decision per URL.
 
 ## Resolve dependencies
 
@@ -54,11 +54,11 @@ The helper has no dependency on the core package; it only reads the digest-verif
 
 ## Run monitoring (delegated to the core)
 
-Follow the core skill's procedure for `check --compact`, `pending`, semantic judgment, and `finalize`, with one change: finalize **material** decisions with the archive option so the evidence commit is part of the core's recoverable finalization:
+Use the same explicit `TARGETS_CSV` path selected for the core monitoring run; do not infer a filename from `$WORKSPACE`. Follow the core skill's procedure for `check --compact`, `pending`, semantic judgment, and `finalize`, with one change: finalize **material** decisions with the archive option so the evidence commit is part of the core's recoverable finalization:
 
 ```bash
 python "$WEB_UPDATE_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSPACE" \
-  finalize --archive-evidence < decision.json
+  --targets "$TARGETS_CSV" finalize --archive-evidence < decision.json
 ```
 
 Do not overlap monitoring invocations on one workspace. Monitoring may add new bundles while a compilation is in progress because committed bundles are immutable. First monitor observations create baselines and do not seed the wiki: version 1 is explicitly update-driven, and importing existing documents or historical snapshots is a separate future operation.
