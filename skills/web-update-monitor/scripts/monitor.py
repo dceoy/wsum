@@ -536,13 +536,11 @@ def _read_navigation_links(path: Path | None) -> list[str]:
             port = parsed.port
         except ValueError as exc:
             raise MonitorError("--navigation-links contains an invalid URL") from exc
-        if (
-            parsed.scheme.lower() not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or (port is not None and port <= 0)
-        ):
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            raise MonitorError("--navigation-links contains an invalid URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise MonitorError("--navigation-links contains an invalid URL")
+        if port is not None and port <= 0:
             raise MonitorError("--navigation-links contains an invalid URL")
         destination = parsed._replace(fragment="").geturl()
         if len(destination.encode("utf-8")) > _DEFAULT_MAX_XML_BASE_URL_CHARS:
@@ -551,6 +549,26 @@ def _read_navigation_links(path: Path | None) -> list[str]:
             seen.add(destination)
             destinations.append(destination)
     return destinations
+
+
+def _include_navigation_links(
+    text: str, links: LinkCollection, path: Path | None
+) -> str:
+    """Add externally extracted navigation URLs to normalized text and links."""
+    navigation_links = _read_navigation_links(path)
+    if not navigation_links:
+        return text
+    existing_hashes = set(_NAVIGATION_LINK_MARKER_RE.findall(text))
+    markers: list[str] = []
+    for destination in navigation_links:
+        _collect_link(links, destination)
+        digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
+        if digest not in existing_hashes:
+            markers.append(f"[a:href:sha256:{digest}]")
+            existing_hashes.add(digest)
+    if not markers:
+        return text
+    return _normalize_whitespace(f"{text}\n" + "\n".join(markers))
 
 
 def _normalize_html_fragment(
@@ -2157,22 +2175,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     if not current:
         raise MonitorError("normalization produced empty content")
-    navigation_links = _read_navigation_links(
-        getattr(args, "navigation_links", None)
+    current = _include_navigation_links(
+        current, links, getattr(args, "navigation_links", None)
     )
-    if navigation_links:
-        existing_hashes = set(_NAVIGATION_LINK_MARKER_RE.findall(current))
-        markers: list[str] = []
-        for destination in navigation_links:
-            _collect_link(links, destination)
-            digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
-            if digest not in existing_hashes:
-                markers.append(f"[a:href:sha256:{digest}]")
-                existing_hashes.add(digest)
-        if markers:
-            current = _normalize_whitespace(
-                f"{current}\n" + "\n".join(markers)
-            )
     current_bytes = current.encode("utf-8")
     if len(current_bytes) > _DEFAULT_MAX_SNAPSHOT_BYTES:
         raise MonitorError("normalized snapshot exceeds the size limit")

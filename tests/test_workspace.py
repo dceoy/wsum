@@ -648,7 +648,7 @@ def test_ingest_agent_fetch_follows_links_from_navigation_manifest(
             )
         if url == child_url:
             return workspace.monitor.Document(b"New release", url, "text/plain")
-        raise AssertionError(f"unexpected URL: {url}")
+        raise AssertionError
 
     monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
     baseline_outcomes = cast(
