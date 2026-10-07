@@ -512,6 +512,27 @@ def _collect_link(links: dict[str, str], destination: str) -> None:
     links[digest] = parsed._replace(fragment="").geturl()
 
 
+def _canonical_navigation_url(value: object) -> str:
+    """Validate and canonicalize one absolute HTTP(S) navigation URL."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise MonitorError("--navigation-links contains an invalid URL")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise MonitorError("--navigation-links contains an invalid URL") from exc
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise MonitorError("--navigation-links contains an invalid URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise MonitorError("--navigation-links contains an invalid URL")
+    if port is not None and port <= 0:
+        raise MonitorError("--navigation-links contains an invalid URL")
+    destination = parsed._replace(fragment="").geturl()
+    if len(destination.encode("utf-8")) > _DEFAULT_MAX_XML_BASE_URL_CHARS:
+        raise MonitorError("--navigation-links contains an oversized URL")
+    return destination
+
+
 def _read_navigation_links(path: Path | None) -> list[str]:
     """Read a bounded JSON array of absolute HTTP(S) navigation URLs."""
     if path is None:
@@ -529,22 +550,7 @@ def _read_navigation_links(path: Path | None) -> list[str]:
     destinations: list[str] = []
     seen: set[str] = set()
     for item in value:
-        if not isinstance(item, str) or not item or item != item.strip():
-            raise MonitorError("--navigation-links contains an invalid URL")
-        try:
-            parsed = urlsplit(item)
-            port = parsed.port
-        except ValueError as exc:
-            raise MonitorError("--navigation-links contains an invalid URL") from exc
-        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-            raise MonitorError("--navigation-links contains an invalid URL")
-        if parsed.username is not None or parsed.password is not None:
-            raise MonitorError("--navigation-links contains an invalid URL")
-        if port is not None and port <= 0:
-            raise MonitorError("--navigation-links contains an invalid URL")
-        destination = parsed._replace(fragment="").geturl()
-        if len(destination.encode("utf-8")) > _DEFAULT_MAX_XML_BASE_URL_CHARS:
-            raise MonitorError("--navigation-links contains an oversized URL")
+        destination = _canonical_navigation_url(item)
         if destination not in seen:
             seen.add(destination)
             destinations.append(destination)
