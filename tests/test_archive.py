@@ -609,7 +609,7 @@ def test_bundle_directory_must_not_be_a_symlink(tmp_path: Path) -> None:
         finalize(tmp_path, review.decision())
 
 
-def test_adopting_archive_after_completed_legacy_finalize_is_rejected(
+def test_adopting_archive_after_completed_finalize_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     review = _review(tmp_path)
@@ -1150,49 +1150,6 @@ def test_receipt_must_match_the_prepared_transaction(
         finalize(tmp_path, review.decision(report=other))
 
     assert review.intent.exists()
-
-
-def _legacy_review(root: Path) -> _Review:
-    # A pending record with only the base fields has no stored diff.
-    _targets(root)
-    target_id = str(workspace.load_targets(root / "targets.csv")[0]["target_id"])
-    state = root / "internal" / "state"
-    snapshots = state / "snapshots"
-    snapshots.mkdir(parents=True)
-    (snapshots / f"{target_id}.txt").write_text("old\n", encoding="utf-8")
-    revision = "d" * 32
-    workspace._write_pending_transaction(
-        state,
-        {
-            "target_id": target_id,
-            "run_id": _RUN_ID,
-            "revision": revision,
-            "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
-            "candidate_sha256": hashlib.sha256(b"new\n").hexdigest(),
-            "diff_truncated": False,
-        },
-        b"new\n",
-    )
-    return _Review(root, target_id, revision)
-
-
-def test_legacy_pending_record_recovers_after_promotion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    review = _legacy_review(tmp_path)
-    _fail_once(monkeypatch, "_write_report")
-    with pytest.raises(WorkspaceError, match="injected"):
-        review.finalize()
-    assert review.snapshot.read_text() == "new\n"
-    assert review.intent.exists()
-
-    result = finalize(tmp_path, review.decision())
-
-    assert result["ingestion_id"] == review.ingestion_id
-    assert (review.bundle / "diff.txt").read_text().startswith("--- ")
-    assert (review.bundle / "committed.json").exists()
-    assert not review.pending.exists()
-    assert not review.intent.exists()
 
 
 def test_main_reports_unexpected_io_errors_as_json(

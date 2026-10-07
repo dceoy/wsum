@@ -70,7 +70,7 @@ Place a UTF-8 `manifest.json` at the ZIP root. It must contain a schema version,
 
 ### Restore
 
-List the entire dedicated Drive `workspaces/` folder. If no timestamped workspace snapshot exists, initialize a new monitor only when the folder is empty. For that brand-new monitor, create `internal/gws/delivery.json` immediately as the empty version-1 ledger `{"version":1,"reports":{}}`. After the current Sheet has been projected and validated, persist an initial complete workspace snapshot containing that empty ledger **before any core `check`, pending finalization, or other monitoring state transition**. This distinguishes a genuinely new monitor from a restored pre-ledger workspace and prevents an undelivered first report from later being inferred as already delivered. If any other file exists—including legacy `state-YYYYMMDDTHHMMSSZ.zip` generations or individually mirrored files from older layouts—fail closed without creating or deleting anything. Report that legacy storage needs explicit migration or configure a new, empty `workspaces/` folder; never mistake it for an empty monitor.
+List the entire dedicated Drive `workspaces/` folder. If no timestamped workspace snapshot exists, initialize a new monitor only when the folder is empty. For that brand-new monitor, create `internal/gws/delivery.json` immediately as the empty version-1 ledger `{"version":1,"reports":{}}`. After the current Sheet has been projected and validated, persist an initial complete workspace snapshot containing that empty ledger **before any core `check`, pending finalization, or other monitoring state transition**. This makes initialization explicit and prevents an undelivered first report from later being inferred as already delivered. If any other file exists, fail closed without creating or deleting anything. The composite accepts only the current timestamped workspace snapshots; use a new empty `workspaces/` folder for a fresh monitor.
 
 When timestamped snapshots exist, consider only files whose names exactly match `workspace-YYYYMMDDTHHMMSSZ.zip`, parse their timestamps strictly, and select the newest snapshot by its filename timestamp. Google Drive allows duplicate names, so require exactly one Drive file ID for each timestamp; duplicate files for one generation fail closed. Download the selected snapshot by its exact file ID. Do not use Drive modified time or listing order to choose the active workspace.
 
@@ -131,12 +131,12 @@ These values are synthetic reserved-domain placeholders, not live-fetch fixtures
 
 Projection rules:
 
-- Require `name,url`; select supported `publisher,category,keywords,criteria,priority,enabled` columns by exact name. Map legacy `watch_focus` to `criteria`, but reject a header containing both even when one is blank. Reject duplicate selected headers and do not introduce alternate input spellings or `target_id`.
+- Require `name,url`; select supported `publisher,category,keywords,criteria,priority,enabled` columns by exact name. Reject duplicate selected headers and do not introduce alternate input spellings or `target_id`.
 - Optional text defaults to blank. Priority is blank or a positive ASCII decimal integer, leading zeros allowed. Enabled is blank (true by default) or trimmed case-insensitive true/false. Keywords are free semantic hints, not a query language; priority is display metadata only.
 - Ignore unrelated worksheet columns. Runtime CSV rejects unknown columns, so serialize only the canonical enriched fields.
 - Preserve every row and its metadata, including duplicate/identical URL rows and disabled interests. Delegate exact-URL grouping and all row/URL/priority/ditto validation to the core `load_targets(staged_csv_path)` contract; do not deduplicate rows in the projection.
 - Serialize UTF-8 CSV correctly, including commas, quotes, and newlines. Keep the core 1 MiB input limit, whitespace/BOM/short-row/blank-record handling, required values, and row/field errors. Validate disabled and later rows too.
-- Reject whole trimmed ditto cells `"`, `〃`, `同上`, or `同左` in text fields (including legacy `watch_focus`); require the intended explicit value or blank optional text. Embedded tokens remain valid.
+- Reject whole trimmed ditto cells `"`, `〃`, `同上`, or `同左` in text fields; require the intended explicit value or blank optional text. Embedded tokens remain valid.
 - Validate the entire staged projection using the installed core helper's `load_targets()` on the staged CSV file itself. Only after successful complete validation, atomically replace `$TARGETS_CSV`. The temporary staging file is disposable validation storage, not another authoritative configuration or import journal.
 - Never serialize credentials, cookies, tokens, or other secrets.
 
@@ -166,7 +166,7 @@ Reconcile against **all current rows for the exact trimmed URL**, not one matchi
 - if the URL is absent from valid current projection, discard through core `discard`; a changed URL becomes a new target on the later check
 - if all interests for that URL are disabled, discard through core `discard`
 - if any interest is enabled, use the full review's complete current enabled `interests`, preserving each name's relationship to its criteria, keywords, publisher, category, and priority
-- replace the complete collection; never merge back stored, removed, or disabled interests or use saved scalar `name,watch_focus` to override current Sheet metadata
+- replace the complete collection; never merge back stored, removed, or disabled interests or use saved metadata to override current Sheet metadata
 - retain candidate bytes/hash, expected hash, bounded diff/link evidence, revision, and original `run_id`; metadata-only edits do not rewrite pending transactions or refetch pending targets
 - full reviews for valid removed/all-disabled URLs contain `interests=[]` even when a recovery handle remains; discard before semantic judgment
 - after each discard, commit the complete workspace as a new timestamped Drive workspace snapshot before continuing
@@ -221,24 +221,23 @@ Use `internal/gws/delivery.json` as the only durable delivery marker. Keep this 
 
 Each key is a valid core run ID and each value is the lowercase SHA-256 of the complete canonical `output/report/<run-id>.md` bytes that were verified as delivered. Reject unknown top-level fields, malformed run IDs, malformed digests, non-string values, and a ledger entry whose digest no longer matches its canonical local report. Update the ledger by atomic replacement and persist the complete workspace immediately after the update. The ledger may grow with delivered runs, but it stores only one run ID and digest per report rather than another Markdown copy.
 
-Before any new monitoring or finalization, migrate a **restored existing** pre-ledger workspace once when `delivery.json` is absent. This rule never applies to a brand-new empty Drive workspace; new monitors must already have the persisted empty ledger created during initialization. If `internal/gws/outbox/` exists, validate every regular `<run-id>.md` there against the same canonical `output/report/<run-id>.md` and require byte-for-byte equality. Initialize the ledger with every canonical report **not** present in the old outbox, because those runs were already delivered under the previous protocol; reports still present in the outbox remain unrecorded and therefore pending delivery. If no old outbox exists, treat all canonical reports restored from that existing pre-ledger workspace as already delivered. Remove the legacy outbox only after the ledger has been written locally, then commit a new timestamped workspace snapshot before continuing. If validation or persistence fails, leave the previously committed workspace generation untouched and retry migration from it.
+Require `internal/gws/delivery.json` in every restored current-format workspace. If it is missing or invalid, fail closed before monitoring or finalization; do not infer delivery state from other files. A fresh monitor creates and persists the empty ledger during initialization.
 
 ## Publish completed runs as Markdown files in Google Drive
 
 Do not publish a run while `pending` still lists any review with the same `run_id`. A later material finalize from that run may change the canonical Markdown report.
 
-After restore, ledger migration, and pending reconciliation, enumerate canonical regular files directly under `output/report/`. For each filename matching the core run-ID form `YYYYMMDDTHHMMSSZ-xxxxxxxx.md` (eight lowercase hexadecimal suffix characters), reject malformed names and compute the SHA-256 of the canonical bytes:
+After restore, ledger validation, and pending reconciliation, enumerate canonical regular files directly under `output/report/`. For each filename matching the core run-ID form `YYYYMMDDTHHMMSSZ-xxxxxxxx.md` (eight lowercase hexadecimal suffix characters), reject malformed names and compute the SHA-256 of the canonical bytes:
 
 1. If the ledger already contains the run ID with the same digest, skip it without any Drive lookup or download. If the stored digest differs, fail closed because a delivered canonical report changed unexpectedly.
 2. If the run is not in the ledger but `pending` still contains the same `run_id`, defer delivery.
 3. Otherwise treat `output/report/<run-id>.md` as the canonical source and use the stable Drive filename `Web Update Report — <run-id>.md`.
-4. Before creating anything, list the configured destination folder for both the exact Markdown filename and the prior-version Google Doc title `Web Update Report — <run-id>`.
-5. If any exact-title legacy Google Doc exists, stop automatic Markdown delivery for that run and report all matching Drive file IDs. If the user verifies that the legacy Doc contains the final report and explicitly authorizes treating it as delivered, record the canonical report digest in the ledger and persist the workspace without creating Markdown. Otherwise require the user to archive or rename the legacy Doc before retrying. Never modify or delete the legacy Doc automatically.
-6. If no legacy Google Doc and no exact Markdown filename exist, upload one Markdown file containing the complete canonical report and capture its Drive file ID.
-7. If no legacy Google Doc and exactly one Markdown file matches, read it by exact Drive file ID. If its byte length and SHA-256 differ from the canonical report, replace that same file's content with the complete canonical report.
-8. If multiple exact Markdown filenames exist, stop delivery for that run and report the ambiguity instead of creating another file.
-9. After any create, replacement, or reuse of an existing exact Markdown file, read it by exact Drive file ID and verify its byte length and SHA-256 against the canonical report bytes.
-10. Only after successful verification, add `run_id -> canonical_sha256` to `delivery.json` and commit a new timestamped workspace snapshot.
+4. Before creating anything, list the configured destination folder for the exact Markdown filename.
+5. If no exact Markdown filename exists, upload one Markdown file containing the complete canonical report and capture its Drive file ID.
+6. If exactly one Markdown file matches, read it by exact Drive file ID. If its byte length and SHA-256 differ from the canonical report, replace that same file's content with the complete canonical report.
+7. If multiple exact Markdown filenames exist, stop delivery for that run and report the ambiguity instead of creating another file.
+8. After any create, replacement, or reuse of an existing exact Markdown file, read it by exact Drive file ID and verify its byte length and SHA-256 against the canonical report bytes.
+9. Only after successful verification, add `run_id -> canonical_sha256` to `delivery.json` and commit a new timestamped workspace snapshot.
 
 The exact Markdown filename is the current-format delivery idempotency key while delivery is pending; the compact ledger is the durable completion marker afterward. If delivery succeeds but ledger persistence fails, the next invocation reuses and verifies the same exact Drive file before recording completion. Once the ledger is durable, later invocations do not touch that Drive report, so user edits or deletion are not silently reversed.
 
@@ -251,11 +250,9 @@ Do not convert the report to a Google Doc or create an additional presentation c
 - Pending review exists: first reconcile it against the current authoritative Sheet projection, discard it if removed or disabled, otherwise resume it through the core API without refetching that target.
 - A workspace change succeeds locally but Drive workspace persistence fails before the new snapshot verifies: do not treat the local mutation as durable; recover from the newest previously committed workspace snapshot.
 - Workspace persistence fails after material finalize: do not treat the local report or state transition as durable; recover from the newest previously committed workspace snapshot.
-- Delivery-ledger migration fails: keep the previously committed workspace generation and retry from it; never discard legacy outbox state before a ledger-bearing snapshot verifies.
 - A run still has pending reviews: keep its canonical report in the persisted `output/` tree and do not publish the Drive report yet.
 - Drive Markdown upload/update or read-back verification fails: leave the ledger unchanged and retry delivery from the canonical persisted report on a later invocation.
 - Drive Markdown delivery succeeds but ledger persistence fails: reuse and verify the same exact Drive file on retry, then persist the ledger again.
-- A prior-version Google Doc with the exact legacy title exists: report all matching Drive file IDs and require explicit user authorization to mark the canonical digest delivered or require the user to archive/rename the legacy Doc before Markdown delivery.
 - Multiple exact-filename report files exist: stop delivery and surface the ambiguity.
 - Snapshot conflict: discard only the conflicted pending transaction through the core API, persist that cleanup, then let a later check refetch it.
 - Manual review required: keep the transaction pending; other targets can still be monitored because core `check` skips only targets that already have pending reviews.

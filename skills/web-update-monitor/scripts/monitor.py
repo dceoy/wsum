@@ -186,14 +186,14 @@ _XML_ENCODING_RE = re.compile(
     re.IGNORECASE,
 )
 _PYPDF_LIMIT_NAMES = (
-    "MAX_DECLARED_STREAM_LENGTH",
-    "MAX_ARRAY_BASED_STREAM_OUTPUT_LENGTH",
-    "JBIG2_MAX_OUTPUT_LENGTH",
-    "LZW_MAX_OUTPUT_LENGTH",
-    "RUN_LENGTH_MAX_OUTPUT_LENGTH",
-    "ZLIB_MAX_OUTPUT_LENGTH",
-    "FLATE_MAX_BUFFER_SIZE",
-    "ZLIB_MAX_RECOVERY_INPUT_LENGTH",
+    "maximum_declared_stream_length",
+    "array_based_stream_maximum_output_length",
+    "jbig2_maximum_output_length",
+    "lzw_maximum_output_length",
+    "run_length_maximum_output_length",
+    "zlib_maximum_output_length",
+    "image_maximum_buffer_size",
+    "zlib_maximum_recovery_input_length",
 )
 _NON_PUBLIC_IPV6_NETWORKS = (
     ipaddress.ip_network("::/128"),
@@ -1490,19 +1490,20 @@ def _pypdf_output_limits(limit: int) -> Generator[Callable[[int], None], None, N
         A setter for reducing the remaining output budget during extraction.
     """
     try:
-        from pypdf import filters  # ruff: ignore[import-outside-top-level]
+        from pypdf import (  # ruff: ignore[import-outside-top-level]
+            apply_configuration,
+            filters,
+            overwrite_configuration,
+        )
     except ImportError as exc:
         raise MonitorError("PDF normalization requires pypdf") from exc
-    with _PDF_LIMIT_LOCK:
-        previous = {
-            name: getattr(filters, name)
-            for name in _PYPDF_LIMIT_NAMES
-            if hasattr(filters, name)
-        }
+    with (
+        _PDF_LIMIT_LOCK,
+        apply_configuration(**dict.fromkeys(_PYPDF_LIMIT_NAMES, limit)),
+    ):
 
         def set_limit(value: int) -> None:
-            for name in previous:
-                setattr(filters, name, value)
+            overwrite_configuration(**dict.fromkeys(_PYPDF_LIMIT_NAMES, value))
 
         original_decompress = filters.decompress
 
@@ -1512,13 +1513,10 @@ def _pypdf_output_limits(limit: int) -> Generator[Callable[[int], None], None, N
             return original_decompress(data)
 
         filters.decompress = bounded_decompress
-        set_limit(limit)
         try:
             yield set_limit
         finally:
             filters.decompress = original_decompress
-            for name, value in previous.items():
-                setattr(filters, name, value)
 
 
 def _resolve_pdf_object(value: Any) -> Any:
