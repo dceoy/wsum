@@ -245,6 +245,7 @@ class HTTPStatusError(MonitorError):
     """HTTP response rejected because its status is not successful."""
 
     def __init__(self, status: int) -> None:
+        """Create an error for one rejected HTTP status."""
         self.status = status
         super().__init__(f"fetch failed: HTTP {status}")
 
