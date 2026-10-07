@@ -1057,7 +1057,10 @@ def test_normalize_pdf_bounds_structure(
 
 def test_pypdf_recovery_input_limit_is_applied_and_restored() -> None:
     pytest.importorskip("pypdf")
-    from pypdf import filters, get_configuration  # ruff: ignore[import-outside-top-level]
+    from pypdf import (  # ruff: ignore[import-outside-top-level]
+        filters,
+        get_configuration,
+    )
 
     original = get_configuration()
     limits = monitor._pypdf_output_limits(2)  # pyright: ignore[reportPrivateUsage]
