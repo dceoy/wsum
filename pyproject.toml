@@ -32,6 +32,7 @@ preview = true
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
+  "CPY",  # flake8-copyright (CPY)
   "missing-trailing-comma",  # missing-trailing-comma
   "boolean-type-hint-positional-argument",  # boolean-type-hint-positional-argument
   "boolean-default-value-positional-argument",  # boolean-default-value-positional-argument
