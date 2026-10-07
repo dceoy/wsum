@@ -905,10 +905,10 @@ def _make_pdf_with_link(content: bytes, *, uri: str) -> bytes:
 
 def test_normalize_pdf_bounds_expansion_and_restores_pypdf_limits() -> None:
     pytest.importorskip("pypdf")
-    from pypdf import Configuration  # ruff: ignore[import-outside-top-level]
+    from pypdf import get_configuration  # ruff: ignore[import-outside-top-level]
 
-    original = Configuration.zlib_maximum_output_length
-    recovery_original = Configuration.zlib_maximum_recovery_input_length
+    original = get_configuration().zlib_maximum_output_length
+    recovery_original = get_configuration().zlib_maximum_recovery_input_length
     pdf = _make_pdf(b"q\n" * 2_000, compressed=True)
 
     with pytest.raises(MonitorError, match="PDF"):
@@ -918,8 +918,8 @@ def test_normalize_pdf_bounds_expansion_and_restores_pypdf_limits() -> None:
             max_pdf_extracted_chars=1_000,
         )
 
-    assert original == Configuration.zlib_maximum_output_length
-    assert recovery_original == Configuration.zlib_maximum_recovery_input_length
+    assert original == get_configuration().zlib_maximum_output_length
+    assert recovery_original == get_configuration().zlib_maximum_recovery_input_length
 
 
 def test_normalize_valid_pdf_extracts_text() -> None:
@@ -1057,14 +1057,19 @@ def test_normalize_pdf_bounds_structure(
 
 def test_pypdf_recovery_input_limit_is_applied_and_restored() -> None:
     pytest.importorskip("pypdf")
-    from pypdf import Configuration, filters  # ruff: ignore[import-outside-top-level]
+    from pypdf import filters, get_configuration  # ruff: ignore[import-outside-top-level]
 
-    original = Configuration.zlib_maximum_recovery_input_length
-    with monitor._pypdf_output_limits(2):  # pyright: ignore[reportPrivateUsage]
-        assert Configuration.zlib_maximum_recovery_input_length == 2
+    original = get_configuration()
+    limits = monitor._pypdf_output_limits(2)  # pyright: ignore[reportPrivateUsage]
+    with limits as set_limit:
+        assert get_configuration().zlib_maximum_recovery_input_length == 2
+        assert get_configuration().zlib_maximum_output_length == 2
+        set_limit(1)
+        assert get_configuration().zlib_maximum_recovery_input_length == 1
+        assert get_configuration().zlib_maximum_output_length == 1
         with pytest.raises(MonitorError, match="recovery input"):
             filters.decompress(b"\x00" * 10)
-    assert original == Configuration.zlib_maximum_recovery_input_length
+    assert get_configuration() == original
 
 
 def test_normalize_pdf_bounds_extracted_text() -> None:

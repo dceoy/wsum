@@ -1491,17 +1491,19 @@ def _pypdf_output_limits(limit: int) -> Generator[Callable[[int], None], None, N
     """
     try:
         from pypdf import (  # ruff: ignore[import-outside-top-level]
-            Configuration,
+            apply_configuration,
             filters,
+            overwrite_configuration,
         )
     except ImportError as exc:
         raise MonitorError("PDF normalization requires pypdf") from exc
-    with _PDF_LIMIT_LOCK:
-        previous = {name: getattr(Configuration, name) for name in _PYPDF_LIMIT_NAMES}
+    with (
+        _PDF_LIMIT_LOCK,
+        apply_configuration(**dict.fromkeys(_PYPDF_LIMIT_NAMES, limit)),
+    ):
 
         def set_limit(value: int) -> None:
-            for name in previous:
-                setattr(Configuration, name, value)
+            overwrite_configuration(**dict.fromkeys(_PYPDF_LIMIT_NAMES, value))
 
         original_decompress = filters.decompress
 
@@ -1511,13 +1513,10 @@ def _pypdf_output_limits(limit: int) -> Generator[Callable[[int], None], None, N
             return original_decompress(data)
 
         filters.decompress = bounded_decompress
-        set_limit(limit)
         try:
             yield set_limit
         finally:
             filters.decompress = original_decompress
-            for name, value in previous.items():
-                setattr(Configuration, name, value)
 
 
 def _resolve_pdf_object(value: Any) -> Any:
