@@ -44,6 +44,8 @@ _DEFAULT_MAX_DIFF_BYTES = 65_536
 _DEFAULT_MAX_DIFF_COMPLEXITY = 4_000_000
 _DEFAULT_TIMEOUT = 30.0
 _DEFAULT_MAX_REDIRECTS = 10
+_VERSION = "0.1.0"
+_USER_AGENT = f"wsum/{_VERSION}"
 _DEFAULT_MAX_PDF_DECOMPRESSED_BYTES = 20 * 1024 * 1024
 _DEFAULT_MAX_PDF_EXTRACTED_CHARS = 10 * 1024 * 1024
 _DEFAULT_MAX_PDF_PAGES = 1_000
@@ -871,7 +873,7 @@ def _open_response(
                 "Accept-Encoding": "identity",
                 "Connection": "close",
                 "Host": _host_header(target),
-                "User-Agent": "wsum/0.1 (+https://github.com/dceoy/wsum)",
+                "User-Agent": _USER_AGENT,
             },
         )
         _remaining(deadline)
