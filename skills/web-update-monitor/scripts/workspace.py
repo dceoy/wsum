@@ -54,6 +54,7 @@ _MAX_LINK_TOTAL_BYTES = 10 * 1024 * 1024
 _MAX_LINK_TEXT_BYTES = 8192
 _MAX_LINK_REVIEW_BYTES = 65_536
 _LINK_TIMEOUT = 60.0
+_HTTP_FORBIDDEN = 403
 _NAVIGATION_HASH_RE = re.compile(
     r"^\[(?:a|area|link):(?:href|url):sha256:([a-f0-9]{64})\]$", re.MULTILINE
 )
@@ -1741,7 +1742,7 @@ def check(
                 else outcome
             )
         except monitor.HTTPStatusError as exc:
-            if exc.status == 403:
+            if exc.status == _HTTP_FORBIDDEN:
                 outcomes.append({
                     "action": "agent_fetch_required",
                     "run_id": run_id,
