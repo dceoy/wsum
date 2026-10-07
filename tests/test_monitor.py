@@ -37,7 +37,7 @@ def test_user_agent_matches_project_version() -> None:
     with Path("pyproject.toml").open("rb") as stream:
         project_version = tomllib.load(stream)["project"]["version"]
 
-    assert monitor._USER_AGENT == f"wsum/{project_version}"
+    assert f"wsum/{project_version}" == monitor._USER_AGENT
 
 
 def test_normalize_html_removes_markup_and_scripts() -> None:
