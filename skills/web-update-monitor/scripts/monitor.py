@@ -46,6 +46,11 @@ _DEFAULT_TIMEOUT = 30.0
 _DEFAULT_MAX_REDIRECTS = 10
 _VERSION = "0.1.0"
 _USER_AGENT = f"wsum/{_VERSION}"
+_MAX_NAVIGATION_LINKS_FILE_BYTES = 512 * 1024
+_MAX_NAVIGATION_LINKS = 500
+_NAVIGATION_LINK_MARKER_RE = re.compile(
+    r"^\[a:href:sha256:([a-f0-9]{64})\]$", re.MULTILINE
+)
 _DEFAULT_MAX_PDF_DECOMPRESSED_BYTES = 20 * 1024 * 1024
 _DEFAULT_MAX_PDF_EXTRACTED_CHARS = 10 * 1024 * 1024
 _DEFAULT_MAX_PDF_PAGES = 1_000
@@ -505,6 +510,47 @@ def _collect_link(links: dict[str, str], destination: str) -> None:
             links.omitted_hashes.add(digest)
         return
     links[digest] = parsed._replace(fragment="").geturl()
+
+
+def _read_navigation_links(path: Path | None) -> list[str]:
+    """Read a bounded JSON array of absolute HTTP(S) navigation URLs."""
+    if path is None:
+        return []
+    raw = _read_regular_file_limited(
+        path, _MAX_NAVIGATION_LINKS_FILE_BYTES, "--navigation-links"
+    )
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MonitorError("--navigation-links must be a UTF-8 JSON array") from exc
+    if not isinstance(value, list) or len(value) > _MAX_NAVIGATION_LINKS:
+        raise MonitorError("--navigation-links must contain at most 500 URLs")
+
+    destinations: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item or item != item.strip():
+            raise MonitorError("--navigation-links contains an invalid URL")
+        try:
+            parsed = urlsplit(item)
+            port = parsed.port
+        except ValueError as exc:
+            raise MonitorError("--navigation-links contains an invalid URL") from exc
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or (port is not None and port <= 0)
+        ):
+            raise MonitorError("--navigation-links contains an invalid URL")
+        destination = parsed._replace(fragment="").geturl()
+        if len(destination.encode("utf-8")) > _DEFAULT_MAX_XML_BASE_URL_CHARS:
+            raise MonitorError("--navigation-links contains an oversized URL")
+        if destination not in seen:
+            seen.add(destination)
+            destinations.append(destination)
+    return destinations
 
 
 def _normalize_html_fragment(
@@ -2038,6 +2084,11 @@ def _parser() -> argparse.ArgumentParser:
         "--source-url", default="", help="canonical URL when using --input"
     )
     parser.add_argument("--content-type", default="", help="override input MIME type")
+    parser.add_argument(
+        "--navigation-links",
+        type=Path,
+        help="UTF-8 JSON array of canonical navigation URLs for extracted text",
+    )
     parser.add_argument("--previous", type=Path, help="previous normalized snapshot")
     parser.add_argument("--output", type=Path, help="write current normalized snapshot")
     parser.add_argument("--timeout", type=float, default=_DEFAULT_TIMEOUT)
@@ -2106,6 +2157,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     if not current:
         raise MonitorError("normalization produced empty content")
+    navigation_links = _read_navigation_links(
+        getattr(args, "navigation_links", None)
+    )
+    if navigation_links:
+        existing_hashes = set(_NAVIGATION_LINK_MARKER_RE.findall(current))
+        markers: list[str] = []
+        for destination in navigation_links:
+            _collect_link(links, destination)
+            digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
+            if digest not in existing_hashes:
+                markers.append(f"[a:href:sha256:{digest}]")
+                existing_hashes.add(digest)
+        if markers:
+            current = _normalize_whitespace(
+                f"{current}\n" + "\n".join(markers)
+            )
     current_bytes = current.encode("utf-8")
     if len(current_bytes) > _DEFAULT_MAX_SNAPSHOT_BYTES:
         raise MonitorError("normalized snapshot exceeds the size limit")

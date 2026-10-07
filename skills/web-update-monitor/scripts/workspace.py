@@ -681,6 +681,7 @@ def _monitor_target_from_source(
     *,
     link_depth: int = _DEFAULT_LINK_DEPTH,
     max_links: int = _MAX_LINKS,
+    link_evidence_incomplete: bool = False,
 ) -> dict[str, object]:
     """Run one target through the normal transaction flow from any safe source."""
     target_id = _validate_target_id(target["target_id"])
@@ -705,14 +706,25 @@ def _monitor_target_from_source(
             or bool(getattr(link_collection, "omitted_hashes", ()))
             or bool(getattr(link_collection, "overflow_count", 0))
         )
-        if link_depth > 0 and result.get("status") == "changed" and has_links:
-            result["link_review"] = _follow_added_links(
-                result,
-                _read_snapshot(previous) or b"",
-                source_url=str(target["url"]),
-                link_depth=link_depth,
-                max_links=max_links,
+        if (
+            link_depth > 0
+            and result.get("status") == "changed"
+            and (has_links or link_evidence_incomplete)
+        ):
+            link_review = (
+                _follow_added_links(
+                    result,
+                    _read_snapshot(previous) or b"",
+                    source_url=str(target["url"]),
+                    link_depth=link_depth,
+                    max_links=max_links,
+                )
+                if has_links
+                else {"documents": [], "omitted": 0, "incomplete": False}
             )
+            if link_evidence_incomplete:
+                link_review["incomplete"] = True
+            result["link_review"] = link_review
         if result.get("status") in {"baseline", "changed"}:
             candidate_data = _read_text_bytes(candidate, "candidate")
     return _handle_monitor_result(
@@ -1750,6 +1762,8 @@ def check(
                     "name": target["name"],
                     "url": target["url"],
                     "status": exc.status,
+                    "link_depth": link_depth,
+                    "max_links": max_links,
                 })
             else:
                 outcomes.append({
@@ -1776,6 +1790,7 @@ def ingest_agent_fetch(
     run_id: str,
     input_path: str | Path,
     content_type: str = "text/plain",
+    links_path: str | Path | None = None,
     link_depth: int = _DEFAULT_LINK_DEPTH,
     max_links: int = _MAX_LINKS,
 ) -> dict[str, object]:
@@ -1793,20 +1808,30 @@ def ingest_agent_fetch(
     state = _state_dir(root)
     if _existing_pending_paths(state, target_id) is not None:
         raise WorkspaceError("target already has a pending review")
+    source_arguments = [
+        "--input",
+        str(input_path),
+        "--source-url",
+        str(target["url"]),
+        "--content-type",
+        content_type,
+    ]
+    if links_path is not None:
+        source_arguments.extend(["--navigation-links", str(links_path)])
+    content_type_main = content_type.split(";", 1)[0].strip().lower()
+    link_evidence_incomplete = (
+        link_depth > 0
+        and links_path is None
+        and content_type_main in {"", "text/plain"}
+    )
     return _monitor_target_from_source(
         state,
         target,
         run_id,
-        [
-            "--input",
-            str(input_path),
-            "--source-url",
-            str(target["url"]),
-            "--content-type",
-            content_type,
-        ],
+        source_arguments,
         link_depth=link_depth,
         max_links=max_links,
+        link_evidence_incomplete=link_evidence_incomplete,
     )
 
 
@@ -2842,6 +2867,11 @@ def _parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--run-id", required=True)
     ingest_parser.add_argument("--input", type=Path, required=True)
     ingest_parser.add_argument("--content-type", default="text/plain")
+    ingest_parser.add_argument(
+        "--links",
+        type=Path,
+        help="UTF-8 JSON array of canonical navigation URLs from an extracted page",
+    )
     ingest_parser.add_argument("--link-depth", type=int, default=_DEFAULT_LINK_DEPTH)
     ingest_parser.add_argument("--max-links", type=int, default=_MAX_LINKS)
 
@@ -2882,6 +2912,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_id=args.run_id,
                 input_path=args.input,
                 content_type=args.content_type,
+                links_path=args.links,
                 link_depth=args.link_depth,
                 max_links=args.max_links,
             )
@@ -2900,7 +2931,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 targets=args.targets,
                 archive_evidence=args.archive_evidence,
             )
-    except (WorkspaceError, OSError) as exc:
+    except (monitor.MonitorError, WorkspaceError, OSError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
     with _integer_text_limit():

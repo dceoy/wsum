@@ -578,6 +578,8 @@ def test_check_routes_only_forbidden_to_agent_fetch(
             "name": "Example",
             "url": "https://example.com/",
             "status": 403,
+            "link_depth": workspace._DEFAULT_LINK_DEPTH,
+            "max_links": workspace._MAX_LINKS,
         }
     else:
         assert outcome["error"] == "fetch failed: HTTP 429"
@@ -621,6 +623,117 @@ def test_ingest_agent_fetch_uses_normal_monitor_flow(
         tmp_path / "internal" / "state" / "snapshots" / f"{target['target_id']}.txt"
     )
     assert snapshot.read_text(encoding="utf-8") == "agent fetched content\n"
+
+
+def test_ingest_agent_fetch_follows_links_from_navigation_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    targets = tmp_path / "targets.csv"
+    _write_targets(targets, "Example,https://example.com/,,true\n")
+    parent_url = "https://example.com/"
+    child_url = "https://example.com/release"
+    blocked = {"value": False}
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        if url == parent_url:
+            if blocked["value"]:
+                raise workspace.monitor.HTTPStatusError(403)
+            return workspace.monitor.Document(
+                b'<p>Old release</p><a href="/old">Old</a>',
+                url,
+                "text/html",
+            )
+        if url == child_url:
+            return workspace.monitor.Document(b"New release", url, "text/plain")
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    baseline_outcomes = cast(
+        "list[dict[str, object]]", check(tmp_path, targets)["targets"]
+    )
+    assert baseline_outcomes[0]["action"] == "baseline_created"
+
+    blocked["value"] = True
+    required_outcomes = cast(
+        "list[dict[str, object]]", check(tmp_path, targets)["targets"]
+    )
+    required = required_outcomes[0]
+    assert required["action"] == "agent_fetch_required"
+    assert required["link_depth"] == workspace._DEFAULT_LINK_DEPTH
+
+    fetched = tmp_path / "agent-fetch.txt"
+    fetched.write_text("New release notes\n", encoding="utf-8")
+    links = tmp_path / "navigation-links.json"
+    links.write_text(json.dumps([child_url]), encoding="utf-8")
+
+    review = workspace.ingest_agent_fetch(
+        tmp_path,
+        targets,
+        target_id=str(required["target_id"]),
+        run_id=str(required["run_id"]),
+        input_path=fetched,
+        content_type="text/plain",
+        links_path=links,
+        link_depth=cast("int", required["link_depth"]),
+        max_links=cast("int", required["max_links"]),
+    )
+
+    assert review["action"] == "review"
+    link_review = cast("dict[str, object]", review["link_review"])
+    documents = cast("list[dict[str, object]]", link_review["documents"])
+    assert documents[0]["url"] == child_url
+    assert documents[0]["text"] == "New release\n"
+    assert link_review["incomplete"] is False
+
+
+def test_ingest_agent_fetch_without_link_manifest_marks_evidence_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    targets = tmp_path / "targets.csv"
+    _write_targets(targets, "Example,https://example.com/,,true\n")
+    blocked = {"value": False}
+
+    def fetch(
+        url: str, *, timeout: float, max_bytes: int
+    ) -> workspace.monitor.Document:
+        del timeout, max_bytes
+        if blocked["value"]:
+            raise workspace.monitor.HTTPStatusError(403)
+        return workspace.monitor.Document(
+            b"<p>Old release</p>", url, "text/html"
+        )
+
+    monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
+    baseline_outcomes = cast(
+        "list[dict[str, object]]", check(tmp_path, targets)["targets"]
+    )
+    assert baseline_outcomes[0]["action"] == "baseline_created"
+    blocked["value"] = True
+    required_outcomes = cast(
+        "list[dict[str, object]]", check(tmp_path, targets)["targets"]
+    )
+    required = required_outcomes[0]
+
+    fetched = tmp_path / "agent-fetch.txt"
+    fetched.write_text("New release notes\n", encoding="utf-8")
+    review = workspace.ingest_agent_fetch(
+        tmp_path,
+        targets,
+        target_id=str(required["target_id"]),
+        run_id=str(required["run_id"]),
+        input_path=fetched,
+        content_type="text/plain",
+    )
+
+    assert review["action"] == "review"
+    assert review["link_review"] == {
+        "documents": [],
+        "omitted": 0,
+        "incomplete": True,
+    }
 
 
 @pytest.mark.parametrize("mode", ["inactive", "pending"], ids=["inactive", "pending"])
@@ -2583,8 +2696,12 @@ def test_main_ingest_dispatches_agent_fetch(
     target = load_targets(targets)[0]
     fetched = tmp_path / "agent-fetch.txt"
     fetched.write_text("content\n", encoding="utf-8")
+    links = tmp_path / "navigation-links.json"
+    links.write_text("[]", encoding="utf-8")
+    received: dict[str, object] = {}
 
-    def fake_ingest(*_args: object, **_kwargs: object) -> dict[str, object]:
+    def fake_ingest(*_args: object, **kwargs: object) -> dict[str, object]:
+        received.update(kwargs)
         return {
             "action": "unchanged",
             "target_id": target["target_id"],
@@ -2605,11 +2722,14 @@ def test_main_ingest_dispatches_agent_fetch(
             _RUN_ID,
             "--input",
             str(fetched),
+            "--links",
+            str(links),
         ])
         == 0
     )
     captured = capsys.readouterr()
     assert '"action": "unchanged"' in captured.out
+    assert received["links_path"] == links
     assert not captured.err
 
 
