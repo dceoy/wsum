@@ -672,14 +672,16 @@ def _write_report(workspace: Path, run_id: str, target_id: str, report: str) -> 
     return destination
 
 
-def _monitor_target(
+def _monitor_target_from_source(
     state: Path,
     target: Mapping[str, object],
     run_id: str,
+    source_arguments: Sequence[str],
     *,
     link_depth: int = _DEFAULT_LINK_DEPTH,
     max_links: int = _MAX_LINKS,
 ) -> dict[str, object]:
+    """Run one target through the normal transaction flow from any safe source."""
     target_id = _validate_target_id(target["target_id"])
     _recover_pending(state, target_id)
     snapshots = _ensure_directory(
@@ -689,7 +691,7 @@ def _monitor_target(
     candidate_data: bytes | None = None
     with tempfile.TemporaryDirectory(prefix=".monitor-", dir=state) as staging:
         candidate = Path(staging) / "candidate.txt"
-        arguments = ["--url", str(target["url"]), "--output", str(candidate)]
+        arguments = [*source_arguments, "--output", str(candidate)]
         if previous.exists():
             arguments.extend(["--previous", str(previous)])
         namespace = monitor._parser().parse_args(  # pyright: ignore[reportPrivateUsage]
@@ -714,6 +716,24 @@ def _monitor_target(
             candidate_data = _read_text_bytes(candidate, "candidate")
     return _handle_monitor_result(
         state, target, result, run_id, candidate_data=candidate_data
+    )
+
+
+def _monitor_target(
+    state: Path,
+    target: Mapping[str, object],
+    run_id: str,
+    *,
+    link_depth: int = _DEFAULT_LINK_DEPTH,
+    max_links: int = _MAX_LINKS,
+) -> dict[str, object]:
+    return _monitor_target_from_source(
+        state,
+        target,
+        run_id,
+        ["--url", str(target["url"])],
+        link_depth=link_depth,
+        max_links=max_links,
     )
 
 
@@ -1720,6 +1740,23 @@ def check(
                 if compact and outcome.get("action") == "review"
                 else outcome
             )
+        except monitor.HTTPStatusError as exc:
+            if exc.status == 403:
+                outcomes.append({
+                    "action": "agent_fetch_required",
+                    "run_id": run_id,
+                    "target_id": target["target_id"],
+                    "name": target["name"],
+                    "url": target["url"],
+                    "status": exc.status,
+                })
+            else:
+                outcomes.append({
+                    "action": "error",
+                    "target_id": target["target_id"],
+                    "name": target["name"],
+                    "error": str(exc),
+                })
         except (monitor.MonitorError, OSError, WorkspaceError) as exc:
             outcomes.append({
                 "action": "error",
@@ -1728,6 +1765,48 @@ def check(
                 "error": str(exc),
             })
     return {"run_id": run_id, "targets": outcomes}
+
+
+def ingest_agent_fetch(
+    workspace: str | Path,
+    targets: str | Path,
+    *,
+    target_id: str,
+    run_id: str,
+    input_path: str | Path,
+    content_type: str = "text/plain",
+    link_depth: int = _DEFAULT_LINK_DEPTH,
+    max_links: int = _MAX_LINKS,
+) -> dict[str, object]:
+    """Ingest content fetched by the main agent after a static HTTP 403."""
+    _validate_link_options(link_depth, max_links)
+    target_id = _validate_target_id(target_id)
+    run_id = _validate_run_id(run_id)
+    root = _workspace(workspace)
+    target = next(
+        (item for item in load_targets(targets) if item["target_id"] == target_id),
+        None,
+    )
+    if target is None or target["action"] == "skip_disabled":
+        raise WorkspaceError("target is not active in the current configuration")
+    state = _state_dir(root)
+    if _existing_pending_paths(state, target_id) is not None:
+        raise WorkspaceError("target already has a pending review")
+    return _monitor_target_from_source(
+        state,
+        target,
+        run_id,
+        [
+            "--input",
+            str(input_path),
+            "--source-url",
+            str(target["url"]),
+            "--content-type",
+            content_type,
+        ],
+        link_depth=link_depth,
+        max_links=max_links,
+    )
 
 
 def _validate_interests(value: object) -> list[dict[str, object]]:
@@ -2757,6 +2836,14 @@ def _parser() -> argparse.ArgumentParser:
     check_parser.add_argument("--link-depth", type=int, default=_DEFAULT_LINK_DEPTH)
     check_parser.add_argument("--max-links", type=int, default=_MAX_LINKS)
 
+    ingest_parser = subparsers.add_parser("ingest")
+    ingest_parser.add_argument("--target-id", required=True)
+    ingest_parser.add_argument("--run-id", required=True)
+    ingest_parser.add_argument("--input", type=Path, required=True)
+    ingest_parser.add_argument("--content-type", default="text/plain")
+    ingest_parser.add_argument("--link-depth", type=int, default=_DEFAULT_LINK_DEPTH)
+    ingest_parser.add_argument("--max-links", type=int, default=_MAX_LINKS)
+
     pending_parser = subparsers.add_parser("pending")
     pending_parser.add_argument("--target-id")
 
@@ -2771,9 +2858,9 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the workspace-facing orchestration command."""
     args = _parser().parse_args(argv)
-    if args.command == "check" and args.targets is None:
+    if args.command in {"check", "ingest"} and args.targets is None:
         print(
-            json.dumps({"error": "--targets is required for check"}),
+            json.dumps({"error": f"--targets is required for {args.command}"}),
             file=sys.stderr,
         )
         return 2
@@ -2783,6 +2870,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.workspace,
                 args.targets,
                 compact=args.compact,
+                link_depth=args.link_depth,
+                max_links=args.max_links,
+            )
+        elif args.command == "ingest":
+            result = ingest_agent_fetch(
+                args.workspace,
+                args.targets,
+                target_id=args.target_id,
+                run_id=args.run_id,
+                input_path=args.input,
+                content_type=args.content_type,
                 link_depth=args.link_depth,
                 max_links=args.max_links,
             )
