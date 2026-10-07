@@ -9,6 +9,7 @@ import ipaddress
 import os
 import runpy
 import ssl
+import tomllib
 from argparse import Namespace
 from io import BytesIO
 from pathlib import Path
@@ -30,6 +31,13 @@ from monitor import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+
+def test_user_agent_matches_project_version() -> None:
+    with Path("pyproject.toml").open("rb") as stream:
+        project_version = tomllib.load(stream)["project"]["version"]
+
+    assert monitor._USER_AGENT == f"wsum/{project_version}"
 
 
 def test_normalize_html_removes_markup_and_scripts() -> None:
