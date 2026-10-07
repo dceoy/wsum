@@ -41,7 +41,6 @@ def test_user_agent_matches_project_version() -> None:
     assert f"wsum/{project_version}" == monitor._USER_AGENT
 
 
-
 @pytest.mark.parametrize(
     "value",
     [
@@ -82,7 +81,11 @@ def test_canonical_navigation_url_removes_fragment() -> None:
     ) == "https://example.com:8443/path?x=1"
 
 
-@pytest.mark.parametrize("raw", [b"{not json", b"\xff"], ids=["malformed", "invalid-utf8"])
+@pytest.mark.parametrize(
+    "raw",
+    [b"{not json", b"\xff"],
+    ids=["malformed", "invalid-utf8"],
+)
 def test_read_navigation_links_rejects_invalid_json(
     tmp_path: Path, raw: bytes
 ) -> None:
@@ -98,7 +101,9 @@ def test_read_navigation_links_rejects_invalid_json(
     [
         (b"{}", "JSON array"),
         (
-            json.dumps([f"https://example.com/{index}" for index in range(501)]).encode(),
+            json.dumps(
+                [f"https://example.com/{index}" for index in range(501)]
+            ).encode(),
             "at most 500 URLs",
         ),
     ],
@@ -151,6 +156,7 @@ def test_include_navigation_links_reuses_existing_marker(tmp_path: Path) -> None
 
     assert monitor._include_navigation_links(original, links, path) == original
     assert set(links.values()) == {destination}
+
 
 def test_normalize_html_removes_markup_and_scripts() -> None:
     document = Document(
