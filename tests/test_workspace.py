@@ -702,9 +702,7 @@ def test_ingest_agent_fetch_without_link_manifest_marks_evidence_incomplete(
         del timeout, max_bytes
         if blocked["value"]:
             raise workspace.monitor.HTTPStatusError(403)
-        return workspace.monitor.Document(
-            b"<p>Old release</p>", url, "text/html"
-        )
+        return workspace.monitor.Document(b"<p>Old release</p>", url, "text/html")
 
     monkeypatch.setattr(workspace.monitor, "fetch_document", fetch)
     baseline_outcomes = cast(
