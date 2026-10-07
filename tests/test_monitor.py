@@ -76,9 +76,10 @@ def test_canonical_navigation_url_rejects_invalid_values(value: object) -> None:
 
 
 def test_canonical_navigation_url_removes_fragment() -> None:
-    assert monitor._canonical_navigation_url(
-        "https://example.com:8443/path?x=1#section"
-    ) == "https://example.com:8443/path?x=1"
+    assert (
+        monitor._canonical_navigation_url("https://example.com:8443/path?x=1#section")
+        == "https://example.com:8443/path?x=1"
+    )
 
 
 @pytest.mark.parametrize(
@@ -86,9 +87,7 @@ def test_canonical_navigation_url_removes_fragment() -> None:
     [b"{not json", b"\xff"],
     ids=["malformed", "invalid-utf8"],
 )
-def test_read_navigation_links_rejects_invalid_json(
-    tmp_path: Path, raw: bytes
-) -> None:
+def test_read_navigation_links_rejects_invalid_json(tmp_path: Path, raw: bytes) -> None:
     path = tmp_path / "links.json"
     path.write_bytes(raw)
 
