@@ -2584,15 +2584,14 @@ def test_main_ingest_dispatches_agent_fetch(
     fetched = tmp_path / "agent-fetch.txt"
     fetched.write_text("content\n", encoding="utf-8")
 
-    monkeypatch.setattr(
-        workspace,
-        "ingest_agent_fetch",
-        lambda *_args, **_kwargs: {  # pyright: ignore[reportUnknownLambdaType]
+    def fake_ingest(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
             "action": "unchanged",
             "target_id": target["target_id"],
             "name": "Example",
-        },
-    )
+        }
+
+    monkeypatch.setattr(workspace, "ingest_agent_fetch", fake_ingest)
     assert (
         workspace.main([
             "--workspace",
