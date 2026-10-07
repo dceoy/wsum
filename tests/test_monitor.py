@@ -2139,6 +2139,21 @@ def test_response_validation_rejects_unsafe_responses(
         monitor._validate_response(response, max_bytes=10)  # pyright: ignore[reportArgumentType, reportPrivateUsage]
 
 
+def test_response_validation_exposes_http_status() -> None:
+    response = type(
+        "Response",
+        (),
+        {
+            "status": 403,
+            "getheader": lambda _self, _name, default=None: default,  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        },
+    )()
+    with pytest.raises(monitor.HTTPStatusError, match="HTTP 403") as captured:
+        monitor._validate_response(response, max_bytes=10)  # pyright: ignore[reportArgumentType, reportPrivateUsage]
+
+    assert captured.value.status == 403
+
+
 def test_read_response_supports_read_fallback_closed_response_and_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
