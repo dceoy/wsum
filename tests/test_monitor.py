@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import builtins
 import ipaddress
+import json
 import os
 import runpy
 import ssl
@@ -39,6 +40,117 @@ def test_user_agent_matches_project_version() -> None:
 
     assert f"wsum/{project_version}" == monitor._USER_AGENT
 
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        1,
+        "",
+        " https://example.com/",
+        "https://example.com/ ",
+        "ftp://example.com/",
+        "https://",
+        "https://example.com:invalid/",
+        "https://example.com:0/",
+        "https://user:pass@example.com/",
+        "https://example.com/" + "x" * 4096,
+    ],
+    ids=[
+        "non-string",
+        "integer",
+        "empty",
+        "leading-whitespace",
+        "trailing-whitespace",
+        "unsupported-scheme",
+        "missing-host",
+        "invalid-port",
+        "zero-port",
+        "credentials",
+        "oversized",
+    ],
+)
+def test_canonical_navigation_url_rejects_invalid_values(value: object) -> None:
+    with pytest.raises(MonitorError, match=r"invalid URL|oversized URL"):
+        monitor._canonical_navigation_url(value)
+
+
+def test_canonical_navigation_url_removes_fragment() -> None:
+    assert monitor._canonical_navigation_url(
+        "https://example.com:8443/path?x=1#section"
+    ) == "https://example.com:8443/path?x=1"
+
+
+@pytest.mark.parametrize("raw", [b"{not json", b"\xff"], ids=["malformed", "invalid-utf8"])
+def test_read_navigation_links_rejects_invalid_json(
+    tmp_path: Path, raw: bytes
+) -> None:
+    path = tmp_path / "links.json"
+    path.write_bytes(raw)
+
+    with pytest.raises(MonitorError, match="UTF-8 JSON array"):
+        monitor._read_navigation_links(path)
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (b"{}", "JSON array"),
+        (
+            json.dumps([f"https://example.com/{index}" for index in range(501)]).encode(),
+            "at most 500 URLs",
+        ),
+    ],
+    ids=["not-array", "too-many"],
+)
+def test_read_navigation_links_rejects_invalid_array(
+    tmp_path: Path, raw: bytes, message: str
+) -> None:
+    path = tmp_path / "links.json"
+    path.write_bytes(raw)
+
+    with pytest.raises(MonitorError, match=message):
+        monitor._read_navigation_links(path)
+
+
+def test_read_navigation_links_deduplicates_fragments(tmp_path: Path) -> None:
+    path = tmp_path / "links.json"
+    path.write_text(
+        json.dumps(
+            [
+                "https://example.com/path#first",
+                "https://example.com/path#second",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert monitor._read_navigation_links(path) == ["https://example.com/path"]
+
+
+def test_include_navigation_links_returns_text_for_empty_manifest(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "links.json"
+    path.write_text("[]", encoding="utf-8")
+    links = monitor.LinkCollection()
+    original = "existing normalized text\n"
+
+    assert monitor._include_navigation_links(original, links, path) == original
+    assert not links
+
+
+def test_include_navigation_links_reuses_existing_marker(tmp_path: Path) -> None:
+    destination = "https://example.com/page"
+    digest = monitor.hashlib.sha256(destination.encode("utf-8")).hexdigest()
+    original = f"[a:href:sha256:{digest}]"
+    path = tmp_path / "links.json"
+    path.write_text(json.dumps([destination]), encoding="utf-8")
+    links = monitor.LinkCollection()
+
+    assert monitor._include_navigation_links(original, links, path) == original
+    assert set(links.values()) == {destination}
 
 def test_normalize_html_removes_markup_and_scripts() -> None:
     document = Document(
