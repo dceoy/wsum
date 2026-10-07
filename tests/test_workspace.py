@@ -644,7 +644,7 @@ def test_ingest_agent_fetch_rejects_invalid_state(
         state.mkdir(parents=True)
         _write_review_transaction(state, target_id=str(target["target_id"]))
 
-    with pytest.raises(WorkspaceError, match="active|pending"):
+    with pytest.raises(WorkspaceError, match=r"active|pending"):
         workspace.ingest_agent_fetch(
             tmp_path,
             tmp_path / "targets.csv",
