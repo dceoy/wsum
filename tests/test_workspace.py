@@ -541,6 +541,120 @@ def test_check_batches_targets_and_contains_failures(
 
 
 @pytest.mark.parametrize(
+    ("status", "expected_action"),
+    [(403, "agent_fetch_required"), (429, "error")],
+    ids=["forbidden", "other-status"],
+)
+def test_check_routes_only_forbidden_to_agent_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    expected_action: str,
+) -> None:
+    _write_targets(tmp_path / "targets.csv", "Example,https://example.com/,,true\n")
+    monkeypatch.setattr(workspace, "_new_run_id", lambda: _RUN_ID)
+
+    def forbidden(
+        _state: Path,
+        _target: dict[str, object],
+        _run_id: str,
+        *,
+        link_depth: int,
+        max_links: int,
+    ) -> dict[str, object]:
+        del link_depth, max_links
+        raise workspace.monitor.HTTPStatusError(status)
+
+    monkeypatch.setattr(workspace, "_monitor_target", forbidden)
+    result = check(tmp_path, tmp_path / "targets.csv")
+    outcome = cast("list[dict[str, object]]", result["targets"])[0]
+
+    assert outcome["action"] == expected_action
+    if status == 403:
+        assert outcome == {
+            "action": "agent_fetch_required",
+            "run_id": _RUN_ID,
+            "target_id": load_targets(tmp_path / "targets.csv")[0]["target_id"],
+            "name": "Example",
+            "url": "https://example.com/",
+            "status": 403,
+        }
+    else:
+        assert outcome["error"] == "fetch failed: HTTP 429"
+
+
+def test_ingest_agent_fetch_uses_normal_monitor_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_targets(tmp_path / "targets.csv", "Example,https://example.com/,,true\n")
+    target = load_targets(tmp_path / "targets.csv")[0]
+    fetched = tmp_path / "agent-fetch.txt"
+    fetched.write_text("agent fetched content\n", encoding="utf-8")
+
+    def fake_monitor(args: argparse.Namespace) -> dict[str, object]:
+        assert args.input == fetched
+        assert args.source_url == "https://example.com/"
+        assert args.content_type == "text/plain"
+        Path(args.output).write_text("agent fetched content\n", encoding="utf-8")
+        return {
+            "source_url": args.source_url,
+            "content_type": args.content_type,
+            "links": {},
+            "status": "baseline",
+            "sha256": hashlib.sha256(b"agent fetched content\n").hexdigest(),
+            "previous_sha256": "",
+            "diff": "",
+            "diff_truncated": False,
+        }
+
+    monkeypatch.setattr(workspace.monitor, "run", fake_monitor)
+    result = workspace.ingest_agent_fetch(
+        tmp_path,
+        tmp_path / "targets.csv",
+        target_id=str(target["target_id"]),
+        run_id=_RUN_ID,
+        input_path=fetched,
+    )
+
+    assert result["action"] == "baseline_created"
+    snapshot = (
+        tmp_path
+        / "internal"
+        / "state"
+        / "snapshots"
+        / f"{target['target_id']}.txt"
+    )
+    assert snapshot.read_text(encoding="utf-8") == "agent fetched content\n"
+
+
+@pytest.mark.parametrize("mode", ["inactive", "pending"], ids=["inactive", "pending"])
+def test_ingest_agent_fetch_rejects_invalid_state(
+    tmp_path: Path, mode: str
+) -> None:
+    enabled = mode != "inactive"
+    _write_targets(
+        tmp_path / "targets.csv",
+        f"Example,https://example.com/,,{str(enabled).lower()}\n",
+    )
+    target = load_targets(tmp_path / "targets.csv")[0]
+    fetched = tmp_path / "agent-fetch.txt"
+    fetched.write_text("content\n", encoding="utf-8")
+    if mode == "pending":
+        state = tmp_path / "internal" / "state"
+        state.mkdir(parents=True)
+        _write_review_transaction(state, target_id=str(target["target_id"]))
+
+    with pytest.raises(WorkspaceError, match="active|pending"):
+        workspace.ingest_agent_fetch(
+            tmp_path,
+            tmp_path / "targets.csv",
+            target_id=str(target["target_id"]),
+            run_id=_RUN_ID,
+            input_path=fetched,
+        )
+
+
+@pytest.mark.parametrize(
     ("link_depth", "max_links", "message"),
     [
         (-1, workspace._MAX_LINKS, "link_depth"),
@@ -2462,6 +2576,47 @@ def test_main_success_emits_json(
     )
     captured = capsys.readouterr()
     assert captured.out.strip() == '{"reviews": []}'
+    assert not captured.err
+
+
+def test_main_ingest_dispatches_agent_fetch(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    targets = tmp_path / "targets.csv"
+    _write_targets(targets, "Example,https://example.com/,,true\n")
+    target = load_targets(targets)[0]
+    fetched = tmp_path / "agent-fetch.txt"
+    fetched.write_text("content\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        workspace,
+        "ingest_agent_fetch",
+        lambda *_args, **_kwargs: {  # pyright: ignore[reportUnknownLambdaType]
+            "action": "unchanged",
+            "target_id": target["target_id"],
+            "name": "Example",
+        },
+    )
+    assert (
+        workspace.main([
+            "--workspace",
+            str(tmp_path),
+            "--targets",
+            str(targets),
+            "ingest",
+            "--target-id",
+            str(target["target_id"]),
+            "--run-id",
+            _RUN_ID,
+            "--input",
+            str(fetched),
+        ])
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert '"action": "unchanged"' in captured.out
     assert not captured.err
 
 
