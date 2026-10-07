@@ -618,19 +618,13 @@ def test_ingest_agent_fetch_uses_normal_monitor_flow(
 
     assert result["action"] == "baseline_created"
     snapshot = (
-        tmp_path
-        / "internal"
-        / "state"
-        / "snapshots"
-        / f"{target['target_id']}.txt"
+        tmp_path / "internal" / "state" / "snapshots" / f"{target['target_id']}.txt"
     )
     assert snapshot.read_text(encoding="utf-8") == "agent fetched content\n"
 
 
 @pytest.mark.parametrize("mode", ["inactive", "pending"], ids=["inactive", "pending"])
-def test_ingest_agent_fetch_rejects_invalid_state(
-    tmp_path: Path, mode: str
-) -> None:
+def test_ingest_agent_fetch_rejects_invalid_state(tmp_path: Path, mode: str) -> None:
     enabled = mode != "inactive"
     _write_targets(
         tmp_path / "targets.csv",
