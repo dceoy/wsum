@@ -241,6 +241,14 @@ class MonitorError(RuntimeError):
     """Expected input, network, or normalization failure."""
 
 
+class HTTPStatusError(MonitorError):
+    """HTTP response rejected because its status is not successful."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+        super().__init__(f"fetch failed: HTTP {status}")
+
+
 @dataclass(frozen=True, slots=True)
 class Document:
     """Fetched or local document bytes plus source metadata."""
@@ -905,8 +913,7 @@ def _validate_response(
     response: http.client.HTTPResponse, max_bytes: int
 ) -> int | None:
     if not 200 <= response.status < 300:
-        message = f"fetch failed: HTTP {response.status}"
-        raise MonitorError(message)
+        raise HTTPStatusError(response.status)
     content_encoding = (response.getheader("Content-Encoding", "") or "").strip()
     if content_encoding.lower() not in {"", "identity"}:
         raise MonitorError("compressed HTTP content encoding is not supported")
