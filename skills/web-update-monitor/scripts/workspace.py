@@ -711,7 +711,7 @@ def _monitor_target_from_source(
             and result.get("status") == "changed"
             and (has_links or link_evidence_incomplete)
         ):
-            link_review = (
+            link_review: dict[str, object] = (
                 _follow_added_links(
                     result,
                     _read_snapshot(previous) or b"",

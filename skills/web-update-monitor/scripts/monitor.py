@@ -541,15 +541,18 @@ def _read_navigation_links(path: Path | None) -> list[str]:
         path, _MAX_NAVIGATION_LINKS_FILE_BYTES, "--navigation-links"
     )
     try:
-        value = json.loads(raw.decode("utf-8"))
+        value: object = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise MonitorError("--navigation-links must be a UTF-8 JSON array") from exc
-    if not isinstance(value, list) or len(value) > _MAX_NAVIGATION_LINKS:
+    if not isinstance(value, list):
+        raise MonitorError("--navigation-links must contain a JSON array")
+    items = cast("list[object]", value)
+    if len(items) > _MAX_NAVIGATION_LINKS:
         raise MonitorError("--navigation-links must contain at most 500 URLs")
 
     destinations: list[str] = []
     seen: set[str] = set()
-    for item in value:
+    for item in items:
         destination = _canonical_navigation_url(item)
         if destination not in seen:
             seen.add(destination)
