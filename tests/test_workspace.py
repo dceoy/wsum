@@ -218,15 +218,12 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
         ],
     }
 
-    result = workspace._handle_monitor_result(
-        state, target, _changed_result(), _RUN_ID
-    )
+    result = workspace._handle_monitor_result(state, target, _changed_result(), _RUN_ID)
 
     assert result["action"] == "review"
     assert len(str(result["revision"])) == 32
     assert (
-        cast("list[dict[str, object]]", result["interests"])[0]["criteria"]
-        == "pricing"
+        cast("list[dict[str, object]]", result["interests"])[0]["criteria"] == "pricing"
     )
     pending = json.loads((state / "pending" / "example" / "state.json").read_text())
     assert pending["target_id"] == "example"
@@ -838,14 +835,11 @@ def test_failed_commit_marker_keeps_undo_available_for_recovery(
     monkeypatch.setattr(workspace, "_fsync_directory", fail_commit_sync)
     monkeypatch.setattr(workspace, "_write_temporary_file", fail_rollback_write)
 
-    payload = {
-        "target_id": "example",
-        "run_id": _RUN_ID,
-        "revision": "b" * 32,
-        "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
-        "candidate_sha256": hashlib.sha256(b"third\n").hexdigest(),
-        "diff_truncated": False,
-    }
+    payload = _pending_payload(
+        revision="b" * 32,
+        expected_sha256=hashlib.sha256(b"old\n").hexdigest(),
+        candidate_sha256=hashlib.sha256(b"third\n").hexdigest(),
+    )
     with pytest.raises(WorkspaceError, match="rollback could not be completed"):
         workspace._write_pending_transaction(  # pyright: ignore[reportPrivateUsage]
             state, payload, b"third\n"
@@ -871,14 +865,11 @@ def test_failed_commit_marker_keeps_undo_available_for_recovery(
 
 
 def _leave_ambiguous_replacement(state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = {
-        "target_id": "example",
-        "run_id": _RUN_ID,
-        "revision": "b" * 32,
-        "expected_sha256": hashlib.sha256(b"old\n").hexdigest(),
-        "candidate_sha256": hashlib.sha256(b"third\n").hexdigest(),
-        "diff_truncated": False,
-    }
+    payload = _pending_payload(
+        revision="b" * 32,
+        expected_sha256=hashlib.sha256(b"old\n").hexdigest(),
+        candidate_sha256=hashlib.sha256(b"third\n").hexdigest(),
+    )
     retirement_error = "injected undo retirement failure"
 
     def fail_undo_retirement(_state: Path, _target_id: str) -> None:
@@ -1391,7 +1382,7 @@ def test_pending_listing_filesystem_edges(  # ruff: ignore[complex-structure]
             tmp_path, targets=tmp_path / "targets.csv"
         ) == {"reviews": []}
         return
-    with pytest.raises(WorkspaceError, match="unsafe entry"):
+    with pytest.raises(WorkspaceError, match="unsupported entry"):
         workspace.pending_reviews(tmp_path, targets=tmp_path / "targets.csv")
 
 
@@ -1429,8 +1420,7 @@ def test_pending_reviews_grouped_without_targets_uses_persisted_context(
     assert review["name"] == "Persisted"
     assert review["url"] == "https://example.com/"
     assert (
-        cast("list[dict[str, object]]", review["interests"])[0]["criteria"]
-        == "pricing"
+        cast("list[dict[str, object]]", review["interests"])[0]["criteria"] == "pricing"
     )
     assert review["diff"] == "persisted diff"
 
@@ -1919,6 +1909,33 @@ def test_promote_snapshot_retries_idempotently(tmp_path: Path) -> None:
 _REVISION = "a" * 32
 
 
+def _pending_payload(**changes: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "candidate_sha256": "b" * 64,
+        "diff": "diff",
+        "diff_truncated": False,
+        "expected_sha256": None,
+        "interests": [
+            {
+                "name": "Example",
+                "publisher": "",
+                "category": "",
+                "keywords": "",
+                "criteria": "pricing",
+                "priority": None,
+                "enabled": True,
+            }
+        ],
+        "name": "Example",
+        "revision": _REVISION,
+        "run_id": _RUN_ID,
+        "target_id": "example",
+        "url": "https://example.com/",
+    }
+    payload.update(changes)
+    return payload
+
+
 def _replace_record(**changes: object) -> dict[str, object]:
     record: dict[str, object] = {
         "group_dir_existed": False,
@@ -2399,7 +2416,7 @@ def test_optional_lstat_wraps_permission_error(
         (
             _replace_record(
                 old_state=base64.b64encode(
-                    b'{"revision":"' + b"a" * 32 + b'"}'
+                    json.dumps(_pending_payload()).encode()
                 ).decode()
             ),
             _REVISION,
@@ -2486,33 +2503,6 @@ def test_read_decision_rejects_invalid_stdin(
     )
     with pytest.raises(WorkspaceError, match="stdin|object"):  # ruff: ignore[pytest-raises-ambiguous-pattern]
         workspace._read_decision()  # pyright: ignore[reportPrivateUsage]
-
-
-def _pending_payload(**changes: object) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "candidate_sha256": "b" * 64,
-        "diff": "diff",
-        "diff_truncated": False,
-        "expected_sha256": None,
-        "interests": [
-            {
-                "name": "Example",
-                "publisher": "",
-                "category": "",
-                "keywords": "",
-                "criteria": "pricing",
-                "priority": None,
-                "enabled": True,
-            }
-        ],
-        "name": "Example",
-        "revision": _REVISION,
-        "run_id": _RUN_ID,
-        "target_id": "example",
-        "url": "https://example.com/",
-    }
-    payload.update(changes)
-    return payload
 
 
 def _grouped_pending(state: Path, payload: dict[str, object], data: bytes) -> Path:
@@ -2895,7 +2885,7 @@ def test_report_write_validates_and_persists_atomically(
             def fail_report_fsync(path: Path) -> None:
                 if path.name == "report":
                     message = "injected"
-            raise OSError(message)  # ruff: ignore[raw-string-in-exception]
+                    raise OSError(message)
                 original_fsync(path)
 
             monkeypatch.setattr(workspace, "_fsync_directory", fail_report_fsync)
@@ -2936,18 +2926,22 @@ def test_remove_pending_wraps_removal_and_sync_failures(
     target = state / "pending" / "example"
     target.mkdir(parents=True)
     (target / "state.json").write_text("{}\n", encoding="utf-8")
+
+    def fail_remove(_path: Path) -> None:
+        message = "injected"
+        raise OSError(message)
+
+    original_fsync = workspace._fsync_directory
+
+    def fail_pending_fsync(path: Path) -> None:
+        if path == target.parent:
+            fail_remove(path)
+        original_fsync(path)
+
     if fault == "grouped-remove":
-        monkeypatch.setattr(
-            workspace.shutil,
-            "rmtree",
-            lambda _path: (_ for _ in ()).throw(OSError("injected")),
-        )
+        monkeypatch.setattr(workspace.shutil, "rmtree", fail_remove)
     else:
-        monkeypatch.setattr(
-            workspace,
-            "_fsync_directory",
-            lambda _path: (_ for _ in ()).throw(OSError("injected")),
-        )
+        monkeypatch.setattr(workspace, "_fsync_directory", fail_pending_fsync)
 
     with pytest.raises(WorkspaceError, match="cannot remove pending transaction"):
         workspace._remove_pending(state, "example")
@@ -2974,7 +2968,7 @@ def test_pending_file_wraps_atomic_write_failures(
         )
         expected = "cannot fsync pending directory"
     with pytest.raises(WorkspaceError, match=expected):
-        workspace._write_pending_file(destination, {"k": "v"})  # pyright: ignore[reportPrivateUsage]
+        workspace._write_pending_file(destination, _pending_payload())  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize(
@@ -3237,9 +3231,7 @@ def test_restore_pending_replacement_restores_current_layout(
         group_dir_existed=group_existed,
         old_state=None if old_state is None else base64.b64encode(old_state).decode(),
         old_candidate=(
-            None
-            if old_candidate is None
-            else base64.b64encode(old_candidate).decode()
+            None if old_candidate is None else base64.b64encode(old_candidate).decode()
         ),
     )
 
@@ -3433,7 +3425,11 @@ def test_replacement_matches_commit_accepts_valid_durable_replacement(
         _replace_record(old_state=base64.b64encode(b"{").decode()),
         _replace_record(old_state=base64.b64encode(b"\xff").decode()),
         _replace_record(old_state=base64.b64encode(b"[]").decode()),
-        _replace_record(old_state=base64.b64encode(b'{"revision":"bad"}').decode()),
+        _replace_record(
+            old_state=base64.b64encode(
+                json.dumps(_pending_payload(revision="bad")).encode()
+            ).decode()
+        ),
     ],
     ids=["invalid-json", "invalid-utf8", "not-object", "invalid-revision"],
 )
@@ -3444,9 +3440,7 @@ def test_replacement_previous_revision_rejects_corrupt_backup(
         workspace._replacement_previous_revision(record)  # pyright: ignore[reportPrivateUsage]
 
 
-@pytest.mark.parametrize(
-    "mode", ["no-record", "commit-only", "cleanup", "replace"]
-)
+@pytest.mark.parametrize("mode", ["no-record", "commit-only", "cleanup", "replace"])
 def test_recover_pending_completes_current_recovery_records(
     tmp_path: Path, mode: str
 ) -> None:
@@ -3689,17 +3683,21 @@ def test_read_pending_rejects_extra_fields_and_bad_run_ids(
         workspace._read_pending(state, "example")
 
 
-def test_read_pending_backfills_legacy_missing_run_id(tmp_path: Path) -> None:
+@pytest.mark.parametrize("field", ["run_id", "interests"])
+def test_read_pending_rejects_missing_required_context(
+    tmp_path: Path, field: str
+) -> None:
     state = tmp_path / "internal" / "state"
     target = state / "pending" / "example"
     target.mkdir(parents=True)
     payload = _pending_payload()
-    payload.pop("run_id")
+    payload.pop(field)
     path = target / "state.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    pending = workspace._read_pending(state, "example")  # pyright: ignore[reportPrivateUsage]
-    assert isinstance(pending.get("run_id"), str)
-    assert json.loads(path.read_text(encoding="utf-8"))["run_id"] == pending["run_id"]
+    original = json.dumps(payload)
+    path.write_text(original, encoding="utf-8")
+    with pytest.raises(WorkspaceError, match="pending decision is invalid"):
+        workspace._read_pending(state, "example")
+    assert path.read_text(encoding="utf-8") == original
 
 
 def test_load_targets_rejects_non_string_csv_values(
@@ -3885,7 +3883,8 @@ def test_restore_pending_replacement_rejects_unsafe_state_or_sync_failure(
 
     def fail_pending(path: Path) -> None:
         if path == pending:
-            raise OSError("injected")
+            message = "injected"
+            raise OSError(message)
         original_fsync(path)
 
     monkeypatch.setattr(workspace, "_fsync_directory", fail_pending)
@@ -3908,7 +3907,7 @@ def test_install_pending_replacement_checks_readback(
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
     (state / "pending").mkdir()
-    monkeypatch.setattr(workspace, "_fsync_directory", lambda _path: None)
+    monkeypatch.setattr(workspace, "_fsync_directory", lambda _path: None)  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
     if mismatch == "candidate":
         original_read = workspace._read_text_bytes
         candidate_path = state / "pending" / "example" / "candidate.txt"
@@ -3925,7 +3924,7 @@ def test_install_pending_replacement_checks_readback(
         monkeypatch.setattr(workspace, "_read_text_bytes", mismatch_read)
         expected = "pending candidate read-back mismatch"
     else:
-        monkeypatch.setattr(workspace, "_read_pending", lambda *_args: {})
+        monkeypatch.setattr(workspace, "_read_pending", lambda *_args: {})  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
         expected = "pending decision read-back mismatch"
 
     with pytest.raises(WorkspaceError, match=expected):
@@ -3956,7 +3955,7 @@ def test_handle_monitor_result_rejects_mismatched_candidate_digest(
 ) -> None:
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
-    target = {"target_id": "example", "name": "Example"}
+    target = {"target_id": "example", "name": "Example", "interests": [_interest()]}
     result = {
         "status": "changed",
         "sha256": "a" * 64,
@@ -5138,10 +5137,13 @@ def test_unavailable_configuration_keeps_saved_review_and_direct_finalize(
         item["name"] for item in cast("list[dict[str, object]]", review["interests"])
     ] == ["First", "Second"]
     assert [path.read_bytes() for path in (metadata, candidate, snapshot)] == before
-    assert finalize(
-        tmp_path,
-        {"target_id": target_id, "revision": review["revision"], "material": False},
-    )["action"] == "finalized"
+    assert (
+        finalize(
+            tmp_path,
+            {"target_id": target_id, "revision": review["revision"], "material": False},
+        )["action"]
+        == "finalized"
+    )
 
 
 @pytest.mark.parametrize(
@@ -5181,7 +5183,7 @@ def test_unavailable_configuration_keeps_saved_review_and_direct_finalize(
         "float-priority",
     ],
 )
-def test_malformed_interests_fail_reads_backfill_and_committed_recovery(
+def test_malformed_interests_fail_reads_and_committed_recovery(
     tmp_path: Path, interests: object
 ) -> None:
     target_id, metadata, _, _ = _create_interest_review(tmp_path)
@@ -5193,23 +5195,16 @@ def test_malformed_interests_fail_reads_backfill_and_committed_recovery(
     assert not workspace._replacement_matches_commit(
         tmp_path / "internal" / "state", target_id, {"revision": payload["revision"]}
     )
-    payload.pop("run_id")
-    metadata.write_text(json.dumps(payload), encoding="utf-8")
-    before = metadata.read_bytes()
-    with pytest.raises(WorkspaceError, match="interests are invalid"):
-        workspace._read_pending(tmp_path / "internal" / "state", target_id)
-    assert metadata.read_bytes() == before
 
 
 @pytest.mark.parametrize("links", [True, False])
-def test_new_interests_pending_backfill_and_replacement_matching(
+def test_current_pending_context_and_replacement_matching(
     tmp_path: Path, links: bool
 ) -> None:
     target_id, metadata, _, _ = _create_interest_review(tmp_path)
     payload = json.loads(metadata.read_text(encoding="utf-8"))
     if not links:
         payload.pop("link_review")
-    payload.pop("run_id")
     metadata.write_text(json.dumps(payload), encoding="utf-8")
     pending = workspace._read_pending(tmp_path / "internal" / "state", target_id)
     assert pending["interests"] == payload["interests"]
@@ -5434,3 +5429,41 @@ def test_check_reconciliation_uses_one_configuration_snapshot(
         == "skipped"
     )
     assert calls == 1
+
+
+@pytest.mark.parametrize("entry", ["file", "symlink"])
+def test_remove_pending_rejects_unsafe_target(tmp_path: Path, entry: str) -> None:
+    state = tmp_path / "internal" / "state"
+    target = state / "pending" / "example"
+    target.parent.mkdir(parents=True)
+    if entry == "file":
+        target.write_text("preserve", encoding="utf-8")
+    else:
+        target.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(WorkspaceError, match="pending target must be"):
+        workspace._remove_pending(state, "example")
+    assert target.exists()
+
+
+def test_restore_existing_pending_group_preserves_undo_on_sync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "internal" / "state"
+    target = state / "pending" / "example"
+    target.mkdir(parents=True)
+    original_fsync = workspace._fsync_directory
+
+    def fail_group_sync(path: Path) -> None:
+        if path == target:
+            message = "injected"
+            raise OSError(message)
+        original_fsync(path)
+
+    monkeypatch.setattr(workspace, "_fsync_directory", fail_group_sync)
+    record = _replace_record(group_dir_existed=True)
+    workspace._write_recovery_record(state, record)
+    with pytest.raises(
+        WorkspaceError, match="cannot fsync restored pending transaction"
+    ):
+        workspace._recover_pending(state, "example")
+    assert workspace._read_recovery_record(state, "example") == record

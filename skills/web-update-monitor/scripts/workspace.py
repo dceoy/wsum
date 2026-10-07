@@ -400,9 +400,7 @@ def load_targets(targets: str | Path) -> list[dict[str, object]]:
     return _group_target_interests(rows)
 
 
-def _existing_pending_paths(
-    state: Path, target_id: str
-) -> tuple[Path, Path] | None:
+def _existing_pending_paths(state: Path, target_id: str) -> tuple[Path, Path] | None:
     """Resolve the current pending transaction paths without creating them."""
     target_id = _validate_target_id(target_id)
     pending = _ensure_directory(
@@ -1309,9 +1307,7 @@ def _restore_pending_replacement(state: Path, record: Mapping[str, object]) -> N
     old_state = _decode_recovery_backup(record.get("old_state"))
     old_candidate = _decode_recovery_backup(record.get("old_candidate"))
     if record["group_dir_existed"]:
-        target = _ensure_directory(
-            target, "pending target directory", sync_parent=True
-        )
+        target = _ensure_directory(target, "pending target directory", sync_parent=True)
         _remove_pending_write_temporaries(target)
         _restore_transaction_file(target / "candidate.txt", old_candidate, "candidate")
         _restore_transaction_file(target / "state.json", old_state, "pending decision")
@@ -1735,7 +1731,7 @@ def check(
 
 
 def _validate_interests(value: object) -> list[dict[str, object]]:
-    """Validate the authoritative nested interest schema without scalar fallback."""
+    """Validate the authoritative interest schema."""
     if not isinstance(value, list):
         raise WorkspaceError("pending interests are invalid")
     interests: list[dict[str, object]] = []
@@ -1858,14 +1854,7 @@ def _enabled_interests(context: Mapping[str, object]) -> list[dict[str, object]]
 def _target_review_contexts(
     targets: Sequence[Mapping[str, object]],
 ) -> dict[str, dict[str, object]]:
-    return {
-        str(target["target_id"]): {
-            "name": target["name"],
-            "url": target["url"],
-            "interests": _enabled_interests(target),
-        }
-        for target in targets
-    }
+    return {str(target["target_id"]): _review_context(target) for target in targets}
 
 
 def _current_review_contexts(
@@ -1881,14 +1870,12 @@ def _current_review_contexts(
     return _target_review_contexts(configured_targets)
 
 
-def _saved_review_context(
-    target_id: str, pending: Mapping[str, object]
-) -> dict[str, object]:
-    del target_id
+def _review_context(source: Mapping[str, object]) -> dict[str, object]:
+    """Project the display metadata and enabled interests for a review."""
     return {
-        "name": pending["name"],
-        "url": pending["url"],
-        "interests": _enabled_interests(pending),
+        "name": source["name"],
+        "url": source["url"],
+        "interests": _enabled_interests(source),
     }
 
 
@@ -1909,7 +1896,7 @@ def _pending_review(
     if current_context:
         context = dict(current_context)
     else:
-        context = _saved_review_context(target_id, pending)
+        context = _review_context(pending)
         if current_context == {}:
             context["interests"] = []
 
@@ -1932,10 +1919,7 @@ def _pending_review_handle(
     current_context: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     pending = _read_pending(state, target_id)
-    if current_context:
-        context = dict(current_context)
-    else:
-        context = _saved_review_context(target_id, pending)
+    context = dict(current_context) if current_context else _review_context(pending)
     return _compact_review({
         "action": "review",
         "run_id": pending["run_id"],

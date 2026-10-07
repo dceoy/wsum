@@ -82,20 +82,9 @@ Technical publications,https://institute.example/publications,Example Institute,
 
 These synthetic reserved example-domain URLs illustrate four interests and three URL targets; they are not live-fetch fixtures or monitoring recommendations. A check fetches the two enabled URL targets once each and reviews both enabled interests on the shared URL.
 
-Columns and parsing rules:
+Each CSV row defines an interest. `name` and `url` are required; optional fields are `publisher`, `category`, `keywords`, `criteria`, `priority`, and `enabled`. Repeated exact URLs share one fetch and review while retaining every row's metadata. A URL is monitored when any interest is enabled, and a change is material when it matters to any enabled interest.
 
-- `name` and `url` are required: a display name and absolute HTTP(S) URL without credentials or fragments. The helper derives `target_id` from the exact trimmed URL; do not supply an ID column.
-- `publisher` and `category` are optional organization and classification metadata.
-- `keywords` is optional free text providing semantic relevance hints, including spaces or slashes. Blank keywords are valid. Keywords supplement criteria; they never filter fetching, link traversal, or materiality by exact match.
-- `criteria` is optional natural language deciding which changes deserve a report. Use this canonical column name; alternate spellings are unsupported.
-- `priority` is optional: blank becomes `null`; otherwise accept only an ASCII decimal integer greater than zero. Leading zeros normalize to an integer. Reject signs, fractions, exponents, and nonnumeric text. Lower numbers indicate higher priority for display only; priority does not change fetch order, cadence, limits, or materiality.
-- `enabled` is optional and applies to each interest: trimmed, case-insensitive `true` or `false`; omitted or blank defaults to true.
-- Accept supported optional-column subsets and any column order with `name,url` present. Reject duplicate or unknown runtime CSV headers.
-- Retain UTF-8/BOM support, standard CSV quoting (including commas and newlines), and the 1 MiB file limit. Trim cell whitespace, pad missing trailing optional cells with blank, and skip completely blank records. Reject missing required values, surplus cells, and files with no targets. Validate every nonblank row, including disabled interests, before fetching or configuration-driven state changes. Row errors identify the CSV record (header is record 1) and field.
-- In `name,url,publisher,category,keywords,criteria`, reject a whole trimmed cell equal to `"` (U+0022), `〃` (U+3003), `同上`, or `同左`. Replace it with the intended explicit value; optional text may instead be blank. Embedded tokens are valid. Never inherit values from earlier rows.
-- Repeated exact trimmed URLs are supported. Each row is an interest; each distinct URL is one fetch/snapshot/review target. Preserve URL first-occurrence order and all row interests, including identical or disabled rows. Distinct URLs with colliding derived IDs fail.
-- A URL is enabled when any interest is enabled. Review only enabled interests. The display name uses the first enabled interest (or first interest when all are disabled); the full `interests` collection is authoritative.
-- Never put credentials, cookies, tokens, or secrets in URLs or CSV cells.
+Use `criteria` to describe report-worthy changes and `keywords` as semantic hints. Priority is a positive integer used for display; blank enabled values default to true. The core rejects unknown or duplicate headers, invalid rows, and whole-cell ditto values. See [the core CSV contract](skills/web-update-monitor/SKILL.md#workspace) for the complete parsing and validation rules. Never include credentials or secrets.
 
 The workspace separates user-facing artifacts from implementation data at the root. The selected target CSV is a separate input:
 
@@ -118,18 +107,13 @@ Users normally read only `output/`; `internal/` is managed by the skills and sho
 
 ### Generated files
 
-The workspace contains user-facing reports and internal state. The target CSV is a separate user-facing input:
+- `output/report/<run-id>.md`: one Markdown report per check run with material changes.
+- `internal/state/snapshots/<target-id>.txt`: the accepted normalized baseline.
+- `internal/state/pending/<target-id>/`: the candidate and review context retained until finalization.
+- `internal/state/recovery/`: durable transaction records for interrupted writes.
+- `internal/evidence/<ingestion-id>/`: optional captured evidence and commit receipt for wiki compilation.
 
-- selected target CSV: the source of truth for monitored targets in the core workflow. The agent may create or edit the selected file when the user changes monitoring configuration. Composite integrations may generate a CSV from an external authoritative source.
-- `output/report/<run-id>.md`: the user-facing output. One report is created per `check` run only when at least one material change is finalized. The run ID has the form `YYYYMMDDTHHMMSSZ-xxxxxxxx`. Material targets from the same run are merged into this file.
-- `internal/state/snapshots/<target-id>.txt`: the accepted normalized baseline for each target. A first observation creates it; later finalized observations replace it atomically, including non-material changes.
-- `internal/state/pending/<target-id>/candidate.txt`: the normalized changed candidate awaiting semantic review.
-- `internal/state/pending/<target-id>/state.json`: review transaction state linking the candidate to its run, revision, expected baseline hash, candidate hash, diff-truncation status, enabled-interest context, and bounded linked-document evidence or individual child errors. Interest metadata is normalized to exactly `name,publisher,category,keywords,criteria,priority,enabled`; text is trimmed, unspecified text is blank, priority is an integer or null, and enabled is Boolean. The complete serialized pending record is bounded by the existing 40 MiB transaction-backup ceiling, including JSON escaping and object overhead; interests have no separate 1 MiB serialized cap.
-- `internal/evidence/<ingestion-id>/`: optional captured-evidence bundles (`metadata.json`, `parent.txt`, `diff.txt`, `links.json`, `committed.json`) written only by `finalize --archive-evidence` for material decisions. These are supported output artifacts under `internal/` but outside mutable state; consumers accept only digest-verified bundles with a receipt and never read internal pending files. Evidence is never pruned automatically, so surface its storage growth.
-
-Each `internal/state/pending/<target-id>/` directory is one uncommitted review transaction. It survives the `check` → review → `finalize` boundary and is removed as a directory after successful finalization. `internal/state/snapshots/` is the only core state that persists across completed transactions.
-
-The helper may briefly create hidden `*.tmp` files next to the report, snapshot, or pending-state file being replaced. Keeping these temporary files in the destination directory preserves same-filesystem atomic replacement; they are not collected under a shared `internal/state/tmp/`.
+The core owns internal files and uses temporary files beside their destinations for atomic replacement. See [the core skill](skills/web-update-monitor/SKILL.md) for schema, limits, and recovery details.
 
 ## Agent workflow
 

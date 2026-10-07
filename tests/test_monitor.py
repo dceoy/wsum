@@ -905,10 +905,10 @@ def _make_pdf_with_link(content: bytes, *, uri: str) -> bytes:
 
 def test_normalize_pdf_bounds_expansion_and_restores_pypdf_limits() -> None:
     pytest.importorskip("pypdf")
-    from pypdf import filters  # ruff: ignore[import-outside-top-level]
+    from pypdf import Configuration  # ruff: ignore[import-outside-top-level]
 
-    original = filters.ZLIB_MAX_OUTPUT_LENGTH
-    recovery_original = filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH
+    original = Configuration.zlib_maximum_output_length
+    recovery_original = Configuration.zlib_maximum_recovery_input_length
     pdf = _make_pdf(b"q\n" * 2_000, compressed=True)
 
     with pytest.raises(MonitorError, match="PDF"):
@@ -918,8 +918,8 @@ def test_normalize_pdf_bounds_expansion_and_restores_pypdf_limits() -> None:
             max_pdf_extracted_chars=1_000,
         )
 
-    assert original == filters.ZLIB_MAX_OUTPUT_LENGTH
-    assert recovery_original == filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH
+    assert original == Configuration.zlib_maximum_output_length
+    assert recovery_original == Configuration.zlib_maximum_recovery_input_length
 
 
 def test_normalize_valid_pdf_extracts_text() -> None:
@@ -1057,14 +1057,14 @@ def test_normalize_pdf_bounds_structure(
 
 def test_pypdf_recovery_input_limit_is_applied_and_restored() -> None:
     pytest.importorskip("pypdf")
-    from pypdf import filters  # ruff: ignore[import-outside-top-level]
+    from pypdf import Configuration, filters  # ruff: ignore[import-outside-top-level]
 
-    original = filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH
+    original = Configuration.zlib_maximum_recovery_input_length
     with monitor._pypdf_output_limits(2):  # pyright: ignore[reportPrivateUsage]
-        assert filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH == 2
+        assert Configuration.zlib_maximum_recovery_input_length == 2
         with pytest.raises(MonitorError, match="recovery input"):
             filters.decompress(b"\x00" * 10)
-    assert original == filters.ZLIB_MAX_RECOVERY_INPUT_LENGTH
+    assert original == Configuration.zlib_maximum_recovery_input_length
 
 
 def test_normalize_pdf_bounds_extracted_text() -> None:
@@ -3426,3 +3426,19 @@ def test_normalization_keeps_oversized_navigation_links_as_omitted_evidence(
     assert links.omitted_hashes == {digest}
     assert f"sha256:{digest}" in normalized
     assert destination not in normalized
+
+
+def test_pdf_parser_failure_is_reported_as_monitor_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pypdf  # ruff: ignore[import-outside-top-level]
+
+    def fail_reader(*_args: object, **_kwargs: object) -> None:
+        message = "malformed PDF"
+        raise ValueError(message)
+
+    monkeypatch.setattr(pypdf, "PdfReader", fail_reader)
+    with pytest.raises(MonitorError, match="PDF could not be normalized safely"):
+        normalize_document(
+            Document(b"%PDF-1.7", "https://example.com/file.pdf", "application/pdf")
+        )
