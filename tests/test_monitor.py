@@ -101,9 +101,9 @@ def test_read_navigation_links_rejects_invalid_json(
     [
         (b"{}", "JSON array"),
         (
-            json.dumps(
-                [f"https://example.com/{index}" for index in range(501)]
-            ).encode(),
+            json.dumps([
+                f"https://example.com/{index}" for index in range(501)
+            ]).encode(),
             "at most 500 URLs",
         ),
     ],
@@ -122,12 +122,10 @@ def test_read_navigation_links_rejects_invalid_array(
 def test_read_navigation_links_deduplicates_fragments(tmp_path: Path) -> None:
     path = tmp_path / "links.json"
     path.write_text(
-        json.dumps(
-            [
-                "https://example.com/path#first",
-                "https://example.com/path#second",
-            ]
-        ),
+        json.dumps([
+            "https://example.com/path#first",
+            "https://example.com/path#second",
+        ]),
         encoding="utf-8",
     )
 
