@@ -2,10 +2,10 @@
 
 import json
 import sys
-from types import ModuleType
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 
 import gws
 import pytest
@@ -101,15 +101,15 @@ def test_delivery_ledger_fail_closed(tmp_path: Path) -> None:
     path.write_text('{"version":1,"reports":{}}')
     report = tmp_path / "20261009T000000Z-abcdef12.md"
     report.write_text("report")
-    assert gws.ledger(path, report, False)["delivered"] is False
-    gws.ledger(path, report, True)
-    assert gws.ledger(path, report, False)["delivered"] is True
+    assert gws.ledger(path, report, record=False)["delivered"] is False
+    gws.ledger(path, report, record=True)
+    assert gws.ledger(path, report, record=False)["delivered"] is True
     report.write_text("mutated")
     with pytest.raises(gws.GwsError, match="changed"):
-        gws.ledger(path, report, False)
+        gws.ledger(path, report, record=False)
     path.write_text('{"version":1,"reports":{},"extra":0}')
     with pytest.raises(gws.GwsError, match="invalid"):
-        gws.ledger(path, report, False)
+        gws.ledger(path, report, record=False)
 
 
 def test_project_atomic_with_core_validation(
@@ -123,7 +123,7 @@ def test_project_atomic_with_core_validation(
     isolated_core = ModuleType("workspace")
 
     def fake_load_targets(path: Path) -> list[dict[str, int]]:
-        if "invalid" in path.read_text():
+        if "invalid" in path.read_text(encoding="utf-8"):
             raise ValueError("invalid row")
         return [{"id": 1}]
 

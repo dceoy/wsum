@@ -172,8 +172,9 @@ def _workspace_files(workspace: Path) -> list[tuple[str, Path]]:
         for path in folder.rglob("*"):
             if (
                 path.name.startswith(".tmp-")
-                or path.name.endswith(".tmp")
-                and path.name.startswith(".")
+                or (
+                    path.name.endswith(".tmp") and path.name.startswith(".")
+                )
             ):
                 continue
             mode = path.lstat().st_mode
