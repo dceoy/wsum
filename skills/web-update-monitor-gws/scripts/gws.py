@@ -49,6 +49,17 @@ def _digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _stream_digest(source: Any, max_size: int, limit_message: str) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := source.read(CHUNK_SIZE):
+        size += len(chunk)
+        if size > max_size:
+            raise GwsError(limit_message)
+        digest.update(chunk)
+    return size, digest.hexdigest()
+
+
 def _write_atomic(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -98,8 +109,7 @@ def next_generation(names: list[str], now: datetime) -> str:
     return result.strftime("%Y%m%dT%H%M%SZ")
 
 
-def project(sheet: Path, destination: Path, core_skill: Path) -> int:
-    """Atomically project Connector values only after core CSV validation."""
+def _sheet_projection(sheet: Path) -> tuple[list[list[Any]], dict[str, int]]:
     raw = json.loads(sheet.read_text(encoding="utf-8"))
     rows = raw.get("values") if isinstance(raw, dict) else raw
     if (
@@ -120,61 +130,66 @@ def project(sheet: Path, destination: Path, core_skill: Path) -> int:
     if not all(name in names for name in ("name", "url")):
         raise GwsError("Sheet must contain name and url headers")
     index = {name: names.index(name) for name in FIELDS if name in names}
+    for row_number, row in enumerate(rows[1:], start=2):
+        if len(row) > len(names) and any(
+            str(cell).strip() for cell in row[len(names) :]
+        ):
+            raise GwsError(f"Sheet row {row_number} has cells beyond the header")
+    return rows, index
+
+
+def _write_projection(path: Path, rows: list[list[Any]], index: dict[str, int]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as output:
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(FIELDS)
+        for row in rows[1:]:
+            if not any(str(cell).strip() for cell in row):
+                continue
+            writer.writerow([
+                str(row[index[name]])
+                if name in index and index[name] < len(row)
+                else ""
+                for name in FIELDS
+            ])
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def _load_core_targets(temp: Path, core_skill: Path) -> Any:
+    scripts = core_skill / "scripts"
+    core_path = scripts / "workspace.py"
+    if not core_path.is_file():
+        raise GwsError(f"core skill not installed at {core_skill}")
+    core_path_id = hashlib.sha256(
+        str(core_path.resolve()).encode()
+    ).hexdigest()[:16]
+    module_name = f"_wsum_core_workspace_{core_path_id}_{id(temp)}"
+    spec = importlib.util.spec_from_file_location(module_name, core_path)
+    loader = spec.loader if spec is not None else None
+    if spec is None or loader is None:
+        raise GwsError(f"cannot load core skill at {core_path}")
+    core = importlib.util.module_from_spec(spec)
+    try:
+        sys.path.insert(0, str(scripts))
+        sys.modules[module_name] = core
+        loader.exec_module(core)
+        return core.load_targets(temp)
+    finally:
+        sys.modules.pop(module_name, None)
+        sys.path.remove(str(scripts))
+
+
+def project(sheet: Path, destination: Path, core_skill: Path) -> int:
+    """Atomically project Connector values only after core CSV validation."""
+    rows, index = _sheet_projection(sheet)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        newline="",
-        dir=destination.parent,
-        prefix=".tmp-",
-        delete=False,
-    ) as output:
-        temp = Path(output.name)
-        try:
-            writer = csv.writer(output, lineterminator="\n")
-            writer.writerow(FIELDS)
-            for row_number, row in enumerate(rows[1:], start=2):
-                if len(row) > len(names) and any(
-                    str(cell).strip() for cell in row[len(names) :]
-                ):
-                    raise GwsError(
-                        f"Sheet row {row_number} has cells beyond the header"
-                    )
-                if not any(str(cell).strip() for cell in row):
-                    continue
-                writer.writerow([
-                    str(row[index[name]])
-                    if name in index and index[name] < len(row)
-                    else ""
-                    for name in FIELDS
-                ])
-            output.flush()
-            os.fsync(output.fileno())
-        except BaseException:
-            temp.unlink(missing_ok=True)
-            raise
+        dir=destination.parent, prefix=".tmp-", delete=False
+    ) as stream:
+        temp = Path(stream.name)
     try:
-        scripts = core_skill / "scripts"
-        core_path = scripts / "workspace.py"
-        if not core_path.is_file():
-            raise GwsError(f"core skill not installed at {core_skill}")
-        # Load the requested core version even if another `workspace` is cached.
-        sys.path.insert(0, str(scripts))
-        module_name = f"_wsum_core_workspace_{id(temp)}"
-        try:
-            spec = importlib.util.spec_from_file_location(module_name, core_path)
-            loader = spec.loader if spec is not None else None
-            if spec is None or loader is None:
-                raise GwsError(f"cannot load core skill at {core_path}")
-            core = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = core
-            try:
-                loader.exec_module(core)
-                targets = core.load_targets(temp)
-            finally:
-                sys.modules.pop(module_name, None)
-        finally:
-            sys.path.remove(str(scripts))
+        _write_projection(temp, rows, index)
+        targets = _load_core_targets(temp, core_skill)
         temp.replace(destination)
         return len(targets)
     finally:
@@ -207,12 +222,9 @@ def _workspace_files(workspace: Path) -> list[tuple[str, Path]]:
     return files
 
 
-def pack(workspace: Path, archive: Path, generation: str) -> dict[str, Any]:
-    _timestamp(generation)
-    if archive.name != f"workspace-{generation}.zip":
-        raise GwsError("archive filename and generation mismatch")
-    if archive.exists():
-        raise GwsError("refusing to overwrite existing snapshot")
+def _snapshot_manifest(
+    workspace: Path,
+) -> tuple[list[dict[str, Any]], list[tuple[str, Path, int, str]]]:
     manifest_files: list[dict[str, Any]] = []
     contents: list[tuple[str, Path, int, str]] = []
     total = 0
@@ -220,23 +232,57 @@ def pack(workspace: Path, archive: Path, generation: str) -> dict[str, Any]:
         reported_size = path.stat().st_size
         if reported_size > MAX_ENTRY or total + reported_size > MAX_TOTAL:
             raise GwsError("workspace size limit exceeded")
-        digest = hashlib.sha256()
-        size = 0
         with path.open("rb") as source:
-            while chunk := source.read(CHUNK_SIZE):
-                size += len(chunk)
-                if size > MAX_ENTRY or total + size > MAX_TOTAL:
-                    raise GwsError("workspace size limit exceeded")
-                digest.update(chunk)
+            size, digest = _stream_digest(
+                source, min(MAX_ENTRY, MAX_TOTAL - total), "workspace size limit exceeded"
+            )
         if size != reported_size:
             raise GwsError(f"workspace file changed during snapshot: {name}")
         total += size
         manifest_files.append({
             "path": name,
             "size": size,
-            "sha256": digest.hexdigest(),
+            "sha256": digest,
         })
-        contents.append((name, path, size, digest.hexdigest()))
+        contents.append((name, path, size, digest))
+    return manifest_files, contents
+
+
+def _write_snapshot_member(
+    handle: zipfile.ZipFile,
+    entry: tuple[str, Path, int, str],
+    written_total: int,
+) -> int:
+    name, path, expected_size, expected_digest = entry
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as source, handle.open(name, "w") as target:
+        while chunk := source.read(CHUNK_SIZE):
+            size += len(chunk)
+            if size > MAX_ENTRY or written_total + size > MAX_TOTAL:
+                raise GwsError("workspace size limit exceeded")
+            digest.update(chunk)
+            target.write(chunk)
+    if size != expected_size or digest.hexdigest() != expected_digest:
+        raise GwsError(f"workspace file changed during snapshot: {name}")
+    return size
+
+
+def _write_snapshot_members(
+    handle: zipfile.ZipFile, contents: list[tuple[str, Path, int, str]]
+) -> None:
+    written_total = 0
+    for entry in contents:
+        written_total += _write_snapshot_member(handle, entry, written_total)
+
+
+def pack(workspace: Path, archive: Path, generation: str) -> dict[str, Any]:
+    _timestamp(generation)
+    if archive.name != f"workspace-{generation}.zip":
+        raise GwsError("archive filename and generation mismatch")
+    if archive.exists():
+        raise GwsError("refusing to overwrite existing snapshot")
+    manifest_files, contents = _snapshot_manifest(workspace)
     manifest = {"version": 1, "generation": generation, "files": manifest_files}
     archive.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -249,20 +295,7 @@ def pack(workspace: Path, archive: Path, generation: str) -> dict[str, Any]:
                 "manifest.json",
                 json.dumps(manifest, separators=(",", ":"), ensure_ascii=False),
             )
-            written_total = 0
-            for name, path, expected_size, expected_digest in contents:
-                digest = hashlib.sha256()
-                size = 0
-                with path.open("rb") as source, handle.open(name, "w") as target:
-                    while chunk := source.read(CHUNK_SIZE):
-                        size += len(chunk)
-                        if size > MAX_ENTRY or written_total + size > MAX_TOTAL:
-                            raise GwsError("workspace size limit exceeded")
-                        digest.update(chunk)
-                        target.write(chunk)
-                if size != expected_size or digest.hexdigest() != expected_digest:
-                    raise GwsError(f"workspace file changed during snapshot: {name}")
-                written_total += size
+            _write_snapshot_members(handle, contents)
         if temp.stat().st_size > MAX_ZIP:
             raise GwsError("snapshot compressed size limit exceeded")
         verify(temp, expected_name=archive.name)
@@ -276,8 +309,16 @@ def pack(workspace: Path, archive: Path, generation: str) -> dict[str, Any]:
     return {
         "filename": archive.name,
         "size": archive.stat().st_size,
-        "sha256": _digest(archive.read_bytes()),
+        "sha256": _digest_file(archive, MAX_ZIP),
     }
+
+
+def _digest_file(path: Path, max_size: int) -> str:
+    with path.open("rb") as source:
+        _, digest = _stream_digest(
+            source, max_size, "snapshot compressed size limit exceeded"
+        )
+    return digest
 
 
 def _safe_path(name: str) -> bool:
@@ -353,7 +394,11 @@ def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, Any]
             info = handle.getinfo(item["path"]) if item["path"] in names else None
             if info is None or info.file_size != item["size"]:
                 raise GwsError("manifest size or entry mismatch")
-            if _digest(handle.read(info)) != item["sha256"]:
+            with handle.open(info) as source:
+                size, digest = _stream_digest(
+                    source, MAX_ENTRY, "archive entry exceeds size limit"
+                )
+            if size != item["size"] or digest != item["sha256"]:
                 raise GwsError(f"archive digest mismatch: {item['path']}")
         if recorded != names - {"manifest.json"}:
             raise GwsError("manifest and workspace entries do not match")
@@ -361,7 +406,7 @@ def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, Any]
         "generation": match.group(1),
         "file_count": len(recorded),
         "size": archive.stat().st_size,
-        "sha256": _digest(archive.read_bytes()),
+        "sha256": _digest_file(archive, MAX_ZIP),
     }
 
 
