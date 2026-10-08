@@ -87,7 +87,7 @@ Drive workspace folder is not empty.
 
 Save the Sheets range-value response **as JSON data** in a scratch file with
 shape `{"values":[["name","url"],["Example","https://example.com"]]}`.
-Project and validate it *after restore* and *before pending reconciliation*:
+Project and validate it _after restore_ and _before pending reconciliation_:
 
 ```bash
 python "$GWS_SKILL_DIR/scripts/gws.py" project \
@@ -100,7 +100,7 @@ Do not summarize or rewrite cells in the agent; pass the raw structured
 cell array through the helper. The helper invokes the core's `load_targets`
 against a staged CSV and atomically replaces the projection only on success.
 
-To persist any state-changing operation, save the *complete* current Drive
+To persist any state-changing operation, save the _complete_ current Drive
 workspace-folder filename list as a JSON string array. Re-list it before each
 new generation; reject duplicate snapshot filenames:
 

@@ -117,14 +117,12 @@ def test_project_atomic_with_core_validation(
 ) -> None:
     skill = tmp_path / "core"
     (skill / "scripts").mkdir(parents=True)
-    (skill / "scripts/workspace.py").write_text(
-        "def load_targets(path):\n    text = open(path).read()\n    if 'invalid' in text:\n        raise ValueError('invalid row')\n    return [{'id': 1}]\n"
-    )
+    (skill / "scripts/workspace.py").write_text("# mock core\n")
     isolated_core = ModuleType("workspace")
 
     def fake_load_targets(path: Path) -> list[dict[str, int]]:
         if "invalid" in path.read_text(encoding="utf-8"):
-            raise ValueError("invalid row")
+            raise ValueError("invalid row")  # noqa: TRY003, EM101
         return [{"id": 1}]
 
     isolated_core.load_targets = fake_load_targets

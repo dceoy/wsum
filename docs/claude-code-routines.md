@@ -20,13 +20,13 @@ the checks below.
 
 ### Required connector operations
 
-| Resource | Required operations |
-| --- | --- |
-| Sheets | Read a specified value range into a row/column-preserving cell array |
+| Resource         | Required operations                                                             |
+| ---------------- | ------------------------------------------------------------------------------- |
+| Sheets           | Read a specified value range into a row/column-preserving cell array            |
 | Drive workspaces | List all files with IDs; create binary ZIP; download binary by ID; delete by ID |
-| Drive reports | Search exact name; create Markdown; download by ID; update existing file by ID |
+| Drive reports    | Search exact name; create Markdown; download by ID; update existing file by ID  |
 
-If any required action is missing from the *actual Routine tool surface*, stop
+If any required action is missing from the _actual Routine tool surface_, stop
 and report the missing operation. Do not substitute text extraction for Sheets
 values or Drive binary download.
 
@@ -42,7 +42,7 @@ python skills/web-update-monitor-gws/scripts/gws.py pack \
   --archive "$SCRATCH/workspace-20261009T000000Z.zip"
 ```
 
-Use the connector to upload it *as bytes*, then download the same file by its
+Use the connector to upload it _as bytes_, then download the same file by its
 returned Drive ID. Save the downloaded binary to a local file with the
 original snapshot filename. Independently compare byte length and SHA-256
 against the `pack` command output, then run:
@@ -53,7 +53,7 @@ python skills/web-update-monitor-gws/scripts/gws.py verify \
 ```
 
 Repeat with ZIP payloads around **10 KiB, 100 KiB and 1 MiB**. Use
-incompressible test data so the *ZIP sizes*, not just source sizes, satisfy
+incompressible test data so the _ZIP sizes_, not just source sizes, satisfy
 the test. Any size, integrity, or verification failure is a blocker for
 that monitor's actual workspace size. A successful connector upload response
 is insufficient. Delete all throwaway files when done.

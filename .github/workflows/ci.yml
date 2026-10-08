@@ -61,16 +61,6 @@ jobs:
       statuses: read
     with:
       unconditional: true
-  markdown-format-diagnostic:
-    runs-on: ubuntu-slim
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Show Prettier markdown changes
-        run: |
-          npx --yes prettier@3.9.6 --write docs/claude-code-routines.md skills/web-update-monitor-gws/SKILL.md
-          git diff -- docs/claude-code-routines.md skills/web-update-monitor-gws/SKILL.md
   agent-skill:
     needs:
       - markdown-lint
