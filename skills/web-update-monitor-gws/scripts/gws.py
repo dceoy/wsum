@@ -122,11 +122,7 @@ def _sheet_projection(
         or any(not isinstance(row, list) for row in rows)
     ):
         raise GwsError("Sheet input must be a non-empty array of value arrays")
-    if any(
-        not isinstance(v, (str, int, float, bool))
-        for row in rows
-        for v in row
-    ):
+    if any(not isinstance(v, (str, int, float, bool)) for row in rows for v in row):
         raise GwsError("Sheet cells must be scalar values")
     names = [str(value).strip() for value in rows[0]]
     if any(names.count(name) > 1 for name in FIELDS if name in names):
@@ -336,9 +332,7 @@ def _safe_path(name: str) -> bool:
     )
 
 
-def verify(
-    archive: Path, *, expected_name: str | None = None
-) -> dict[str, typing.Any]:
+def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, typing.Any]:
     """Validate the complete ZIP before installing any workspace content."""
     match = SNAPSHOT_RE.fullmatch(expected_name or archive.name)
     if not match:
@@ -442,9 +436,7 @@ def restore(archive: Path, destination: Path) -> dict[str, typing.Any]:
     return result
 
 
-def _read_ledger(
-    path: Path, reports_dir: Path
-) -> dict[str, typing.Any]:
+def _read_ledger(path: Path, reports_dir: Path) -> dict[str, typing.Any]:
     value: typing.Any = json.loads(path.read_text(encoding="utf-8"))
     if (
         not isinstance(value, dict)
