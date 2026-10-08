@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import sys
+from types import ModuleType
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -108,10 +109,13 @@ def test_delivery_ledger_fail_closed(tmp_path):
         gws.ledger(path, report, False)
 
 
-def test_project_atomic_with_core_validation(tmp_path):
+def test_project_atomic_with_core_validation(tmp_path, monkeypatch):
     skill = tmp_path / "core"
     (skill / "scripts").mkdir(parents=True)
     (skill / "scripts/workspace.py").write_text("def load_targets(path):\n    text = open(path).read()\n    if 'invalid' in text:\n        raise ValueError('invalid row')\n    return [{'id': 1}]\n")
+    isolated_core = ModuleType("workspace")
+    exec((skill / "scripts/workspace.py").read_text(), isolated_core.__dict__)
+    monkeypatch.setitem(sys.modules, "workspace", isolated_core)
     source = tmp_path / "sheet.json"
     dest = tmp_path / "targets.csv"
     source.write_text(json.dumps({"values": [["url", "name", "ignored"], ["https://example.com", "A, B", "x"]]}))
