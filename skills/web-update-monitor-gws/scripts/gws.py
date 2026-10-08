@@ -162,9 +162,7 @@ def _load_core_targets(temp: Path, core_skill: Path) -> list[object]:
     core_path = scripts / "workspace.py"
     if not core_path.is_file():
         raise GwsError(f"core skill not installed at {core_skill}")
-    core_path_id = hashlib.sha256(
-        str(core_path.resolve()).encode()
-    ).hexdigest()[:16]
+    core_path_id = hashlib.sha256(str(core_path.resolve()).encode()).hexdigest()[:16]
     module_name = f"_wsum_core_workspace_{core_path_id}_{id(temp)}"
     spec = importlib.util.spec_from_file_location(module_name, core_path)
     loader = spec.loader if spec is not None else None
@@ -205,11 +203,8 @@ def _workspace_files(workspace: Path) -> list[tuple[str, Path]]:
         if not folder.is_dir() or folder.is_symlink():
             raise GwsError(f"workspace root must be a real directory: {root}")
         for path in folder.rglob("*"):
-            if (
-                path.name.startswith(".tmp-")
-                or (
-                    path.name.endswith(".tmp") and path.name.startswith(".")
-                )
+            if path.name.startswith(".tmp-") or (
+                path.name.endswith(".tmp") and path.name.startswith(".")
             ):
                 continue
             mode = path.lstat().st_mode
