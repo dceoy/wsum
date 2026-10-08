@@ -112,17 +112,21 @@ def test_delivery_ledger_fail_closed(tmp_path: Path) -> None:
         gws.ledger(path, report, False)
 
 
-def test_project_atomic_with_core_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_project_atomic_with_core_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     skill = tmp_path / "core"
     (skill / "scripts").mkdir(parents=True)
     (skill / "scripts/workspace.py").write_text(
         "def load_targets(path):\n    text = open(path).read()\n    if 'invalid' in text:\n        raise ValueError('invalid row')\n    return [{'id': 1}]\n"
     )
     isolated_core = ModuleType("workspace")
+
     def fake_load_targets(path: Path) -> list[dict[str, int]]:
         if "invalid" in path.read_text():
             raise ValueError("invalid row")
         return [{"id": 1}]
+
     isolated_core.load_targets = fake_load_targets
     monkeypatch.setitem(sys.modules, "workspace", isolated_core)
     source = tmp_path / "sheet.json"
