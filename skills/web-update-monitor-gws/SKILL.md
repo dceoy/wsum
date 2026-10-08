@@ -38,7 +38,7 @@ the Google connection name. This skill is not a standalone Google API client.
 
 Before the first monitor run:
 
-1. Discover **both** installed skills, the Python >=3.11 runtime and \`pypdf\`,
+1. Discover **both** installed skills, the Python >=3.11 runtime and `pypdf`,
    a writable local scratch directory, and public-network access to each target.
    If Routines uses an outbound allowlist, explicitly allow target domains. A
    Routines egress-denied HTTP 403 is **not** a website 403: do not use the core
@@ -52,7 +52,7 @@ Before the first monitor run:
 4. Execute a throwaway connector round-trip before operational writes:
    create local ZIP samples of increasing size, upload each to a disposable
    Drive folder, download by returned ID, compare byte length and SHA-256,
-   and run \`gws.py verify\`. Check at least 10 KiB, 100 KiB, and 1 MiB.
+   and run `gws.py verify`. Check at least 10 KiB, 100 KiB, and 1 MiB.
    If any sample fails, **stop**; do not publish a report or create the
    monitor's initial snapshot. Tool-call success is not proof of byte integrity.
 5. Configure **one non-overlapping Routine per workspace key**. Drive snapshot
@@ -68,68 +68,68 @@ network denial as failures, not as an empty first-run workspace.
 ## Deterministic local helpers
 
 The composite's deterministic work is implemented by
-\`scripts/gws.py\` (Python standard library only); Google connector calls
-remain the agent's responsibility. Resolve \`GWS_SKILL_DIR\` from the installed
-composite and \`WEB_UPDATE_MONITOR_SKILL_DIR\` from installed core skill discovery.
+`scripts/gws.py` (Python standard library only); Google connector calls
+remain the agent's responsibility. Resolve `GWS_SKILL_DIR` from the installed
+composite and `WEB_UPDATE_MONITOR_SKILL_DIR` from installed core skill discovery.
 
 After downloading the latest exact-ID ZIP under its original filename, restore
 it into a **nonexistent** scratch workspace (not a previously used directory):
 
-\`\`\`bash
+```bash
 python "$GWS_SKILL_DIR/scripts/gws.py" verify --archive "$ARCHIVE"
 python "$GWS_SKILL_DIR/scripts/gws.py" restore --archive "$ARCHIVE" --workspace "$WORKSPACE"
-\`\`\`
+```
 
-For a brand-new monitor, initialize \`$WORKSPACE/output\` and
-\`$WORKSPACE/internal/gws/delivery.json\` instead; the latter must contain
-\`{"version":1,"reports":{}}\`. Never initialize an empty workspace if the
+For a brand-new monitor, initialize `$WORKSPACE/output` and
+`$WORKSPACE/internal/gws/delivery.json` instead; the latter must contain
+`{"version":1,"reports":{}}`. Never initialize an empty workspace if the
 Drive workspace folder is not empty.
 
 Save the Sheets range-value response **as JSON data** in a scratch file with
-shape \`{"values":[["name","url"],["Example","https://example.com"]]}\`.
+shape `{"values":[["name","url"],["Example","https://example.com"]]}`.
 Project and validate it *after restore* and *before pending reconciliation*:
 
-\`\`\`bash
+```bash
 python "$GWS_SKILL_DIR/scripts/gws.py" project \
   --sheet-json "$SHEET_JSON" \
   --targets "$WORKSPACE/internal/gws/targets.csv" \
   --core-skill-dir "$WEB_UPDATE_MONITOR_SKILL_DIR"
-\`\`\`
+```
 
 Do not summarize or rewrite cells in the agent; pass the raw structured
-cell array through the helper. The helper invokes the core's \`load_targets\`
+cell array through the helper. The helper invokes the core's `load_targets`
 against a staged CSV and atomically replaces the projection only on success.
 
 To persist any state-changing operation, save the *complete* current Drive
 workspace-folder filename list as a JSON string array. Re-list it before each
 new generation; reject duplicate snapshot filenames:
 
-\`\`\`bash
+```bash
 python "$GWS_SKILL_DIR/scripts/gws.py" next-generation --names-json "$DRIVE_NAMES_JSON"
 python "$GWS_SKILL_DIR/scripts/gws.py" pack \
   --workspace "$WORKSPACE" --generation "$GENERATION" \
   --archive "$SCRATCH/workspace-$GENERATION.zip"
-\`\`\`
+```
 
-Use the generation returned by the preceding command. The \`pack\` result
+Use the generation returned by the preceding command. The `pack` result
 contains local file byte length and SHA-256. Upload the ZIP **without text
 conversion**; download by its returned ID to a local path with the identical
-filename and compare against the \`pack\` result. Run \`verify\` on that
+filename and compare against the `pack` result. Run `verify` on that
 download as well. Only then consider the snapshot committed, and delete old
 generations by exact file ID. Never treat a successful upload response alone
 as durable persistence.
 
 Before delivering a completed canonical Markdown report, run:
 
-\`\`\`bash
+```bash
 python "$GWS_SKILL_DIR/scripts/gws.py" ledger \
   --ledger "$WORKSPACE/internal/gws/delivery.json" --report "$REPORT"
-\`\`\`
+```
 
 If not already delivered, follow the exact-name lookup, upload/update,
 exact-ID read-back and digest comparison below. **Only after** verified delivery
-run the same command with \`--record\`, then persist a new ZIP generation.
-Never use \`--record\` to bypass the Drive read-back check.
+run the same command with `--record`, then persist a new ZIP generation.
+Never use `--record` to bypass the Drive read-back check.
 
 The helper rejects unsafe ZIP paths, symlinks, duplicate members, manifest
 mismatches, oversized archives and non-new restore destinations. It does **not**
