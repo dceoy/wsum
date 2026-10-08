@@ -86,6 +86,17 @@ def test_reject_symlink_input(tmp_path: Path) -> None:
         gws.pack(ws, tmp_path / f"workspace-{GENERATION}.zip", GENERATION)
 
 
+def test_reject_oversized_input_before_reading(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    (ws / "output").mkdir(parents=True)
+    (ws / "internal").mkdir()
+    oversized = ws / "output/large.bin"
+    with oversized.open("wb") as stream:
+        stream.truncate(gws.MAX_ENTRY + 1)
+    with pytest.raises(gws.GwsError, match="size limit"):
+        gws.pack(ws, tmp_path / f"workspace-{GENERATION}.zip", GENERATION)
+
+
 def test_generation_monotonicity_and_duplicates() -> None:
     now = datetime(2026, 10, 9, tzinfo=UTC)
     assert gws.next_generation([], now) == GENERATION
@@ -104,6 +115,10 @@ def test_delivery_ledger_fail_closed(tmp_path: Path) -> None:
     assert gws.ledger(path, report, record=False)["delivered"] is False
     gws.ledger(path, report, record=True)
     assert gws.ledger(path, report, record=False)["delivered"] is True
+    report.unlink()
+    with pytest.raises(gws.GwsError, match="missing report"):
+        gws.ledger(path, report, record=False)
+    report.write_text("report")
     report.write_text("mutated")
     with pytest.raises(gws.GwsError, match="changed"):
         gws.ledger(path, report, record=False)
@@ -117,16 +132,20 @@ def test_project_atomic_with_core_validation(
 ) -> None:
     skill = tmp_path / "core"
     (skill / "scripts").mkdir(parents=True)
-    (skill / "scripts/workspace.py").write_text("# mock core\n")
-    isolated_core = ModuleType("workspace")
+    (skill / "scripts/workspace.py").write_text(
+        "from pathlib import Path\n"
+        "def load_targets(path):\n"
+        "    if 'invalid' in Path(path).read_text(encoding='utf-8'):\n"
+        "        raise ValueError('requested validator rejected invalid row')\n"
+        "    return [{'id': 1}]\n"
+    )
+    conflicting_core = ModuleType("workspace")
 
-    def fake_load_targets(path: Path) -> list[dict[str, int]]:
-        if "invalid" in path.read_text(encoding="utf-8"):
-            raise ValueError
-        return [{"id": 1}]
+    def fail_for_cached_module(_: Path) -> None:
+        pytest.fail("used cached workspace module instead of requested core skill")
 
-    isolated_core.load_targets = fake_load_targets
-    monkeypatch.setitem(sys.modules, "workspace", isolated_core)
+    conflicting_core.load_targets = fail_for_cached_module
+    monkeypatch.setitem(sys.modules, "workspace", conflicting_core)
     source = tmp_path / "sheet.json"
     dest = tmp_path / "targets.csv"
     source.write_text(
@@ -140,7 +159,15 @@ def test_project_atomic_with_core_validation(
     source.write_text(
         json.dumps({"values": [["url", "name"], ["https://example.com", "invalid"]]})
     )
-    with pytest.raises(ValueError, match="^$"):
+    with pytest.raises(ValueError, match="requested validator rejected invalid row"):
+        gws.project(source, dest, skill)
+    assert dest.read_bytes() == original
+    source.write_text(
+        json.dumps({
+            "values": [["url", "name"], ["https://example.com", "A", "unexpected"]]
+        })
+    )
+    with pytest.raises(gws.GwsError, match="beyond the header"):
         gws.project(source, dest, skill)
     assert dest.read_bytes() == original
     source.write_text(
