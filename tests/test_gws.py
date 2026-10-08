@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pytest
 
-MODULE = Path(__file__).resolve().parents[1] / "skills/web-update-monitor-gws/scripts/gws.py"
+MODULE = (
+    Path(__file__).resolve().parents[1] / "skills/web-update-monitor-gws/scripts/gws.py"
+)
 spec = importlib.util.spec_from_file_location("gws", MODULE)
 gws = importlib.util.module_from_spec(spec)
 sys.modules["gws"] = gws
@@ -49,11 +51,17 @@ def test_snapshot_roundtrip(tmp_path):
         gws.pack(ws, archive, GENERATION)
 
 
-@pytest.mark.parametrize("entry", ["../escape", "internal/../escape", "/internal/escape", "output//x", "foo/bar"])
+@pytest.mark.parametrize(
+    "entry",
+    ["../escape", "internal/../escape", "/internal/escape", "output//x", "foo/bar"],
+)
 def test_reject_unsafe_paths(tmp_path, entry):
     archive = tmp_path / f"workspace-{GENERATION}.zip"
     with zipfile.ZipFile(archive, "w") as writer:
-        writer.writestr("manifest.json", json.dumps({"version": 1, "generation": GENERATION, "files": []}))
+        writer.writestr(
+            "manifest.json",
+            json.dumps({"version": 1, "generation": GENERATION, "files": []}),
+        )
         writer.writestr(entry, "bad")
     with pytest.raises(gws.GwsError, match="unsafe"):
         gws.verify(archive)
@@ -88,7 +96,9 @@ def test_reject_symlink_input(tmp_path):
 def test_generation_monotonicity_and_duplicates():
     now = datetime(2026, 10, 9, tzinfo=UTC)
     assert gws.next_generation([], now) == GENERATION
-    assert gws.next_generation([f"workspace-{GENERATION}.zip"], now) == "20261009T000001Z"
+    assert (
+        gws.next_generation([f"workspace-{GENERATION}.zip"], now) == "20261009T000001Z"
+    )
     with pytest.raises(gws.GwsError, match="duplicate"):
         gws.next_generation([f"workspace-{GENERATION}.zip"] * 2, now)
 
@@ -112,20 +122,30 @@ def test_delivery_ledger_fail_closed(tmp_path):
 def test_project_atomic_with_core_validation(tmp_path, monkeypatch):
     skill = tmp_path / "core"
     (skill / "scripts").mkdir(parents=True)
-    (skill / "scripts/workspace.py").write_text("def load_targets(path):\n    text = open(path).read()\n    if 'invalid' in text:\n        raise ValueError('invalid row')\n    return [{'id': 1}]\n")
+    (skill / "scripts/workspace.py").write_text(
+        "def load_targets(path):\n    text = open(path).read()\n    if 'invalid' in text:\n        raise ValueError('invalid row')\n    return [{'id': 1}]\n"
+    )
     isolated_core = ModuleType("workspace")
     exec((skill / "scripts/workspace.py").read_text(), isolated_core.__dict__)
     monkeypatch.setitem(sys.modules, "workspace", isolated_core)
     source = tmp_path / "sheet.json"
     dest = tmp_path / "targets.csv"
-    source.write_text(json.dumps({"values": [["url", "name", "ignored"], ["https://example.com", "A, B", "x"]]}))
+    source.write_text(
+        json.dumps({
+            "values": [["url", "name", "ignored"], ["https://example.com", "A, B", "x"]]
+        })
+    )
     assert gws.project(source, dest, skill) == 1
     assert '"A, B"' in dest.read_text()
     original = dest.read_bytes()
-    source.write_text(json.dumps({"values": [["url", "name"], ["https://example.com", "invalid"]]}))
+    source.write_text(
+        json.dumps({"values": [["url", "name"], ["https://example.com", "invalid"]]})
+    )
     with pytest.raises(ValueError, match="invalid row"):
         gws.project(source, dest, skill)
     assert dest.read_bytes() == original
-    source.write_text(json.dumps({"values": [["url", "name", "name"], ["x", "y", "z"]]}))
+    source.write_text(
+        json.dumps({"values": [["url", "name", "name"], ["x", "y", "z"]]})
+    )
     with pytest.raises(gws.GwsError, match="duplicate"):
         gws.project(source, dest, skill)
