@@ -1,0 +1,354 @@
+"""Deterministic local Google Workspace projection and snapshot operations.
+
+Google connector transport and permissions remain the host agent's responsibility.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import importlib
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+import tempfile
+import zipfile
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+FIELDS = ("name", "url", "publisher", "category", "keywords", "criteria", "priority", "enabled")
+SNAPSHOT_RE = re.compile(r"^workspace-(\d{8}T\d{6}Z)\.zip$")
+RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
+SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+MAX_ZIP = 128 * 1024 * 1024
+MAX_FILES = 2000
+MAX_ENTRY = 64 * 1024 * 1024
+MAX_TOTAL = 256 * 1024 * 1024
+
+
+class GwsError(ValueError):
+    """Reject invalid connector data or untrusted workspace archives."""
+
+
+def _digest(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _write_atomic(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".tmp-", delete=False) as stream:
+        temp = Path(stream.name)
+        try:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _timestamp(value: str) -> datetime:
+    try:
+        result = datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise GwsError(f"invalid generation: {value}") from exc
+    if result.strftime("%Y%m%dT%H%M%SZ") != value:
+        raise GwsError(f"invalid generation: {value}")
+    return result
+
+
+def next_generation(names: list[str], now: datetime) -> str:
+    """Derive monotonic filename time and reject duplicate Drive snapshot names."""
+    known: set[str] = set()
+    newest = None
+    for name in names:
+        match = SNAPSHOT_RE.fullmatch(name)
+        if not match:
+            continue
+        if name in known:
+            raise GwsError(f"duplicate snapshot filename: {name}")
+        known.add(name)
+        instant = _timestamp(match.group(1))
+        if newest is None or instant > newest:
+            newest = instant
+    result = now.astimezone(UTC).replace(microsecond=0)
+    if newest is not None:
+        result = max(result, newest + timedelta(seconds=1))
+    return result.strftime("%Y%m%dT%H%M%SZ")
+
+
+def project(sheet: Path, destination: Path, core_skill: Path) -> int:
+    """Atomically project Connector values only after core CSV validation."""
+    raw = json.loads(sheet.read_text(encoding="utf-8"))
+    rows = raw.get("values") if isinstance(raw, dict) else raw
+    if not isinstance(rows, list) or not rows or any(not isinstance(row, list) for row in rows):
+        raise GwsError("Sheet input must be a non-empty array of value arrays")
+    if any(not isinstance(v, (str, int, float, bool)) or v is None for row in rows for v in row):
+        raise GwsError("Sheet cells must be scalar values")
+    names = [str(value).strip() for value in rows[0]]
+    if any(names.count(name) > 1 for name in FIELDS if name in names):
+        raise GwsError("duplicate selected Sheet header")
+    if not all(name in names for name in ("name", "url")):
+        raise GwsError("Sheet must contain name and url headers")
+    index = {name: names.index(name) for name in FIELDS if name in names}
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=destination.parent,
+                                     prefix=".tmp-", delete=False) as output:
+        temp = Path(output.name)
+        try:
+            writer = csv.writer(output, lineterminator="\n")
+            writer.writerow(FIELDS)
+            for row in rows[1:]:
+                if not any(str(cell).strip() for cell in row):
+                    continue
+                writer.writerow([str(row[index[name]]) if name in index and index[name] < len(row) else ""
+                                 for name in FIELDS])
+            output.flush()
+            os.fsync(output.fileno())
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
+    try:
+        scripts = core_skill / "scripts"
+        if not (scripts / "workspace.py").is_file():
+            raise GwsError(f"core skill not installed at {core_skill}")
+        # Use the core loader, not a divergent copy of CSV validation rules.
+        sys.path.insert(0, str(scripts))
+        try:
+            core = importlib.import_module("workspace")
+            targets = core.load_targets(temp)
+        finally:
+            sys.path.remove(str(scripts))
+        os.replace(temp, destination)
+        return len(targets)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _workspace_files(workspace: Path) -> list[tuple[str, Path]]:
+    files: list[tuple[str, Path]] = []
+    for root in ("output", "internal"):
+        folder = workspace / root
+        if not folder.is_dir() or folder.is_symlink():
+            raise GwsError(f"workspace root must be a real directory: {root}")
+        for path in folder.rglob("*"):
+            if path.name.startswith(".tmp-") or path.name.endswith(".tmp") and path.name.startswith("."):
+                continue
+            mode = path.lstat().st_mode
+            if stat.S_ISDIR(mode):
+                continue
+            if not stat.S_ISREG(mode):
+                raise GwsError(f"non-regular workspace entry: {path}")
+            files.append((path.relative_to(workspace).as_posix(), path))
+    files.sort()
+    if len(files) > MAX_FILES:
+        raise GwsError("too many workspace files")
+    return files
+
+
+def pack(workspace: Path, archive: Path, generation: str) -> dict[str, Any]:
+    _timestamp(generation)
+    if archive.name != f"workspace-{generation}.zip":
+        raise GwsError("archive filename and generation mismatch")
+    if archive.exists():
+        raise GwsError("refusing to overwrite existing snapshot")
+    manifest_files: list[dict[str, Any]] = []
+    contents = []
+    total = 0
+    for name, path in _workspace_files(workspace):
+        data = path.read_bytes()
+        total += len(data)
+        if len(data) > MAX_ENTRY or total > MAX_TOTAL:
+            raise GwsError("workspace size limit exceeded")
+        manifest_files.append({"path": name, "size": len(data), "sha256": _digest(data)})
+        contents.append((name, data))
+    manifest = {"version": 1, "generation": generation, "files": manifest_files}
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=archive.parent, prefix=".tmp-", delete=False) as stream:
+        temp = Path(stream.name)
+    try:
+        with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED) as handle:
+            handle.writestr("manifest.json", json.dumps(manifest, separators=(",", ":"), ensure_ascii=False))
+            for name, data in contents:
+                handle.writestr(name, data)
+        if temp.stat().st_size > MAX_ZIP:
+            raise GwsError("snapshot compressed size limit exceeded")
+        verify(temp, expected_name=archive.name)
+        if archive.exists():
+            raise GwsError("refusing to overwrite existing snapshot")
+        os.link(temp, archive)  # exclusive creation; never replace a committed generation
+    finally:
+        temp.unlink(missing_ok=True)
+    return {"filename": archive.name, "size": archive.stat().st_size, "sha256": _digest(archive.read_bytes())}
+
+
+def _safe_path(name: str) -> bool:
+    parts = name.split("/")
+    return (len(parts) > 1 and parts[0] in {"internal", "output"} and
+            all(part not in {"", ".", ".."} for part in parts) and "\\" not in name and
+            not name.startswith("/") and "\x00" not in name)
+
+
+def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, Any]:
+    """Validate the complete ZIP before installing any workspace content."""
+    match = SNAPSHOT_RE.fullmatch(expected_name or archive.name)
+    if not match:
+        raise GwsError("invalid snapshot filename")
+    _timestamp(match.group(1))
+    if archive.stat().st_size > MAX_ZIP:
+        raise GwsError("snapshot compressed size limit exceeded")
+    with zipfile.ZipFile(archive) as handle:
+        entries = handle.infolist()
+        if not entries or len(entries) > MAX_FILES + 1:
+            raise GwsError("invalid snapshot file count")
+        names: set[str] = set()
+        total = 0
+        for entry in entries:
+            name = entry.filename
+            if name in names or (name != "manifest.json" and not _safe_path(name)):
+                raise GwsError(f"unsafe or duplicate archive path: {name}")
+            names.add(name)
+            mode = (entry.external_attr >> 16) & 0xFFFF
+            if (entry.flag_bits & 1 or entry.is_dir() or
+                    (stat.S_IFMT(mode) not in {0, stat.S_IFREG})):
+                raise GwsError(f"non-regular or encrypted ZIP entry: {name}")
+            if entry.file_size > MAX_ENTRY:
+                raise GwsError("archive entry exceeds size limit")
+            total += entry.file_size
+            if total > MAX_TOTAL:
+                raise GwsError("archive exceeds expanded size limit")
+        if "manifest.json" not in names:
+            raise GwsError("missing manifest")
+        manifest = json.loads(handle.read("manifest.json"))
+        if (not isinstance(manifest, dict) or set(manifest) != {"version", "generation", "files"}
+                or manifest["version"] != 1 or manifest["generation"] != match.group(1)
+                or not isinstance(manifest["files"], list)):
+            raise GwsError("invalid manifest header")
+        recorded: set[str] = set()
+        for item in manifest["files"]:
+            if (not isinstance(item, dict) or set(item) != {"path", "size", "sha256"}
+                    or not isinstance(item["path"], str) or not _safe_path(item["path"])
+                    or item["path"] in recorded or not isinstance(item["size"], int)
+                    or isinstance(item["size"], bool) or item["size"] < 0
+                    or not isinstance(item["sha256"], str) or not SHA_RE.fullmatch(item["sha256"])):
+                raise GwsError("invalid manifest file record")
+            recorded.add(item["path"])
+            info = handle.getinfo(item["path"]) if item["path"] in names else None
+            if info is None or info.file_size != item["size"]:
+                raise GwsError("manifest size or entry mismatch")
+            if _digest(handle.read(info)) != item["sha256"]:
+                raise GwsError(f"archive digest mismatch: {item['path']}")
+        if recorded != names - {"manifest.json"}:
+            raise GwsError("manifest and workspace entries do not match")
+    return {"generation": match.group(1), "file_count": len(recorded),
+            "size": archive.stat().st_size, "sha256": _digest(archive.read_bytes())}
+
+
+def restore(archive: Path, destination: Path) -> dict[str, Any]:
+    """Restore to a new workspace only, after complete verification."""
+    result = verify(archive)
+    if destination.exists() or destination.is_symlink():
+        raise GwsError("restore destination must not exist")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=".tmp-restore-", dir=destination.parent))
+    try:
+        for root in ("output", "internal"):
+            (stage / root).mkdir()
+        with zipfile.ZipFile(archive) as handle:
+            for info in handle.infolist():
+                if info.filename == "manifest.json":
+                    continue
+                path = stage.joinpath(*info.filename.split("/"))
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with handle.open(info) as source, path.open("xb") as target:
+                    shutil.copyfileobj(source, target)
+        if destination.exists():
+            raise GwsError("restore destination already exists")
+        stage.rename(destination)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+    return result
+
+
+def _read_ledger(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(value, dict) or set(value) != {"version", "reports"}
+            or value["version"] != 1 or not isinstance(value["reports"], dict)
+            or any(not RUN_ID_RE.fullmatch(k) or not isinstance(v, str) or not SHA_RE.fullmatch(v)
+                   for k, v in value["reports"].items())):
+        raise GwsError("invalid delivery ledger")
+    return value
+
+
+def ledger(path: Path, report: Path, record: bool) -> dict[str, Any]:
+    value = _read_ledger(path)
+    run_id = report.stem
+    if not RUN_ID_RE.fullmatch(run_id) or report.suffix != ".md":
+        raise GwsError("invalid report filename")
+    digest = _digest(report.read_bytes())
+    existing = value["reports"].get(run_id)
+    if existing is not None and existing != digest:
+        raise GwsError("delivered canonical report changed")
+    if record and existing is None:
+        value["reports"][run_id] = digest
+        _write_atomic(path, json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+    return {"run_id": run_id, "sha256": digest, "delivered": existing == digest}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    p = commands.add_parser("project")
+    p.add_argument("--sheet-json", type=Path, required=True)
+    p.add_argument("--targets", type=Path, required=True)
+    p.add_argument("--core-skill-dir", type=Path, required=True)
+    p = commands.add_parser("next-generation")
+    p.add_argument("--names-json", type=Path, required=True)
+    p = commands.add_parser("pack")
+    p.add_argument("--workspace", type=Path, required=True)
+    p.add_argument("--archive", type=Path, required=True)
+    p.add_argument("--generation", required=True)
+    p = commands.add_parser("verify")
+    p.add_argument("--archive", type=Path, required=True)
+    p = commands.add_parser("restore")
+    p.add_argument("--archive", type=Path, required=True)
+    p.add_argument("--workspace", type=Path, required=True)
+    p = commands.add_parser("ledger")
+    p.add_argument("--ledger", type=Path, required=True)
+    p.add_argument("--report", type=Path, required=True)
+    p.add_argument("--record", action="store_true")
+    args = parser.parse_args()
+    try:
+        if args.command == "project":
+            result = {"target_groups": project(args.sheet_json, args.targets, args.core_skill_dir)}
+        elif args.command == "next-generation":
+            raw = json.loads(args.names_json.read_text())
+            if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):
+                raise GwsError("names JSON must be an array of strings")
+            generation = next_generation(raw, datetime.now(UTC))
+            result = {"generation": generation, "filename": f"workspace-{generation}.zip"}
+        elif args.command == "pack":
+            result = pack(args.workspace, args.archive, args.generation)
+        elif args.command == "verify":
+            result = verify(args.archive)
+        elif args.command == "restore":
+            result = restore(args.archive, args.workspace)
+        else:
+            result = ledger(args.ledger, args.report, args.record)
+        print(json.dumps(result, sort_keys=True))
+    except (OSError, ValueError, zipfile.BadZipFile, KeyError, TypeError, ImportError) as exc:
+        parser.exit(1, f"gws: {exc}\n")
+
+
+if __name__ == "__main__":
+    main()
