@@ -115,12 +115,15 @@ def _sheet_projection(
     sheet: Path,
 ) -> tuple[list[list[typing.Any]], dict[str, int]]:
     raw: typing.Any = json.loads(sheet.read_text(encoding="utf-8"))
-    rows: typing.Any = raw.get("values") if isinstance(raw, dict) else raw
-    if (
-        not isinstance(rows, list)
-        or not rows
-        or any(not isinstance(row, list) for row in rows)
-    ):
+    rows_value: typing.Any = (
+        typing.cast(dict[str, typing.Any], raw).get("values")
+        if isinstance(raw, dict)
+        else raw
+    )
+    if not isinstance(rows_value, list) or not rows_value:
+        raise GwsError("Sheet input must be a non-empty array of value arrays")
+    rows = typing.cast(list[list[typing.Any]], rows_value)
+    if any(not isinstance(row, list) for row in rows):
         raise GwsError("Sheet input must be a non-empty array of value arrays")
     if any(not isinstance(v, (str, int, float, bool)) for row in rows for v in row):
         raise GwsError("Sheet cells must be scalar values")
@@ -366,19 +369,24 @@ def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, typi
         if "manifest.json" not in names:
             raise GwsError("missing manifest")
         manifest: typing.Any = json.loads(handle.read("manifest.json"))
+        if not isinstance(manifest, dict):
+            raise GwsError("invalid manifest header")
+        manifest = typing.cast(dict[str, typing.Any], manifest)
         if (
-            not isinstance(manifest, dict)
-            or set(manifest) != {"version", "generation", "files"}
+            set(manifest) != {"version", "generation", "files"}
             or manifest["version"] != 1
             or manifest["generation"] != match.group(1)
             or not isinstance(manifest["files"], list)
         ):
             raise GwsError("invalid manifest header")
         recorded: set[str] = set()
-        for item in manifest["files"]:
+        manifest_files = typing.cast(list[typing.Any], manifest["files"])
+        for raw_item in manifest_files:
+            if not isinstance(raw_item, dict):
+                raise GwsError("invalid manifest file record")
+            item = typing.cast(dict[str, typing.Any], raw_item)
             if (
-                not isinstance(item, dict)
-                or set(item) != {"path", "size", "sha256"}
+                set(item) != {"path", "size", "sha256"}
                 or not isinstance(item["path"], str)
                 or not _safe_path(item["path"])
                 or item["path"] in recorded
@@ -438,20 +446,25 @@ def restore(archive: Path, destination: Path) -> dict[str, typing.Any]:
 
 def _read_ledger(path: Path, reports_dir: Path) -> dict[str, typing.Any]:
     value: typing.Any = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise GwsError("invalid delivery ledger")
+    value = typing.cast(dict[str, typing.Any], value)
     if (
-        not isinstance(value, dict)
-        or set(value) != {"version", "reports"}
+        set(value) != {"version", "reports"}
         or value["version"] != 1
         or not isinstance(value["reports"], dict)
-        or any(
-            not RUN_ID_RE.fullmatch(k)
-            or not isinstance(v, str)
-            or not SHA_RE.fullmatch(v)
-            for k, v in value["reports"].items()
-        )
     ):
         raise GwsError("invalid delivery ledger")
-    for run_id, expected_digest in value["reports"].items():
+    reports = typing.cast(dict[str, typing.Any], value["reports"])
+    if any(
+        not RUN_ID_RE.fullmatch(run_id)
+        or not isinstance(digest, str)
+        or not SHA_RE.fullmatch(digest)
+        for run_id, digest in reports.items()
+    ):
+        raise GwsError("invalid delivery ledger")
+    for run_id, raw_digest in reports.items():
+        expected_digest = typing.cast(str, raw_digest)
         report = reports_dir / f"{run_id}.md"
         if report.is_symlink() or not report.is_file():
             raise GwsError(f"delivery ledger references missing report: {run_id}")
@@ -511,9 +524,13 @@ def main() -> None:
             }
         elif args.command == "next-generation":
             raw: typing.Any = json.loads(args.names_json.read_text())
-            if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):
+            if not isinstance(raw, list):
                 raise GwsError("names JSON must be an array of strings")
-            generation = next_generation(raw, datetime.now(UTC))
+            raw_names = typing.cast(list[typing.Any], raw)
+            if any(not isinstance(name, str) for name in raw_names):
+                raise GwsError("names JSON must be an array of strings")
+            names = typing.cast(list[str], raw_names)
+            generation = next_generation(names, datetime.now(UTC))
             result = {
                 "generation": generation,
                 "filename": f"workspace-{generation}.zip",
