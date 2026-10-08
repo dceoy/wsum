@@ -16,10 +16,10 @@ import shutil
 import stat
 import sys
 import tempfile
+import typing
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast, IO
 
 FIELDS = (
     "name",
@@ -50,7 +50,7 @@ def _digest(content: bytes) -> str:
 
 
 def _stream_digest(
-    source: IO[bytes], max_size: int, limit_message: str
+    source: typing.IO[bytes], max_size: int, limit_message: str
 ) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
@@ -111,9 +111,11 @@ def next_generation(names: list[str], now: datetime) -> str:
     return result.strftime("%Y%m%dT%H%M%SZ")
 
 
-def _sheet_projection(sheet: Path) -> tuple[list[list[Any]], dict[str, int]]:
-    raw: Any = json.loads(sheet.read_text(encoding="utf-8"))
-    rows: Any = raw.get("values") if isinstance(raw, dict) else raw
+def _sheet_projection(
+    sheet: Path,
+) -> tuple[list[list[typing.Any]], dict[str, int]]:
+    raw: typing.Any = json.loads(sheet.read_text(encoding="utf-8"))
+    rows: typing.Any = raw.get("values") if isinstance(raw, dict) else raw
     if (
         not isinstance(rows, list)
         or not rows
@@ -140,7 +142,9 @@ def _sheet_projection(sheet: Path) -> tuple[list[list[Any]], dict[str, int]]:
     return rows, index
 
 
-def _write_projection(path: Path, rows: list[list[Any]], index: dict[str, int]) -> None:
+def _write_projection(
+    path: Path, rows: list[list[typing.Any]], index: dict[str, int]
+) -> None:
     with path.open("w", encoding="utf-8", newline="") as output:
         writer = csv.writer(output, lineterminator="\n")
         writer.writerow(FIELDS)
@@ -173,7 +177,7 @@ def _load_core_targets(temp: Path, core_skill: Path) -> list[object]:
         sys.path.insert(0, str(scripts))
         sys.modules[module_name] = core
         loader.exec_module(core)
-        return cast("list[object]", core.load_targets(temp))
+        return typing.cast("list[object]", core.load_targets(temp))
     finally:
         sys.modules.pop(module_name, None)
         sys.path.remove(str(scripts))
@@ -221,8 +225,8 @@ def _workspace_files(workspace: Path) -> list[tuple[str, Path]]:
 
 def _snapshot_manifest(
     workspace: Path,
-) -> tuple[list[dict[str, Any]], list[tuple[str, Path, int, str]]]:
-    manifest_files: list[dict[str, Any]] = []
+) -> tuple[list[dict[str, typing.Any]], list[tuple[str, Path, int, str]]]:
+    manifest_files: list[dict[str, typing.Any]] = []
     contents: list[tuple[str, Path, int, str]] = []
     total = 0
     for name, path in _workspace_files(workspace):
@@ -275,7 +279,7 @@ def _write_snapshot_members(
         written_total += _write_snapshot_member(handle, entry, written_total)
 
 
-def pack(workspace: Path, archive: Path, generation: str) -> dict[str, Any]:
+def pack(workspace: Path, archive: Path, generation: str) -> dict[str, typing.Any]:
     _timestamp(generation)
     if archive.name != f"workspace-{generation}.zip":
         raise GwsError("archive filename and generation mismatch")
@@ -332,7 +336,9 @@ def _safe_path(name: str) -> bool:
     )
 
 
-def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, Any]:
+def verify(
+    archive: Path, *, expected_name: str | None = None
+) -> dict[str, typing.Any]:
     """Validate the complete ZIP before installing any workspace content."""
     match = SNAPSHOT_RE.fullmatch(expected_name or archive.name)
     if not match:
@@ -365,7 +371,7 @@ def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, Any]
                 raise GwsError("archive exceeds expanded size limit")
         if "manifest.json" not in names:
             raise GwsError("missing manifest")
-        manifest: Any = json.loads(handle.read("manifest.json"))
+        manifest: typing.Any = json.loads(handle.read("manifest.json"))
         if (
             not isinstance(manifest, dict)
             or set(manifest) != {"version", "generation", "files"}
@@ -409,7 +415,7 @@ def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, Any]
     }
 
 
-def restore(archive: Path, destination: Path) -> dict[str, Any]:
+def restore(archive: Path, destination: Path) -> dict[str, typing.Any]:
     """Restore to a new workspace only, after complete verification."""
     result = verify(archive)
     if destination.exists() or destination.is_symlink():
@@ -436,8 +442,10 @@ def restore(archive: Path, destination: Path) -> dict[str, Any]:
     return result
 
 
-def _read_ledger(path: Path, reports_dir: Path) -> dict[str, Any]:
-    value: Any = json.loads(path.read_text(encoding="utf-8"))
+def _read_ledger(
+    path: Path, reports_dir: Path
+) -> dict[str, typing.Any]:
+    value: typing.Any = json.loads(path.read_text(encoding="utf-8"))
     if (
         not isinstance(value, dict)
         or set(value) != {"version", "reports"}
@@ -460,7 +468,7 @@ def _read_ledger(path: Path, reports_dir: Path) -> dict[str, Any]:
     return value
 
 
-def ledger(path: Path, report: Path, record: bool) -> dict[str, Any]:
+def ledger(path: Path, report: Path, record: bool) -> dict[str, typing.Any]:
     run_id = report.stem
     if not RUN_ID_RE.fullmatch(run_id) or report.suffix != ".md":
         raise GwsError("invalid report filename")
@@ -510,7 +518,7 @@ def main() -> None:
                 )
             }
         elif args.command == "next-generation":
-            raw: Any = json.loads(args.names_json.read_text())
+            raw: typing.Any = json.loads(args.names_json.read_text())
             if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):
                 raise GwsError("names JSON must be an array of strings")
             generation = next_generation(raw, datetime.now(UTC))
