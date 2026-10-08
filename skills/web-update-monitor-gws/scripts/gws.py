@@ -19,7 +19,7 @@ import tempfile
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, cast
 
 FIELDS = (
     "name",
@@ -49,7 +49,9 @@ def _digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _stream_digest(source: Any, max_size: int, limit_message: str) -> tuple[int, str]:
+def _stream_digest(
+    source: BinaryIO, max_size: int, limit_message: str
+) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
     while chunk := source.read(CHUNK_SIZE):
@@ -155,7 +157,7 @@ def _write_projection(path: Path, rows: list[list[Any]], index: dict[str, int]) 
         os.fsync(output.fileno())
 
 
-def _load_core_targets(temp: Path, core_skill: Path) -> Any:
+def _load_core_targets(temp: Path, core_skill: Path) -> list[object]:
     scripts = core_skill / "scripts"
     core_path = scripts / "workspace.py"
     if not core_path.is_file():
@@ -173,7 +175,7 @@ def _load_core_targets(temp: Path, core_skill: Path) -> Any:
         sys.path.insert(0, str(scripts))
         sys.modules[module_name] = core
         loader.exec_module(core)
-        return core.load_targets(temp)
+        return cast(list[object], core.load_targets(temp))
     finally:
         sys.modules.pop(module_name, None)
         sys.path.remove(str(scripts))
