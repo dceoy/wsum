@@ -140,7 +140,7 @@ def test_project_atomic_with_core_validation(
     source.write_text(
         json.dumps({"values": [["url", "name"], ["https://example.com", "invalid"]]})
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="^$"):
         gws.project(source, dest, skill)
     assert dest.read_bytes() == original
     source.write_text(
