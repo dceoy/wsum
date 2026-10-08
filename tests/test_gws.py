@@ -139,12 +139,11 @@ def test_project_atomic_with_core_validation(
         "        raise ValueError('requested validator rejected invalid row')\n"
         "    return [{'id': 1}]\n"
     )
-    conflicting_core = ModuleType("workspace")
+    class ConflictingWorkspace(ModuleType):
+        def load_targets(self, _: Path) -> list[dict[str, int]]:
+            pytest.fail("used cached workspace module instead of requested core skill")
 
-    def fail_for_cached_module(_: Path) -> None:
-        pytest.fail("used cached workspace module instead of requested core skill")
-
-    setattr(conflicting_core, "load_targets", fail_for_cached_module)
+    conflicting_core = ConflictingWorkspace("workspace")
     monkeypatch.setitem(sys.modules, "workspace", conflicting_core)
     source = tmp_path / "sheet.json"
     dest = tmp_path / "targets.csv"
