@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
-import importlib
+import importlib.util
 import json
 import os
 import re
@@ -38,6 +38,7 @@ MAX_ZIP = 128 * 1024 * 1024
 MAX_FILES = 2000
 MAX_ENTRY = 64 * 1024 * 1024
 MAX_TOTAL = 256 * 1024 * 1024
+CHUNK_SIZE = 1024 * 1024
 
 
 class GwsError(ValueError):
@@ -132,7 +133,13 @@ def project(sheet: Path, destination: Path, core_skill: Path) -> int:
         try:
             writer = csv.writer(output, lineterminator="\n")
             writer.writerow(FIELDS)
-            for row in rows[1:]:
+            for row_number, row in enumerate(rows[1:], start=2):
+                if len(row) > len(names) and any(
+                    str(cell).strip() for cell in row[len(names) :]
+                ):
+                    raise GwsError(
+                        f"Sheet row {row_number} has cells beyond the header"
+                    )
                 if not any(str(cell).strip() for cell in row):
                     continue
                 writer.writerow([
@@ -148,13 +155,24 @@ def project(sheet: Path, destination: Path, core_skill: Path) -> int:
             raise
     try:
         scripts = core_skill / "scripts"
-        if not (scripts / "workspace.py").is_file():
+        core_path = scripts / "workspace.py"
+        if not core_path.is_file():
             raise GwsError(f"core skill not installed at {core_skill}")
-        # Use the core loader, not a divergent copy of CSV validation rules.
+        # Load the requested core version even if another `workspace` is cached.
         sys.path.insert(0, str(scripts))
+        module_name = f"_wsum_core_workspace_{id(temp)}"
         try:
-            core = importlib.import_module("workspace")
-            targets = core.load_targets(temp)
+            spec = importlib.util.spec_from_file_location(module_name, core_path)
+            loader = spec.loader if spec is not None else None
+            if spec is None or loader is None:
+                raise GwsError(f"cannot load core skill at {core_path}")
+            core = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = core
+            try:
+                loader.exec_module(core)
+                targets = core.load_targets(temp)
+            finally:
+                sys.modules.pop(module_name, None)
         finally:
             sys.path.remove(str(scripts))
         temp.replace(destination)
@@ -196,19 +214,29 @@ def pack(workspace: Path, archive: Path, generation: str) -> dict[str, Any]:
     if archive.exists():
         raise GwsError("refusing to overwrite existing snapshot")
     manifest_files: list[dict[str, Any]] = []
-    contents = []
+    contents: list[tuple[str, Path, int, str]] = []
     total = 0
     for name, path in _workspace_files(workspace):
-        data = path.read_bytes()
-        total += len(data)
-        if len(data) > MAX_ENTRY or total > MAX_TOTAL:
+        reported_size = path.stat().st_size
+        if reported_size > MAX_ENTRY or total + reported_size > MAX_TOTAL:
             raise GwsError("workspace size limit exceeded")
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as source:
+            while chunk := source.read(CHUNK_SIZE):
+                size += len(chunk)
+                if size > MAX_ENTRY or total + size > MAX_TOTAL:
+                    raise GwsError("workspace size limit exceeded")
+                digest.update(chunk)
+        if size != reported_size:
+            raise GwsError(f"workspace file changed during snapshot: {name}")
+        total += size
         manifest_files.append({
             "path": name,
-            "size": len(data),
-            "sha256": _digest(data),
+            "size": size,
+            "sha256": digest.hexdigest(),
         })
-        contents.append((name, data))
+        contents.append((name, path, size, digest.hexdigest()))
     manifest = {"version": 1, "generation": generation, "files": manifest_files}
     archive.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -221,8 +249,20 @@ def pack(workspace: Path, archive: Path, generation: str) -> dict[str, Any]:
                 "manifest.json",
                 json.dumps(manifest, separators=(",", ":"), ensure_ascii=False),
             )
-            for name, data in contents:
-                handle.writestr(name, data)
+            written_total = 0
+            for name, path, expected_size, expected_digest in contents:
+                digest = hashlib.sha256()
+                size = 0
+                with path.open("rb") as source, handle.open(name, "w") as target:
+                    while chunk := source.read(CHUNK_SIZE):
+                        size += len(chunk)
+                        if size > MAX_ENTRY or written_total + size > MAX_TOTAL:
+                            raise GwsError("workspace size limit exceeded")
+                        digest.update(chunk)
+                        target.write(chunk)
+                if size != expected_size or digest.hexdigest() != expected_digest:
+                    raise GwsError(f"workspace file changed during snapshot: {name}")
+                written_total += size
         if temp.stat().st_size > MAX_ZIP:
             raise GwsError("snapshot compressed size limit exceeded")
         verify(temp, expected_name=archive.name)
@@ -352,7 +392,7 @@ def restore(archive: Path, destination: Path) -> dict[str, Any]:
     return result
 
 
-def _read_ledger(path: Path) -> dict[str, Any]:
+def _read_ledger(path: Path, reports_dir: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if (
         not isinstance(value, dict)
@@ -367,14 +407,22 @@ def _read_ledger(path: Path) -> dict[str, Any]:
         )
     ):
         raise GwsError("invalid delivery ledger")
+    for run_id, expected_digest in value["reports"].items():
+        report = reports_dir / f"{run_id}.md"
+        if report.is_symlink() or not report.is_file():
+            raise GwsError(f"delivery ledger references missing report: {run_id}")
+        if _digest(report.read_bytes()) != expected_digest:
+            raise GwsError(f"delivered canonical report changed: {run_id}")
     return value
 
 
 def ledger(path: Path, report: Path, record: bool) -> dict[str, Any]:
-    value = _read_ledger(path)
     run_id = report.stem
     if not RUN_ID_RE.fullmatch(run_id) or report.suffix != ".md":
         raise GwsError("invalid report filename")
+    value = _read_ledger(path, report.parent)
+    if report.is_symlink() or not report.is_file():
+        raise GwsError("canonical report must be a regular file")
     digest = _digest(report.read_bytes())
     existing = value["reports"].get(run_id)
     if existing is not None and existing != digest:
