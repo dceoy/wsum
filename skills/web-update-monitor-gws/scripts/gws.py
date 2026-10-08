@@ -19,7 +19,7 @@ import tempfile
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, BinaryIO, cast
+from typing import Any, IO, cast
 
 FIELDS = (
     "name",
@@ -50,7 +50,7 @@ def _digest(content: bytes) -> str:
 
 
 def _stream_digest(
-    source: BinaryIO, max_size: int, limit_message: str
+    source: IO[bytes], max_size: int, limit_message: str
 ) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
@@ -112,8 +112,8 @@ def next_generation(names: list[str], now: datetime) -> str:
 
 
 def _sheet_projection(sheet: Path) -> tuple[list[list[Any]], dict[str, int]]:
-    raw = json.loads(sheet.read_text(encoding="utf-8"))
-    rows = raw.get("values") if isinstance(raw, dict) else raw
+    raw: Any = json.loads(sheet.read_text(encoding="utf-8"))
+    rows: Any = raw.get("values") if isinstance(raw, dict) else raw
     if (
         not isinstance(rows, list)
         or not rows
@@ -121,7 +121,7 @@ def _sheet_projection(sheet: Path) -> tuple[list[list[Any]], dict[str, int]]:
     ):
         raise GwsError("Sheet input must be a non-empty array of value arrays")
     if any(
-        not isinstance(v, (str, int, float, bool)) or v is None
+        not isinstance(v, (str, int, float, bool))
         for row in rows
         for v in row
     ):
@@ -365,7 +365,7 @@ def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, Any]
                 raise GwsError("archive exceeds expanded size limit")
         if "manifest.json" not in names:
             raise GwsError("missing manifest")
-        manifest = json.loads(handle.read("manifest.json"))
+        manifest: Any = json.loads(handle.read("manifest.json"))
         if (
             not isinstance(manifest, dict)
             or set(manifest) != {"version", "generation", "files"}
@@ -437,7 +437,7 @@ def restore(archive: Path, destination: Path) -> dict[str, Any]:
 
 
 def _read_ledger(path: Path, reports_dir: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value: Any = json.loads(path.read_text(encoding="utf-8"))
     if (
         not isinstance(value, dict)
         or set(value) != {"version", "reports"}
@@ -510,7 +510,7 @@ def main() -> None:
                 )
             }
         elif args.command == "next-generation":
-            raw = json.loads(args.names_json.read_text())
+            raw: Any = json.loads(args.names_json.read_text())
             if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):
                 raise GwsError("names JSON must be an array of strings")
             generation = next_generation(raw, datetime.now(UTC))
