@@ -62,7 +62,7 @@ def _write_atomic(path: Path, content: bytes) -> None:
             temp.unlink(missing_ok=True)
             raise
     try:
-        os.replace(temp, path)
+        temp.replace(path)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -157,7 +157,7 @@ def project(sheet: Path, destination: Path, core_skill: Path) -> int:
             targets = core.load_targets(temp)
         finally:
             sys.path.remove(str(scripts))
-        os.replace(temp, destination)
+        temp.replace(destination)
         return len(targets)
     finally:
         temp.unlink(missing_ok=True)

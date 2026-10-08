@@ -1,6 +1,5 @@
 """Workspace-GWS deterministic boundary regression tests."""
 
-import importlib.util
 import json
 import sys
 from types import ModuleType
@@ -8,19 +7,13 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+import gws
 import pytest
 
-MODULE = (
-    Path(__file__).resolve().parents[1] / "skills/web-update-monitor-gws/scripts/gws.py"
-)
-spec = importlib.util.spec_from_file_location("gws", MODULE)
-gws = importlib.util.module_from_spec(spec)
-sys.modules["gws"] = gws
-spec.loader.exec_module(gws)
 GENERATION = "20261009T000000Z"
 
 
-def _workspace(tmp_path):
+def _workspace(tmp_path: Path) -> Path:
     ws = tmp_path / "workspace"
     (ws / "output/report").mkdir(parents=True)
     (ws / "internal/state").mkdir(parents=True)
@@ -29,14 +22,14 @@ def _workspace(tmp_path):
     return ws
 
 
-def _archive(tmp_path):
+def _archive(tmp_path: Path) -> tuple[Path, Path]:
     ws = _workspace(tmp_path)
     archive = tmp_path / f"workspace-{GENERATION}.zip"
     gws.pack(ws, archive, GENERATION)
     return ws, archive
 
 
-def test_snapshot_roundtrip(tmp_path):
+def test_snapshot_roundtrip(tmp_path: Path) -> None:
     ws, archive = _archive(tmp_path)
     verified = gws.verify(archive)
     assert verified["file_count"] == 2
@@ -55,7 +48,7 @@ def test_snapshot_roundtrip(tmp_path):
     "entry",
     ["../escape", "internal/../escape", "/internal/escape", "output//x", "foo/bar"],
 )
-def test_reject_unsafe_paths(tmp_path, entry):
+def test_reject_unsafe_paths(tmp_path: Path, entry: str) -> None:
     archive = tmp_path / f"workspace-{GENERATION}.zip"
     with zipfile.ZipFile(archive, "w") as writer:
         writer.writestr(
@@ -68,7 +61,7 @@ def test_reject_unsafe_paths(tmp_path, entry):
     assert not (tmp_path / "restored").exists()
 
 
-def test_reject_duplicate_archive_member(tmp_path):
+def test_reject_duplicate_archive_member(tmp_path: Path) -> None:
     archive = tmp_path / f"workspace-{GENERATION}.zip"
     with zipfile.ZipFile(archive, "w") as writer:
         writer.writestr("manifest.json", "{}")
@@ -78,7 +71,7 @@ def test_reject_duplicate_archive_member(tmp_path):
         gws.verify(archive)
 
 
-def test_reject_manifest_digest_mismatch(tmp_path):
+def test_reject_manifest_digest_mismatch(tmp_path: Path) -> None:
     _, archive = _archive(tmp_path)
     with zipfile.ZipFile(archive, "a") as writer:
         writer.writestr("output/report/extra.md", "unrecorded")
@@ -86,14 +79,14 @@ def test_reject_manifest_digest_mismatch(tmp_path):
         gws.verify(archive)
 
 
-def test_reject_symlink_input(tmp_path):
+def test_reject_symlink_input(tmp_path: Path) -> None:
     ws = _workspace(tmp_path)
     (ws / "internal/link").symlink_to(ws / "output/report/demo.md")
     with pytest.raises(gws.GwsError, match="non-regular"):
         gws.pack(ws, tmp_path / f"workspace-{GENERATION}.zip", GENERATION)
 
 
-def test_generation_monotonicity_and_duplicates():
+def test_generation_monotonicity_and_duplicates() -> None:
     now = datetime(2026, 10, 9, tzinfo=UTC)
     assert gws.next_generation([], now) == GENERATION
     assert (
@@ -103,7 +96,7 @@ def test_generation_monotonicity_and_duplicates():
         gws.next_generation([f"workspace-{GENERATION}.zip"] * 2, now)
 
 
-def test_delivery_ledger_fail_closed(tmp_path):
+def test_delivery_ledger_fail_closed(tmp_path: Path) -> None:
     path = tmp_path / "delivery.json"
     path.write_text('{"version":1,"reports":{}}')
     report = tmp_path / "20261009T000000Z-abcdef12.md"
@@ -119,14 +112,18 @@ def test_delivery_ledger_fail_closed(tmp_path):
         gws.ledger(path, report, False)
 
 
-def test_project_atomic_with_core_validation(tmp_path, monkeypatch):
+def test_project_atomic_with_core_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     skill = tmp_path / "core"
     (skill / "scripts").mkdir(parents=True)
     (skill / "scripts/workspace.py").write_text(
         "def load_targets(path):\n    text = open(path).read()\n    if 'invalid' in text:\n        raise ValueError('invalid row')\n    return [{'id': 1}]\n"
     )
     isolated_core = ModuleType("workspace")
-    exec((skill / "scripts/workspace.py").read_text(), isolated_core.__dict__)
+    def fake_load_targets(path: Path) -> list[dict[str, int]]:
+        if "invalid" in path.read_text():
+            raise ValueError("invalid row")
+        return [{"id": 1}]
+    isolated_core.load_targets = fake_load_targets
     monkeypatch.setitem(sys.modules, "workspace", isolated_core)
     source = tmp_path / "sheet.json"
     dest = tmp_path / "targets.csv"

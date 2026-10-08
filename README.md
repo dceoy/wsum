@@ -46,7 +46,6 @@ Read `skills/web-update-monitor-gws/SKILL.md` for connector orchestration and re
 
 For **Claude Code Routines**, first check actual Google Sheets range reads and Google Drive binary ZIP create/download/verification, and configure public-network access. The Google Workspace composite includes a deterministic local Python helper for Sheet-to-CSV projection, safe ZIP snapshot pack/verify/restore, generation naming, and delivery-ledger validation (`skills/web-update-monitor-gws/scripts/gws.py`). Google connector transfer and authorization remain the agent's responsibility. Run the [Routines E2E compatibility checklist](docs/claude-code-routines.md) before enabling a recurring schedule; this integration has not been verified against a live Routine.
 
-
 ### LLM wiki composition
 
 ```mermaid

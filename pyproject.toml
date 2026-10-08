@@ -39,6 +39,20 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"skills/web-update-monitor-gws/scripts/gws.py" = [
+  "implicit-namespace-package",  # executable skill helper, not an import package
+  "docstring-missing-returns",  # concise helper docstrings
+  "docstring-missing-exception",  # failures carry contextual GwsError messages
+  "complex-structure",  # explicit ZIP safety checks stay visible
+  "too-many-branches",  # fail-closed manifest parsing
+  "too-many-boolean-expressions",  # strict manifest record contract
+  "too-many-statements-in-try-clause",  # atomic file and ZIP operations
+  "raise-vanilla-args",  # contextual user-facing errors
+  "raw-string-in-exception",  # contextual user-facing errors
+  "f-string-in-exception",  # contextual user-facing errors
+  "undocumented-public-function",  # CLI helpers have descriptive names
+  "print",  # JSON CLI output
+]
 "skills/web-update-monitor/scripts/workspace.py" = [
   "complex-structure",  # explicit filesystem safety branches stay visible
   "docstring-missing-returns",  # concise helper docstrings are sufficient here
@@ -99,6 +113,7 @@ exclude = [
 extraPaths = [
   "skills/web-update-monitor/scripts",
   "skills/web-update-monitor-llm-wiki/scripts",
+  "skills/web-update-monitor-gws/scripts",
 ]
 venvPath = "."
 venv = ".venv"

@@ -18,7 +18,7 @@ the checks below.
 5. Configure at most one active Routine per logical workspace. A schedule
    should not overlap its prior invocation; timestamp ordering is not a lock.
 
-**Required connector operations**
+### Required connector operations
 
 | Resource | Required operations |
 | --- | --- |
