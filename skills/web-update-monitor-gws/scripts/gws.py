@@ -234,7 +234,9 @@ def _snapshot_manifest(
             raise GwsError("workspace size limit exceeded")
         with path.open("rb") as source:
             size, digest = _stream_digest(
-                source, min(MAX_ENTRY, MAX_TOTAL - total), "workspace size limit exceeded"
+                source,
+                min(MAX_ENTRY, MAX_TOTAL - total),
+                "workspace size limit exceeded",
             )
         if size != reported_size:
             raise GwsError(f"workspace file changed during snapshot: {name}")
