@@ -54,6 +54,7 @@ _MAX_LINK_TOTAL_BYTES = 10 * 1024 * 1024
 _MAX_LINK_TEXT_BYTES = 8192
 _MAX_LINK_REVIEW_BYTES = 65_536
 _LINK_TIMEOUT = 60.0
+_HTTP_FORBIDDEN = 403
 _NAVIGATION_HASH_RE = re.compile(
     r"^\[(?:a|area|link):(?:href|url):sha256:([a-f0-9]{64})\]$", re.MULTILINE
 )
@@ -672,14 +673,17 @@ def _write_report(workspace: Path, run_id: str, target_id: str, report: str) -> 
     return destination
 
 
-def _monitor_target(
+def _monitor_target_from_source(
     state: Path,
     target: Mapping[str, object],
     run_id: str,
+    source_arguments: Sequence[str],
     *,
     link_depth: int = _DEFAULT_LINK_DEPTH,
     max_links: int = _MAX_LINKS,
+    link_evidence_incomplete: bool = False,
 ) -> dict[str, object]:
+    """Run one target through the normal transaction flow from any safe source."""
     target_id = _validate_target_id(target["target_id"])
     _recover_pending(state, target_id)
     snapshots = _ensure_directory(
@@ -689,7 +693,7 @@ def _monitor_target(
     candidate_data: bytes | None = None
     with tempfile.TemporaryDirectory(prefix=".monitor-", dir=state) as staging:
         candidate = Path(staging) / "candidate.txt"
-        arguments = ["--url", str(target["url"]), "--output", str(candidate)]
+        arguments = [*source_arguments, "--output", str(candidate)]
         if previous.exists():
             arguments.extend(["--previous", str(previous)])
         namespace = monitor._parser().parse_args(  # pyright: ignore[reportPrivateUsage]
@@ -702,18 +706,47 @@ def _monitor_target(
             or bool(getattr(link_collection, "omitted_hashes", ()))
             or bool(getattr(link_collection, "overflow_count", 0))
         )
-        if link_depth > 0 and result.get("status") == "changed" and has_links:
-            result["link_review"] = _follow_added_links(
-                result,
-                _read_snapshot(previous) or b"",
-                source_url=str(target["url"]),
-                link_depth=link_depth,
-                max_links=max_links,
+        if (
+            link_depth > 0
+            and result.get("status") == "changed"
+            and (has_links or link_evidence_incomplete)
+        ):
+            link_review: dict[str, object] = (
+                _follow_added_links(
+                    result,
+                    _read_snapshot(previous) or b"",
+                    source_url=str(target["url"]),
+                    link_depth=link_depth,
+                    max_links=max_links,
+                )
+                if has_links
+                else {"documents": [], "omitted": 0, "incomplete": False}
             )
+            if link_evidence_incomplete:
+                link_review["incomplete"] = True
+            result["link_review"] = link_review
         if result.get("status") in {"baseline", "changed"}:
             candidate_data = _read_text_bytes(candidate, "candidate")
     return _handle_monitor_result(
         state, target, result, run_id, candidate_data=candidate_data
+    )
+
+
+def _monitor_target(
+    state: Path,
+    target: Mapping[str, object],
+    run_id: str,
+    *,
+    link_depth: int = _DEFAULT_LINK_DEPTH,
+    max_links: int = _MAX_LINKS,
+) -> dict[str, object]:
+    return _monitor_target_from_source(
+        state,
+        target,
+        run_id,
+        ["--url", str(target["url"])],
+        link_depth=link_depth,
+        max_links=max_links,
     )
 
 
@@ -1720,6 +1753,25 @@ def check(
                 if compact and outcome.get("action") == "review"
                 else outcome
             )
+        except monitor.HTTPStatusError as exc:
+            if exc.status == _HTTP_FORBIDDEN:
+                outcomes.append({
+                    "action": "agent_fetch_required",
+                    "run_id": run_id,
+                    "target_id": target["target_id"],
+                    "name": target["name"],
+                    "url": exc.source_url or target["url"],
+                    "status": exc.status,
+                    "link_depth": link_depth,
+                    "max_links": max_links,
+                })
+            else:
+                outcomes.append({
+                    "action": "error",
+                    "target_id": target["target_id"],
+                    "name": target["name"],
+                    "error": str(exc),
+                })
         except (monitor.MonitorError, OSError, WorkspaceError) as exc:
             outcomes.append({
                 "action": "error",
@@ -1728,6 +1780,63 @@ def check(
                 "error": str(exc),
             })
     return {"run_id": run_id, "targets": outcomes}
+
+
+def ingest_agent_fetch(
+    workspace: str | Path,
+    targets: str | Path,
+    *,
+    target_id: str,
+    run_id: str,
+    input_path: str | Path,
+    content_type: str = "text/plain",
+    source_url: str | None = None,
+    links_path: str | Path | None = None,
+    link_depth: int = _DEFAULT_LINK_DEPTH,
+    max_links: int = _MAX_LINKS,
+) -> dict[str, object]:
+    """Ingest content fetched by the main agent after a static HTTP 403."""
+    _validate_link_options(link_depth, max_links)
+    target_id = _validate_target_id(target_id)
+    run_id = _validate_run_id(run_id)
+    root = _workspace(workspace)
+    target = next(
+        (item for item in load_targets(targets) if item["target_id"] == target_id),
+        None,
+    )
+    if target is None or target["action"] == "skip_disabled":
+        raise WorkspaceError("target is not active in the current configuration")
+    selected_source_url = (
+        str(target["url"]) if source_url is None else _validate_url(source_url)
+    )
+    state = _state_dir(root)
+    if _existing_pending_paths(state, target_id) is not None:
+        raise WorkspaceError("target already has a pending review")
+    source_arguments = [
+        "--input",
+        str(input_path),
+        "--source-url",
+        selected_source_url,
+        "--content-type",
+        content_type,
+    ]
+    if links_path is not None:
+        source_arguments.extend(["--navigation-links", str(links_path)])
+    content_type_main = content_type.split(";", 1)[0].strip().lower()
+    link_evidence_incomplete = (
+        link_depth > 0
+        and links_path is None
+        and content_type_main in {"", "text/plain"}
+    )
+    return _monitor_target_from_source(
+        state,
+        target,
+        run_id,
+        source_arguments,
+        link_depth=link_depth,
+        max_links=max_links,
+        link_evidence_incomplete=link_evidence_incomplete,
+    )
 
 
 def _validate_interests(value: object) -> list[dict[str, object]]:
@@ -2757,6 +2866,25 @@ def _parser() -> argparse.ArgumentParser:
     check_parser.add_argument("--link-depth", type=int, default=_DEFAULT_LINK_DEPTH)
     check_parser.add_argument("--max-links", type=int, default=_MAX_LINKS)
 
+    ingest_parser = subparsers.add_parser("ingest")
+    ingest_parser.add_argument("--target-id", required=True)
+    ingest_parser.add_argument("--run-id", required=True)
+    ingest_parser.add_argument("--input", type=Path, required=True)
+    ingest_parser.add_argument("--content-type", default="text/plain")
+    ingest_parser.add_argument(
+        "--source-url",
+        help="checked final URL used to resolve relative links; defaults to target URL",
+    )
+    ingest_parser.add_argument(
+        "--links",
+        type=Path,
+        help=(
+            "UTF-8 JSON array of canonical navigation destinations from extracted text"
+        ),
+    )
+    ingest_parser.add_argument("--link-depth", type=int, default=_DEFAULT_LINK_DEPTH)
+    ingest_parser.add_argument("--max-links", type=int, default=_MAX_LINKS)
+
     pending_parser = subparsers.add_parser("pending")
     pending_parser.add_argument("--target-id")
 
@@ -2771,9 +2899,9 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the workspace-facing orchestration command."""
     args = _parser().parse_args(argv)
-    if args.command == "check" and args.targets is None:
+    if args.command in {"check", "ingest"} and args.targets is None:
         print(
-            json.dumps({"error": "--targets is required for check"}),
+            json.dumps({"error": f"--targets is required for {args.command}"}),
             file=sys.stderr,
         )
         return 2
@@ -2783,6 +2911,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.workspace,
                 args.targets,
                 compact=args.compact,
+                link_depth=args.link_depth,
+                max_links=args.max_links,
+            )
+        elif args.command == "ingest":
+            result = ingest_agent_fetch(
+                args.workspace,
+                args.targets,
+                target_id=args.target_id,
+                run_id=args.run_id,
+                input_path=args.input,
+                content_type=args.content_type,
+                source_url=args.source_url,
+                links_path=args.links,
                 link_depth=args.link_depth,
                 max_links=args.max_links,
             )
@@ -2801,7 +2942,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 targets=args.targets,
                 archive_evidence=args.archive_evidence,
             )
-    except (WorkspaceError, OSError) as exc:
+    except (monitor.MonitorError, WorkspaceError, OSError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
     with _integer_text_limit():

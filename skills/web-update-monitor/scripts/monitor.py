@@ -44,6 +44,13 @@ _DEFAULT_MAX_DIFF_BYTES = 65_536
 _DEFAULT_MAX_DIFF_COMPLEXITY = 4_000_000
 _DEFAULT_TIMEOUT = 30.0
 _DEFAULT_MAX_REDIRECTS = 10
+_VERSION = "0.1.0"
+_USER_AGENT = f"wsum/{_VERSION}"
+_MAX_NAVIGATION_LINKS_FILE_BYTES = 512 * 1024
+_MAX_NAVIGATION_LINKS = 500
+_NAVIGATION_LINK_MARKER_RE = re.compile(
+    r"^\[(?:a|area):href:sha256:([a-f0-9]{64})\]$", re.MULTILINE
+)
 _DEFAULT_MAX_PDF_DECOMPRESSED_BYTES = 20 * 1024 * 1024
 _DEFAULT_MAX_PDF_EXTRACTED_CHARS = 10 * 1024 * 1024
 _DEFAULT_MAX_PDF_PAGES = 1_000
@@ -237,6 +244,16 @@ _PDF_LIMIT_LOCK = threading.Lock()
 
 class MonitorError(RuntimeError):
     """Expected input, network, or normalization failure."""
+
+
+class HTTPStatusError(MonitorError):
+    """HTTP response rejected because its status is not successful."""
+
+    def __init__(self, status: int, *, source_url: str = "") -> None:
+        """Create an error for one rejected HTTP status."""
+        self.status = status
+        self.source_url = source_url
+        super().__init__(f"fetch failed: HTTP {status}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,6 +511,135 @@ def _collect_link(links: dict[str, str], destination: str) -> None:
             links.omitted_hashes.add(digest)
         return
     links[digest] = parsed._replace(fragment="").geturl()
+
+
+def _canonical_navigation_url(value: object) -> str:
+    """Validate and canonicalize one absolute HTTP(S) navigation URL."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise MonitorError("--navigation-links contains an invalid URL")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise MonitorError("--navigation-links contains an invalid URL") from exc
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise MonitorError("--navigation-links contains an invalid URL")
+    if _destination_has_credentials(value):
+        raise MonitorError("--navigation-links contains a credential-bearing URL")
+    if port is not None and port <= 0:
+        raise MonitorError("--navigation-links contains an invalid URL")
+    destination = parsed.geturl()
+    if len(destination.encode("utf-8")) > _DEFAULT_MAX_XML_BASE_URL_CHARS:
+        raise MonitorError("--navigation-links contains an oversized URL")
+    return destination
+
+
+def _read_navigation_links(path: Path | None) -> list[str]:
+    """Read a bounded JSON array of absolute HTTP(S) navigation URLs."""
+    if path is None:
+        return []
+    raw = _read_regular_file_limited(
+        path, _MAX_NAVIGATION_LINKS_FILE_BYTES, "--navigation-links"
+    )
+    try:
+        value: object = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MonitorError("--navigation-links must be a UTF-8 JSON array") from exc
+    if not isinstance(value, list):
+        raise MonitorError("--navigation-links must contain a JSON array")
+    items = cast("list[object]", value)
+    if len(items) > _MAX_NAVIGATION_LINKS:
+        raise MonitorError("--navigation-links must contain at most 500 URLs")
+
+    destinations: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        destination = _canonical_navigation_url(item)
+        if destination not in seen:
+            seen.add(destination)
+            destinations.append(destination)
+    return destinations
+
+
+def _include_navigation_links(
+    text: str, links: LinkCollection, path: Path | None
+) -> str:
+    """Add externally extracted navigation URLs to normalized text and links."""
+    navigation_links = _read_navigation_links(path)
+    if not navigation_links:
+        return text
+    existing_hashes = set(_NAVIGATION_LINK_MARKER_RE.findall(text))
+    markers: list[str] = []
+    for destination in navigation_links:
+        _collect_link(links, destination)
+        digest = hashlib.sha256(destination.encode("utf-8")).hexdigest()
+        if digest not in existing_hashes:
+            markers.append(f"[a:href:sha256:{digest}]")
+            existing_hashes.add(digest)
+    if not markers:
+        return text
+    return _normalize_whitespace(f"{text}\n" + "\n".join(markers))
+
+
+def _navigation_comparison_view(
+    text: str,
+) -> tuple[str, str, frozenset[str], tuple[tuple[str, int], ...], bool]:
+    """Return a stable comparison view and navigation-marker metadata."""
+    matches = list(_NAVIGATION_LINK_MARKER_RE.finditer(text))
+    if not matches:
+        return text, text, frozenset(), (), False
+
+    body = _normalize_whitespace(_NAVIGATION_LINK_MARKER_RE.sub("", text))
+    identities = frozenset(match.group(1) for match in matches)
+    markers = [f"[a:href:sha256:{identity}]" for identity in sorted(identities)]
+    comparison_text = _normalize_whitespace(f"{body}\n" + "\n".join(markers))
+    placements = tuple(
+        sorted(
+            (
+                match.group(1),
+                len(_NAVIGATION_LINK_MARKER_RE.sub("", text[: match.start()]).split()),
+            )
+            for match in matches
+        )
+    )
+
+    trailing_count = 0
+    for line in reversed(text.splitlines()):
+        if _NAVIGATION_LINK_MARKER_RE.fullmatch(line):
+            trailing_count += 1
+        elif not line.strip():
+            continue
+        else:
+            break
+    is_manifest_suffix = trailing_count == len(matches)
+    return body, comparison_text, identities, placements, is_manifest_suffix
+
+
+def _navigation_comparison_views_match(
+    current: tuple[str, str, frozenset[str], tuple[tuple[str, int], ...], bool],
+    previous: tuple[str, str, frozenset[str], tuple[tuple[str, int], ...], bool],
+) -> bool:
+    """Return whether navigation markers can be compared as a set."""
+    if current[4] and previous[4]:
+        return True
+    if current[4] == previous[4] or not current[2]:
+        return False
+    return all((
+        current[2] == previous[2],
+        current[0].split() == previous[0].split(),
+        current[3] != previous[3],
+    ))
+
+
+def _navigation_comparison_pair(current: str, previous: str) -> tuple[str, str] | None:
+    """Return marker-normalized texts when marker placement is incidental."""
+    views = (
+        _navigation_comparison_view(current),
+        _navigation_comparison_view(previous),
+    )
+    if _navigation_comparison_views_match(*views):
+        return views[0][1], views[1][1]
+    return None
 
 
 def _normalize_html_fragment(
@@ -871,7 +1017,7 @@ def _open_response(
                 "Accept-Encoding": "identity",
                 "Connection": "close",
                 "Host": _host_header(target),
-                "User-Agent": "wsum/0.1 (+https://github.com/dceoy/wsum)",
+                "User-Agent": _USER_AGENT,
             },
         )
         _remaining(deadline)
@@ -900,11 +1046,13 @@ def _redirect_target(
 
 
 def _validate_response(
-    response: http.client.HTTPResponse, max_bytes: int
+    response: http.client.HTTPResponse,
+    max_bytes: int,
+    *,
+    source_url: str = "",
 ) -> int | None:
     if not 200 <= response.status < 300:
-        message = f"fetch failed: HTTP {response.status}"
-        raise MonitorError(message)
+        raise HTTPStatusError(response.status, source_url=source_url)
     content_encoding = (response.getheader("Content-Encoding", "") or "").strip()
     if content_encoding.lower() not in {"", "identity"}:
         raise MonitorError("compressed HTTP content encoding is not supported")
@@ -934,7 +1082,7 @@ def _fetch_once(
         redirected = _redirect_target(response, target, redirect_count, deadline)
         if redirected is not None:
             return redirected
-        declared_length = _validate_response(response, max_bytes)
+        declared_length = _validate_response(response, max_bytes, source_url=target.url)
         body = _read_response_limited(
             response,
             max_bytes,
@@ -1952,6 +2100,7 @@ def compare_text(
     *,
     max_diff_lines: int,
     max_diff_bytes: int = _DEFAULT_MAX_DIFF_BYTES,
+    compare_navigation_markers: bool = False,
 ) -> dict[str, object]:
     """Return baseline/unchanged/changed metadata and a bounded unified diff."""
     if max_diff_lines <= 0 or max_diff_bytes <= 0:
@@ -1967,7 +2116,14 @@ def compare_text(
         }
 
     previous_hash = _sha256(previous)
-    if previous_hash == current_hash:
+    comparison_current = current
+    comparison_previous = previous
+    if compare_navigation_markers:
+        navigation_pair = _navigation_comparison_pair(current, previous)
+        if navigation_pair is not None:
+            comparison_current, comparison_previous = navigation_pair
+
+    if comparison_previous == comparison_current:
         return {
             "status": "unchanged",
             "sha256": current_hash,
@@ -1977,8 +2133,8 @@ def compare_text(
         }
 
     bounded, truncated = _bounded_diff(
-        current,
-        previous,
+        comparison_current,
+        comparison_previous,
         max_diff_lines=max_diff_lines,
         max_diff_bytes=max_diff_bytes,
     )
@@ -2028,6 +2184,11 @@ def _parser() -> argparse.ArgumentParser:
         "--source-url", default="", help="canonical URL when using --input"
     )
     parser.add_argument("--content-type", default="", help="override input MIME type")
+    parser.add_argument(
+        "--navigation-links",
+        type=Path,
+        help="UTF-8 JSON array of canonical navigation URLs for extracted text",
+    )
     parser.add_argument("--previous", type=Path, help="previous normalized snapshot")
     parser.add_argument("--output", type=Path, help="write current normalized snapshot")
     parser.add_argument("--timeout", type=float, default=_DEFAULT_TIMEOUT)
@@ -2096,6 +2257,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     if not current:
         raise MonitorError("normalization produced empty content")
+    current = _include_navigation_links(
+        current, links, getattr(args, "navigation_links", None)
+    )
     current_bytes = current.encode("utf-8")
     if len(current_bytes) > _DEFAULT_MAX_SNAPSHOT_BYTES:
         raise MonitorError("normalized snapshot exceeds the size limit")
@@ -2114,6 +2278,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         previous,
         max_diff_lines=args.max_diff_lines,
         max_diff_bytes=max_diff_bytes,
+        compare_navigation_markers=(
+            _normalization_content_type(document) in _HTML_CONTENT_TYPES
+            or getattr(args, "navigation_links", None) is not None
+        ),
     )
     if args.output:
         _write_snapshot_atomic(args.output, current_bytes)

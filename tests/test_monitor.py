@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import builtins
+import hashlib
 import ipaddress
+import json
 import os
 import runpy
 import ssl
+import tomllib
 from argparse import Namespace
 from io import BytesIO
 from pathlib import Path
@@ -30,6 +33,301 @@ from monitor import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+
+def test_user_agent_matches_project_version() -> None:
+    with Path("pyproject.toml").open("rb") as stream:
+        project_version = tomllib.load(stream)["project"]["version"]
+
+    assert f"wsum/{project_version}" == monitor._USER_AGENT
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        1,
+        "",
+        " https://example.com/",
+        "https://example.com/ ",
+        "ftp://example.com/",
+        "https://",
+        "https://example.com:invalid/",
+        "https://example.com:0/",
+        "https://user:pass@example.com/",
+        "https://example.com/?token=secret",
+        "https://example.com/?safe=1;signature=secret",
+        "https://example.com/#access_token=secret",
+        "https://hooks.slack.com/services/test/placeholder",
+        "https://discord.com/api/webhooks/test/placeholder",
+        "https://example.com/" + "x" * 4096,
+    ],
+    ids=[
+        "non-string",
+        "integer",
+        "empty",
+        "leading-whitespace",
+        "trailing-whitespace",
+        "unsupported-scheme",
+        "missing-host",
+        "invalid-port",
+        "zero-port",
+        "credentials",
+        "token-query",
+        "semicolon-signature-query",
+        "credential-fragment",
+        "slack-webhook",
+        "discord-webhook",
+        "oversized",
+    ],
+)
+def test_canonical_navigation_url_rejects_invalid_values(value: object) -> None:
+    with pytest.raises(
+        MonitorError, match=r"invalid URL|oversized URL|credential-bearing"
+    ):
+        monitor._canonical_navigation_url(value)
+
+
+def test_canonical_navigation_url_preserves_fragment_identity() -> None:
+    assert (
+        monitor._canonical_navigation_url("https://example.com:8443/path?x=1#section")
+        == "https://example.com:8443/path?x=1#section"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"{not json", b"\xff"],
+    ids=["malformed", "invalid-utf8"],
+)
+def test_read_navigation_links_rejects_invalid_json(tmp_path: Path, raw: bytes) -> None:
+    path = tmp_path / "links.json"
+    path.write_bytes(raw)
+
+    with pytest.raises(MonitorError, match="UTF-8 JSON array"):
+        monitor._read_navigation_links(path)
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (b"{}", "JSON array"),
+        (
+            json.dumps([
+                f"https://example.com/{index}" for index in range(501)
+            ]).encode(),
+            "at most 500 URLs",
+        ),
+    ],
+    ids=["not-array", "too-many"],
+)
+def test_read_navigation_links_rejects_invalid_array(
+    tmp_path: Path, raw: bytes, message: str
+) -> None:
+    path = tmp_path / "links.json"
+    path.write_bytes(raw)
+
+    with pytest.raises(MonitorError, match=message):
+        monitor._read_navigation_links(path)
+
+
+def test_read_navigation_links_preserves_fragment_identities(tmp_path: Path) -> None:
+    path = tmp_path / "links.json"
+    path.write_text(
+        json.dumps([
+            "https://example.com/path#first",
+            "https://example.com/path#first",
+            "https://example.com/path#second",
+        ]),
+        encoding="utf-8",
+    )
+
+    assert monitor._read_navigation_links(path) == [
+        "https://example.com/path#first",
+        "https://example.com/path#second",
+    ]
+
+
+def test_include_navigation_links_returns_text_for_empty_manifest(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "links.json"
+    path.write_text("[]", encoding="utf-8")
+    links = monitor.LinkCollection()
+    original = "existing normalized text\n"
+
+    assert monitor._include_navigation_links(original, links, path) == original
+    assert not links
+
+
+def test_include_navigation_links_reuses_existing_marker(tmp_path: Path) -> None:
+    destination = "https://example.com/page#section"
+    digest = monitor.hashlib.sha256(destination.encode("utf-8")).hexdigest()
+    original = f"[area:href:sha256:{digest}]"
+    path = tmp_path / "links.json"
+    path.write_text(json.dumps([destination]), encoding="utf-8")
+    links = monitor.LinkCollection()
+
+    assert monitor._include_navigation_links(original, links, path) == original
+    assert set(links.values()) == {"https://example.com/page"}
+
+
+@pytest.mark.parametrize(
+    "direction",
+    ["static-to-manifest", "manifest-to-static"],
+    ids=["static-to-agent-fetch", "agent-fetch-to-static"],
+)
+def test_compare_static_and_manifest_markers_ignores_fetch_mode(
+    tmp_path: Path, direction: str
+) -> None:
+    destination = "https://example.com/release#details"
+    html = f'<main><a href="{destination}">Release</a> notes</main>'.encode()
+    static_links = monitor.LinkCollection()
+    static = normalize_document(
+        Document(html, "https://example.com/", "text/html"), links=static_links
+    )
+    extracted = normalize_document(
+        Document(b"Release notes", "https://example.com/", "text/plain")
+    )
+    manifest = tmp_path / "navigation-links.json"
+    manifest.write_text(json.dumps([destination]), encoding="utf-8")
+    fallback = monitor._include_navigation_links(
+        extracted, monitor.LinkCollection(), manifest
+    )
+    current, previous = (
+        (fallback, static) if direction == "static-to-manifest" else (static, fallback)
+    )
+
+    result = compare_text(
+        current,
+        previous,
+        max_diff_lines=20,
+        compare_navigation_markers=True,
+    )
+
+    assert result["status"] == "unchanged"
+    assert result["sha256"] == hashlib.sha256(current.encode()).hexdigest()
+    assert result["previous_sha256"] == hashlib.sha256(previous.encode()).hexdigest()
+    assert result["sha256"] != result["previous_sha256"]
+    assert not result["diff"]
+
+
+@pytest.mark.parametrize(
+    ("previous_body", "previous_links", "current_body", "current_links", "status"),
+    [
+        (
+            "Release notes\n",
+            ["https://example.com/a", "https://example.com/b"],
+            "Release notes\n",
+            ["https://example.com/b", "https://example.com/a"],
+            "unchanged",
+        ),
+        (
+            "Release notes\n",
+            ["https://example.com/a", "https://example.com/a"],
+            "Release notes\n",
+            ["https://example.com/a"],
+            "unchanged",
+        ),
+        (
+            "Release notes\n",
+            ["https://example.com/a"],
+            "Release notes\n",
+            ["https://example.com/a", "https://example.com/b"],
+            "changed",
+        ),
+        (
+            "Release notes\n",
+            ["https://example.com/a", "https://example.com/b"],
+            "Release notes\n",
+            ["https://example.com/a"],
+            "changed",
+        ),
+        (
+            "Release notes\n",
+            ["https://example.com/a#first"],
+            "Release notes\n",
+            ["https://example.com/a#second"],
+            "changed",
+        ),
+        (
+            "Release notes\n",
+            ["https://example.com/a"],
+            "Updated release notes\n",
+            ["https://example.com/a"],
+            "changed",
+        ),
+    ],
+    ids=[
+        "reordered-links",
+        "duplicate-destination",
+        "added-destination",
+        "removed-destination",
+        "fragment-change",
+        "visible-text-change",
+    ],
+)
+def test_compare_manifest_navigation_sets(
+    previous_body: str,
+    previous_links: list[str],
+    current_body: str,
+    current_links: list[str],
+    status: str,
+) -> None:
+    def snapshot(body: str, destinations: list[str]) -> str:
+        markers = [
+            "[a:href:sha256:" + hashlib.sha256(destination.encode()).hexdigest() + "]"
+            for destination in destinations
+        ]
+        return body + "\n".join(markers) + "\n"
+
+    result = compare_text(
+        snapshot(current_body, current_links),
+        snapshot(previous_body, previous_links),
+        max_diff_lines=20,
+        compare_navigation_markers=True,
+    )
+
+    assert result["status"] == status
+
+
+def test_compare_static_line_break_change_with_stable_marker_placement() -> None:
+    destination = "https://example.com/release"
+    marker = "[a:href:sha256:" + hashlib.sha256(destination.encode()).hexdigest() + "]"
+    previous = f"Introduction\n{marker}\nRelease\nnotes\n"
+    current = f"Introduction\n{marker}\nRelease notes\n"
+
+    result = compare_text(
+        current,
+        previous,
+        max_diff_lines=20,
+        compare_navigation_markers=True,
+    )
+
+    assert result["status"] == "changed"
+
+
+def test_compare_static_link_position_change_without_manifest_remains_visible() -> None:
+    destination = "https://example.com/release"
+    marker = "[a:href:sha256:" + hashlib.sha256(destination.encode()).hexdigest() + "]"
+    previous = f"Introduction\n{marker}\nRelease\nnotes\n"
+    current = f"Introduction\nRelease\n{marker}\nnotes\n"
+
+    result = compare_text(
+        current,
+        previous,
+        max_diff_lines=20,
+        compare_navigation_markers=True,
+    )
+
+    assert result["status"] == "changed"
+
+
+def test_navigation_comparison_view_accepts_trailing_blank_lines() -> None:
+    digest = hashlib.sha256(b"https://example.com/release").hexdigest()
+    marker = f"[a:href:sha256:{digest}]"
+
+    assert monitor._navigation_comparison_view(f"{marker}\n\n")[4]
 
 
 def test_normalize_html_removes_markup_and_scripts() -> None:
@@ -729,6 +1027,54 @@ def test_fetch_revalidates_each_redirect_without_re_resolving_a_target(
     assert document.body == b"updated"
     assert resolver_calls == ["example.com", "other.example"]
     assert connected == [("93.184.216.34", 80), ("93.184.216.35", 80)]
+
+
+def test_fetch_preserves_final_url_when_redirect_chain_returns_forbidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver_calls: list[str] = []
+    connected: list[tuple[str, int]] = []
+    addresses = {
+        "example.com": "93.184.216.34",
+        "other.example": "93.184.216.35",
+        "final.example": "93.184.216.36",
+    }
+
+    def resolver(host: str, port: int) -> list[tuple[Any, ...]]:
+        resolver_calls.append(host)
+        return [
+            (
+                monitor.socket.AF_INET,
+                monitor.socket.SOCK_STREAM,
+                6,
+                "",
+                (addresses[host], port),
+            )
+        ]
+
+    final_url = "http://final.example/releases/current"
+    _install_fake_http(
+        monkeypatch,
+        resolver,
+        [
+            _FakeResponse(302, headers={"Location": "http://other.example/next"}),
+            _FakeResponse(307, headers={"Location": final_url}),
+            _FakeResponse(403),
+        ],
+        connected,
+    )
+
+    with pytest.raises(monitor.HTTPStatusError) as captured:
+        fetch_document("http://example.com/start", timeout=5.0, max_bytes=1024)
+
+    assert captured.value.status == 403
+    assert captured.value.source_url == final_url
+    assert resolver_calls == ["example.com", "other.example", "final.example"]
+    assert connected == [
+        ("93.184.216.34", 80),
+        ("93.184.216.35", 80),
+        ("93.184.216.36", 80),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -2129,6 +2475,26 @@ def test_response_validation_rejects_unsafe_responses(
     )()
     with pytest.raises(MonitorError, match=message):
         monitor._validate_response(response, max_bytes=10)  # pyright: ignore[reportArgumentType, reportPrivateUsage]
+
+
+def test_response_validation_exposes_http_status() -> None:
+    response = type(
+        "Response",
+        (),
+        {
+            "status": 403,
+            "getheader": lambda _self, _name, default=None: default,  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+        },
+    )()
+    with pytest.raises(monitor.HTTPStatusError, match="HTTP 403") as captured:
+        monitor._validate_response(  # pyright: ignore[reportArgumentType, reportPrivateUsage]
+            response,  # pyright: ignore[reportArgumentType]
+            max_bytes=10,
+            source_url="https://example.com/final",
+        )
+
+    assert captured.value.status == 403
+    assert captured.value.source_url == "https://example.com/final"
 
 
 def test_read_response_supports_read_fallback_closed_response_and_deadline(
