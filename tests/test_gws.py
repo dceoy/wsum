@@ -139,8 +139,12 @@ def test_project_atomic_with_core_validation(
         "        raise ValueError('requested validator rejected invalid row')\n"
         "    return [{'id': 1}]\n"
     )
+
     class ConflictingWorkspace(ModuleType):
-        def load_targets(self, _: Path) -> list[dict[str, int]]:
+        """Fail if projection selects the cached module instead of the requested path."""
+
+        @staticmethod
+        def load_targets(_: Path) -> list[dict[str, int]]:
             pytest.fail("used cached workspace module instead of requested core skill")
 
     conflicting_core = ConflictingWorkspace("workspace")
