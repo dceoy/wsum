@@ -49,7 +49,7 @@ _USER_AGENT = f"wsum/{_VERSION}"
 _MAX_NAVIGATION_LINKS_FILE_BYTES = 512 * 1024
 _MAX_NAVIGATION_LINKS = 500
 _NAVIGATION_LINK_MARKER_RE = re.compile(
-    r"^\[a:href:sha256:([a-f0-9]{64})\]$", re.MULTILINE
+    r"^\[(?:a|area):href:sha256:([a-f0-9]{64})\]$", re.MULTILINE
 )
 _DEFAULT_MAX_PDF_DECOMPRESSED_BYTES = 20 * 1024 * 1024
 _DEFAULT_MAX_PDF_EXTRACTED_CHARS = 10 * 1024 * 1024
@@ -249,9 +249,10 @@ class MonitorError(RuntimeError):
 class HTTPStatusError(MonitorError):
     """HTTP response rejected because its status is not successful."""
 
-    def __init__(self, status: int) -> None:
+    def __init__(self, status: int, *, source_url: str = "") -> None:
         """Create an error for one rejected HTTP status."""
         self.status = status
+        self.source_url = source_url
         super().__init__(f"fetch failed: HTTP {status}")
 
 
@@ -523,11 +524,11 @@ def _canonical_navigation_url(value: object) -> str:
         raise MonitorError("--navigation-links contains an invalid URL") from exc
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         raise MonitorError("--navigation-links contains an invalid URL")
-    if parsed.username is not None or parsed.password is not None:
-        raise MonitorError("--navigation-links contains an invalid URL")
+    if _destination_has_credentials(value):
+        raise MonitorError("--navigation-links contains a credential-bearing URL")
     if port is not None and port <= 0:
         raise MonitorError("--navigation-links contains an invalid URL")
-    destination = parsed._replace(fragment="").geturl()
+    destination = parsed.geturl()
     if len(destination.encode("utf-8")) > _DEFAULT_MAX_XML_BASE_URL_CHARS:
         raise MonitorError("--navigation-links contains an oversized URL")
     return destination
@@ -578,6 +579,67 @@ def _include_navigation_links(
     if not markers:
         return text
     return _normalize_whitespace(f"{text}\n" + "\n".join(markers))
+
+
+def _navigation_comparison_view(
+    text: str,
+) -> tuple[str, str, frozenset[str], tuple[tuple[str, int], ...], bool]:
+    """Return a stable comparison view and navigation-marker metadata."""
+    matches = list(_NAVIGATION_LINK_MARKER_RE.finditer(text))
+    if not matches:
+        return text, text, frozenset(), (), False
+
+    body = _normalize_whitespace(_NAVIGATION_LINK_MARKER_RE.sub("", text))
+    identities = frozenset(match.group(1) for match in matches)
+    markers = [f"[a:href:sha256:{identity}]" for identity in sorted(identities)]
+    comparison_text = _normalize_whitespace(f"{body}\n" + "\n".join(markers))
+    placements = tuple(
+        sorted(
+            (
+                match.group(1),
+                len(_NAVIGATION_LINK_MARKER_RE.sub("", text[: match.start()]).split()),
+            )
+            for match in matches
+        )
+    )
+
+    trailing_count = 0
+    for line in reversed(text.splitlines()):
+        if _NAVIGATION_LINK_MARKER_RE.fullmatch(line):
+            trailing_count += 1
+        elif not line.strip():
+            continue
+        else:
+            break
+    is_manifest_suffix = trailing_count == len(matches)
+    return body, comparison_text, identities, placements, is_manifest_suffix
+
+
+def _navigation_comparison_views_match(
+    current: tuple[str, str, frozenset[str], tuple[tuple[str, int], ...], bool],
+    previous: tuple[str, str, frozenset[str], tuple[tuple[str, int], ...], bool],
+) -> bool:
+    """Return whether navigation markers can be compared as a set."""
+    if current[4] and previous[4]:
+        return True
+    if current[4] == previous[4] or not current[2]:
+        return False
+    return all((
+        current[2] == previous[2],
+        current[0].split() == previous[0].split(),
+        current[3] != previous[3],
+    ))
+
+
+def _navigation_comparison_pair(current: str, previous: str) -> tuple[str, str] | None:
+    """Return marker-normalized texts when marker placement is incidental."""
+    views = (
+        _navigation_comparison_view(current),
+        _navigation_comparison_view(previous),
+    )
+    if _navigation_comparison_views_match(*views):
+        return views[0][1], views[1][1]
+    return None
 
 
 def _normalize_html_fragment(
@@ -984,10 +1046,13 @@ def _redirect_target(
 
 
 def _validate_response(
-    response: http.client.HTTPResponse, max_bytes: int
+    response: http.client.HTTPResponse,
+    max_bytes: int,
+    *,
+    source_url: str = "",
 ) -> int | None:
     if not 200 <= response.status < 300:
-        raise HTTPStatusError(response.status)
+        raise HTTPStatusError(response.status, source_url=source_url)
     content_encoding = (response.getheader("Content-Encoding", "") or "").strip()
     if content_encoding.lower() not in {"", "identity"}:
         raise MonitorError("compressed HTTP content encoding is not supported")
@@ -1017,7 +1082,7 @@ def _fetch_once(
         redirected = _redirect_target(response, target, redirect_count, deadline)
         if redirected is not None:
             return redirected
-        declared_length = _validate_response(response, max_bytes)
+        declared_length = _validate_response(response, max_bytes, source_url=target.url)
         body = _read_response_limited(
             response,
             max_bytes,
@@ -2035,6 +2100,7 @@ def compare_text(
     *,
     max_diff_lines: int,
     max_diff_bytes: int = _DEFAULT_MAX_DIFF_BYTES,
+    compare_navigation_markers: bool = False,
 ) -> dict[str, object]:
     """Return baseline/unchanged/changed metadata and a bounded unified diff."""
     if max_diff_lines <= 0 or max_diff_bytes <= 0:
@@ -2050,7 +2116,14 @@ def compare_text(
         }
 
     previous_hash = _sha256(previous)
-    if previous_hash == current_hash:
+    comparison_current = current
+    comparison_previous = previous
+    if compare_navigation_markers:
+        navigation_pair = _navigation_comparison_pair(current, previous)
+        if navigation_pair is not None:
+            comparison_current, comparison_previous = navigation_pair
+
+    if comparison_previous == comparison_current:
         return {
             "status": "unchanged",
             "sha256": current_hash,
@@ -2060,8 +2133,8 @@ def compare_text(
         }
 
     bounded, truncated = _bounded_diff(
-        current,
-        previous,
+        comparison_current,
+        comparison_previous,
         max_diff_lines=max_diff_lines,
         max_diff_bytes=max_diff_bytes,
     )
@@ -2205,6 +2278,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         previous,
         max_diff_lines=args.max_diff_lines,
         max_diff_bytes=max_diff_bytes,
+        compare_navigation_markers=(
+            _normalization_content_type(document) in _HTML_CONTENT_TYPES
+            or getattr(args, "navigation_links", None) is not None
+        ),
     )
     if args.output:
         _write_snapshot_atomic(args.output, current_bytes)

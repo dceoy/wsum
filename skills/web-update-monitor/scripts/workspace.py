@@ -1760,7 +1760,7 @@ def check(
                     "run_id": run_id,
                     "target_id": target["target_id"],
                     "name": target["name"],
-                    "url": target["url"],
+                    "url": exc.source_url or target["url"],
                     "status": exc.status,
                     "link_depth": link_depth,
                     "max_links": max_links,
@@ -1790,6 +1790,7 @@ def ingest_agent_fetch(
     run_id: str,
     input_path: str | Path,
     content_type: str = "text/plain",
+    source_url: str | None = None,
     links_path: str | Path | None = None,
     link_depth: int = _DEFAULT_LINK_DEPTH,
     max_links: int = _MAX_LINKS,
@@ -1805,6 +1806,9 @@ def ingest_agent_fetch(
     )
     if target is None or target["action"] == "skip_disabled":
         raise WorkspaceError("target is not active in the current configuration")
+    selected_source_url = (
+        str(target["url"]) if source_url is None else _validate_url(source_url)
+    )
     state = _state_dir(root)
     if _existing_pending_paths(state, target_id) is not None:
         raise WorkspaceError("target already has a pending review")
@@ -1812,7 +1816,7 @@ def ingest_agent_fetch(
         "--input",
         str(input_path),
         "--source-url",
-        str(target["url"]),
+        selected_source_url,
         "--content-type",
         content_type,
     ]
@@ -2868,9 +2872,15 @@ def _parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--input", type=Path, required=True)
     ingest_parser.add_argument("--content-type", default="text/plain")
     ingest_parser.add_argument(
+        "--source-url",
+        help="checked final URL used to resolve relative links; defaults to target URL",
+    )
+    ingest_parser.add_argument(
         "--links",
         type=Path,
-        help="UTF-8 JSON array of canonical navigation URLs from an extracted page",
+        help=(
+            "UTF-8 JSON array of canonical navigation destinations from extracted text"
+        ),
     )
     ingest_parser.add_argument("--link-depth", type=int, default=_DEFAULT_LINK_DEPTH)
     ingest_parser.add_argument("--max-links", type=int, default=_MAX_LINKS)
@@ -2912,6 +2922,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_id=args.run_id,
                 input_path=args.input,
                 content_type=args.content_type,
+                source_url=args.source_url,
                 links_path=args.links,
                 link_depth=args.link_depth,
                 max_links=args.max_links,
