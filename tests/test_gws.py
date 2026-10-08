@@ -141,7 +141,7 @@ def test_project_atomic_with_core_validation(
     )
 
     class ConflictingWorkspace(ModuleType):
-        """Fail if projection selects the cached module instead of the requested path."""
+        """Fail if projection selects a cached module instead of the requested path."""
 
         @staticmethod
         def load_targets(_: Path) -> list[dict[str, int]]:
