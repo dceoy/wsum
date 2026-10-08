@@ -144,7 +144,7 @@ def test_project_atomic_with_core_validation(
     def fail_for_cached_module(_: Path) -> None:
         pytest.fail("used cached workspace module instead of requested core skill")
 
-    conflicting_core.load_targets = fail_for_cached_module
+    setattr(conflicting_core, "load_targets", fail_for_cached_module)
     monkeypatch.setitem(sys.modules, "workspace", conflicting_core)
     source = tmp_path / "sheet.json"
     dest = tmp_path / "targets.csv"
