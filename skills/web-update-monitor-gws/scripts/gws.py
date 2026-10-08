@@ -175,7 +175,7 @@ def _load_core_targets(temp: Path, core_skill: Path) -> list[object]:
         sys.path.insert(0, str(scripts))
         sys.modules[module_name] = core
         loader.exec_module(core)
-        return cast(list[object], core.load_targets(temp))
+        return cast("list[object]", core.load_targets(temp))
     finally:
         sys.modules.pop(module_name, None)
         sys.path.remove(str(scripts))
