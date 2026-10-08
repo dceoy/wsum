@@ -21,7 +21,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-FIELDS = ("name", "url", "publisher", "category", "keywords", "criteria", "priority", "enabled")
+FIELDS = (
+    "name",
+    "url",
+    "publisher",
+    "category",
+    "keywords",
+    "criteria",
+    "priority",
+    "enabled",
+)
 SNAPSHOT_RE = re.compile(r"^workspace-(\d{8}T\d{6}Z)\.zip$")
 RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -41,7 +50,9 @@ def _digest(content: bytes) -> str:
 
 def _write_atomic(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".tmp-", delete=False) as stream:
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent, prefix=".tmp-", delete=False
+    ) as stream:
         temp = Path(stream.name)
         try:
             stream.write(content)
@@ -90,9 +101,17 @@ def project(sheet: Path, destination: Path, core_skill: Path) -> int:
     """Atomically project Connector values only after core CSV validation."""
     raw = json.loads(sheet.read_text(encoding="utf-8"))
     rows = raw.get("values") if isinstance(raw, dict) else raw
-    if not isinstance(rows, list) or not rows or any(not isinstance(row, list) for row in rows):
+    if (
+        not isinstance(rows, list)
+        or not rows
+        or any(not isinstance(row, list) for row in rows)
+    ):
         raise GwsError("Sheet input must be a non-empty array of value arrays")
-    if any(not isinstance(v, (str, int, float, bool)) or v is None for row in rows for v in row):
+    if any(
+        not isinstance(v, (str, int, float, bool)) or v is None
+        for row in rows
+        for v in row
+    ):
         raise GwsError("Sheet cells must be scalar values")
     names = [str(value).strip() for value in rows[0]]
     if any(names.count(name) > 1 for name in FIELDS if name in names):
@@ -101,8 +120,14 @@ def project(sheet: Path, destination: Path, core_skill: Path) -> int:
         raise GwsError("Sheet must contain name and url headers")
     index = {name: names.index(name) for name in FIELDS if name in names}
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=destination.parent,
-                                     prefix=".tmp-", delete=False) as output:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="",
+        dir=destination.parent,
+        prefix=".tmp-",
+        delete=False,
+    ) as output:
         temp = Path(output.name)
         try:
             writer = csv.writer(output, lineterminator="\n")
@@ -110,8 +135,12 @@ def project(sheet: Path, destination: Path, core_skill: Path) -> int:
             for row in rows[1:]:
                 if not any(str(cell).strip() for cell in row):
                     continue
-                writer.writerow([str(row[index[name]]) if name in index and index[name] < len(row) else ""
-                                 for name in FIELDS])
+                writer.writerow([
+                    str(row[index[name]])
+                    if name in index and index[name] < len(row)
+                    else ""
+                    for name in FIELDS
+                ])
             output.flush()
             os.fsync(output.fileno())
         except BaseException:
@@ -141,7 +170,11 @@ def _workspace_files(workspace: Path) -> list[tuple[str, Path]]:
         if not folder.is_dir() or folder.is_symlink():
             raise GwsError(f"workspace root must be a real directory: {root}")
         for path in folder.rglob("*"):
-            if path.name.startswith(".tmp-") or path.name.endswith(".tmp") and path.name.startswith("."):
+            if (
+                path.name.startswith(".tmp-")
+                or path.name.endswith(".tmp")
+                and path.name.startswith(".")
+            ):
                 continue
             mode = path.lstat().st_mode
             if stat.S_ISDIR(mode):
@@ -169,15 +202,24 @@ def pack(workspace: Path, archive: Path, generation: str) -> dict[str, Any]:
         total += len(data)
         if len(data) > MAX_ENTRY or total > MAX_TOTAL:
             raise GwsError("workspace size limit exceeded")
-        manifest_files.append({"path": name, "size": len(data), "sha256": _digest(data)})
+        manifest_files.append({
+            "path": name,
+            "size": len(data),
+            "sha256": _digest(data),
+        })
         contents.append((name, data))
     manifest = {"version": 1, "generation": generation, "files": manifest_files}
     archive.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=archive.parent, prefix=".tmp-", delete=False) as stream:
+    with tempfile.NamedTemporaryFile(
+        dir=archive.parent, prefix=".tmp-", delete=False
+    ) as stream:
         temp = Path(stream.name)
     try:
         with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED) as handle:
-            handle.writestr("manifest.json", json.dumps(manifest, separators=(",", ":"), ensure_ascii=False))
+            handle.writestr(
+                "manifest.json",
+                json.dumps(manifest, separators=(",", ":"), ensure_ascii=False),
+            )
             for name, data in contents:
                 handle.writestr(name, data)
         if temp.stat().st_size > MAX_ZIP:
@@ -185,17 +227,28 @@ def pack(workspace: Path, archive: Path, generation: str) -> dict[str, Any]:
         verify(temp, expected_name=archive.name)
         if archive.exists():
             raise GwsError("refusing to overwrite existing snapshot")
-        os.link(temp, archive)  # exclusive creation; never replace a committed generation
+        os.link(
+            temp, archive
+        )  # exclusive creation; never replace a committed generation
     finally:
         temp.unlink(missing_ok=True)
-    return {"filename": archive.name, "size": archive.stat().st_size, "sha256": _digest(archive.read_bytes())}
+    return {
+        "filename": archive.name,
+        "size": archive.stat().st_size,
+        "sha256": _digest(archive.read_bytes()),
+    }
 
 
 def _safe_path(name: str) -> bool:
     parts = name.split("/")
-    return (len(parts) > 1 and parts[0] in {"internal", "output"} and
-            all(part not in {"", ".", ".."} for part in parts) and "\\" not in name and
-            not name.startswith("/") and "\x00" not in name)
+    return (
+        len(parts) > 1
+        and parts[0] in {"internal", "output"}
+        and all(part not in {"", ".", ".."} for part in parts)
+        and "\\" not in name
+        and not name.startswith("/")
+        and "\x00" not in name
+    )
 
 
 def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, Any]:
@@ -218,8 +271,11 @@ def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, Any]
                 raise GwsError(f"unsafe or duplicate archive path: {name}")
             names.add(name)
             mode = (entry.external_attr >> 16) & 0xFFFF
-            if (entry.flag_bits & 1 or entry.is_dir() or
-                    (stat.S_IFMT(mode) not in {0, stat.S_IFREG})):
+            if (
+                entry.flag_bits & 1
+                or entry.is_dir()
+                or (stat.S_IFMT(mode) not in {0, stat.S_IFREG})
+            ):
                 raise GwsError(f"non-regular or encrypted ZIP entry: {name}")
             if entry.file_size > MAX_ENTRY:
                 raise GwsError("archive entry exceeds size limit")
@@ -229,17 +285,28 @@ def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, Any]
         if "manifest.json" not in names:
             raise GwsError("missing manifest")
         manifest = json.loads(handle.read("manifest.json"))
-        if (not isinstance(manifest, dict) or set(manifest) != {"version", "generation", "files"}
-                or manifest["version"] != 1 or manifest["generation"] != match.group(1)
-                or not isinstance(manifest["files"], list)):
+        if (
+            not isinstance(manifest, dict)
+            or set(manifest) != {"version", "generation", "files"}
+            or manifest["version"] != 1
+            or manifest["generation"] != match.group(1)
+            or not isinstance(manifest["files"], list)
+        ):
             raise GwsError("invalid manifest header")
         recorded: set[str] = set()
         for item in manifest["files"]:
-            if (not isinstance(item, dict) or set(item) != {"path", "size", "sha256"}
-                    or not isinstance(item["path"], str) or not _safe_path(item["path"])
-                    or item["path"] in recorded or not isinstance(item["size"], int)
-                    or isinstance(item["size"], bool) or item["size"] < 0
-                    or not isinstance(item["sha256"], str) or not SHA_RE.fullmatch(item["sha256"])):
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"path", "size", "sha256"}
+                or not isinstance(item["path"], str)
+                or not _safe_path(item["path"])
+                or item["path"] in recorded
+                or not isinstance(item["size"], int)
+                or isinstance(item["size"], bool)
+                or item["size"] < 0
+                or not isinstance(item["sha256"], str)
+                or not SHA_RE.fullmatch(item["sha256"])
+            ):
                 raise GwsError("invalid manifest file record")
             recorded.add(item["path"])
             info = handle.getinfo(item["path"]) if item["path"] in names else None
@@ -249,8 +316,12 @@ def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, Any]
                 raise GwsError(f"archive digest mismatch: {item['path']}")
         if recorded != names - {"manifest.json"}:
             raise GwsError("manifest and workspace entries do not match")
-    return {"generation": match.group(1), "file_count": len(recorded),
-            "size": archive.stat().st_size, "sha256": _digest(archive.read_bytes())}
+    return {
+        "generation": match.group(1),
+        "file_count": len(recorded),
+        "size": archive.stat().st_size,
+        "sha256": _digest(archive.read_bytes()),
+    }
 
 
 def restore(archive: Path, destination: Path) -> dict[str, Any]:
@@ -282,10 +353,18 @@ def restore(archive: Path, destination: Path) -> dict[str, Any]:
 
 def _read_ledger(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if (not isinstance(value, dict) or set(value) != {"version", "reports"}
-            or value["version"] != 1 or not isinstance(value["reports"], dict)
-            or any(not RUN_ID_RE.fullmatch(k) or not isinstance(v, str) or not SHA_RE.fullmatch(v)
-                   for k, v in value["reports"].items())):
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"version", "reports"}
+        or value["version"] != 1
+        or not isinstance(value["reports"], dict)
+        or any(
+            not RUN_ID_RE.fullmatch(k)
+            or not isinstance(v, str)
+            or not SHA_RE.fullmatch(v)
+            for k, v in value["reports"].items()
+        )
+    ):
         raise GwsError("invalid delivery ledger")
     return value
 
@@ -301,7 +380,9 @@ def ledger(path: Path, report: Path, record: bool) -> dict[str, Any]:
         raise GwsError("delivered canonical report changed")
     if record and existing is None:
         value["reports"][run_id] = digest
-        _write_atomic(path, json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+        _write_atomic(
+            path, json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        )
     return {"run_id": run_id, "sha256": digest, "delivered": existing == digest}
 
 
@@ -330,13 +411,20 @@ def main() -> None:
     args = parser.parse_args()
     try:
         if args.command == "project":
-            result = {"target_groups": project(args.sheet_json, args.targets, args.core_skill_dir)}
+            result = {
+                "target_groups": project(
+                    args.sheet_json, args.targets, args.core_skill_dir
+                )
+            }
         elif args.command == "next-generation":
             raw = json.loads(args.names_json.read_text())
             if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):
                 raise GwsError("names JSON must be an array of strings")
             generation = next_generation(raw, datetime.now(UTC))
-            result = {"generation": generation, "filename": f"workspace-{generation}.zip"}
+            result = {
+                "generation": generation,
+                "filename": f"workspace-{generation}.zip",
+            }
         elif args.command == "pack":
             result = pack(args.workspace, args.archive, args.generation)
         elif args.command == "verify":
@@ -346,7 +434,14 @@ def main() -> None:
         else:
             result = ledger(args.ledger, args.report, args.record)
         print(json.dumps(result, sort_keys=True))
-    except (OSError, ValueError, zipfile.BadZipFile, KeyError, TypeError, ImportError) as exc:
+    except (
+        OSError,
+        ValueError,
+        zipfile.BadZipFile,
+        KeyError,
+        TypeError,
+        ImportError,
+    ) as exc:
         parser.exit(1, f"gws: {exc}\n")
 
 
