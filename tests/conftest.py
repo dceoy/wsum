@@ -11,3 +11,5 @@ WIKI_SCRIPTS = (
 )
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(WIKI_SCRIPTS))
+GWS_SCRIPTS = Path(__file__).parents[1] / "skills/web-update-monitor-gws/scripts"
+sys.path.insert(0, str(GWS_SCRIPTS))
