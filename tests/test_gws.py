@@ -113,7 +113,7 @@ def test_delivery_ledger_fail_closed(tmp_path: Path) -> None:
     report = tmp_path / "20261009T000000Z-abcdef12.md"
     report.write_text("report")
     assert gws.ledger(path, report, record=False)["delivered"] is False
-    gws.ledger(path, report, record=True)
+    assert gws.ledger(path, report, record=True)["delivered"] is True
     assert gws.ledger(path, report, record=False)["delivered"] is True
     report.unlink()
     with pytest.raises(gws.GwsError, match="missing report"):
@@ -178,3 +178,44 @@ def test_project_atomic_with_core_validation(
     )
     with pytest.raises(gws.GwsError, match="duplicate"):
         gws.project(source, dest, skill)
+
+
+@pytest.mark.parametrize(
+    "ledger_content", [None, "{}", "not JSON", '{"version":1,"reports":{}}']
+)
+def test_validate_restored_zero_report_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    ledger_content: str | None,
+) -> None:
+    ws = tmp_path / "workspace"
+    (ws / "output/report").mkdir(parents=True)
+    (ws / "internal/gws").mkdir(parents=True)
+    path = ws / "internal/gws/delivery.json"
+    if ledger_content is not None:
+        path.write_text(ledger_content)
+    archive = tmp_path / f"workspace-{GENERATION}.zip"
+    gws.pack(ws, archive, GENERATION)
+    dest = tmp_path / "restored"
+    gws.restore(archive, dest)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gws.py",
+            "ledger-validate",
+            "--ledger",
+            str(dest / "internal/gws/delivery.json"),
+            "--reports-dir",
+            str(dest / "output/report"),
+        ],
+    )
+    if ledger_content == '{"version":1,"reports":{}}':
+        gws.main()
+        assert json.loads(capsys.readouterr().out) == {"valid": True, "report_count": 0}
+    else:
+        with pytest.raises(SystemExit) as exc:
+            gws.main()
+        assert exc.value.code == 1
+        assert "gws:" in capsys.readouterr().err

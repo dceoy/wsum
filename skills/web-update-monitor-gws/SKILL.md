@@ -85,6 +85,16 @@ For a brand-new monitor, initialize `$WORKSPACE/output` and
 `{"version":1,"reports":{}}`. Never initialize an empty workspace if the
 Drive workspace folder is not empty.
 
+After restore or initialization, validate the complete delivery ledger before
+projection, pending reconciliation, or any monitoring transition. Run this even
+when no canonical reports exist; a missing or invalid ledger stops execution:
+
+```bash
+python "$GWS_SKILL_DIR/scripts/gws.py" ledger-validate \
+  --ledger "$WORKSPACE/internal/gws/delivery.json" \
+  --reports-dir "$WORKSPACE/output/report"
+```
+
 Save the Sheets range-value response **as JSON data** in a scratch file with
 shape `{"values":[["name","url"],["Example","https://example.com"]]}`.
 Project and validate it _after restore_ and _before pending reconciliation_:

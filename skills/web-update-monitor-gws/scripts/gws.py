@@ -116,15 +116,16 @@ def _sheet_projection(
 ) -> tuple[list[list[typing.Any]], dict[str, int]]:
     raw: typing.Any = json.loads(sheet.read_text(encoding="utf-8"))
     rows_value: typing.Any = (
-        typing.cast(dict[str, typing.Any], raw).get("values")
+        typing.cast("dict[str, typing.Any]", raw).get("values")
         if isinstance(raw, dict)
         else raw
     )
     if not isinstance(rows_value, list) or not rows_value:
         raise GwsError("Sheet input must be a non-empty array of value arrays")
-    rows = typing.cast(list[list[typing.Any]], rows_value)
-    if any(not isinstance(row, list) for row in rows):
+    raw_rows = typing.cast("list[typing.Any]", rows_value)
+    if any(not isinstance(row, list) for row in raw_rows):
         raise GwsError("Sheet input must be a non-empty array of value arrays")
+    rows = typing.cast("list[list[typing.Any]]", raw_rows)
     if any(not isinstance(v, (str, int, float, bool)) for row in rows for v in row):
         raise GwsError("Sheet cells must be scalar values")
     names = [str(value).strip() for value in rows[0]]
@@ -371,7 +372,7 @@ def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, typi
         manifest: typing.Any = json.loads(handle.read("manifest.json"))
         if not isinstance(manifest, dict):
             raise GwsError("invalid manifest header")
-        manifest = typing.cast(dict[str, typing.Any], manifest)
+        manifest = typing.cast("dict[str, typing.Any]", manifest)
         if (
             set(manifest) != {"version", "generation", "files"}
             or manifest["version"] != 1
@@ -380,11 +381,11 @@ def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, typi
         ):
             raise GwsError("invalid manifest header")
         recorded: set[str] = set()
-        manifest_files = typing.cast(list[typing.Any], manifest["files"])
+        manifest_files = typing.cast("list[typing.Any]", manifest["files"])
         for raw_item in manifest_files:
             if not isinstance(raw_item, dict):
                 raise GwsError("invalid manifest file record")
-            item = typing.cast(dict[str, typing.Any], raw_item)
+            item = typing.cast("dict[str, typing.Any]", raw_item)
             if (
                 set(item) != {"path", "size", "sha256"}
                 or not isinstance(item["path"], str)
@@ -448,14 +449,14 @@ def _read_ledger(path: Path, reports_dir: Path) -> dict[str, typing.Any]:
     value: typing.Any = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise GwsError("invalid delivery ledger")
-    value = typing.cast(dict[str, typing.Any], value)
+    value = typing.cast("dict[str, typing.Any]", value)
     if (
         set(value) != {"version", "reports"}
         or value["version"] != 1
         or not isinstance(value["reports"], dict)
     ):
         raise GwsError("invalid delivery ledger")
-    reports = typing.cast(dict[str, typing.Any], value["reports"])
+    reports = typing.cast("dict[str, typing.Any]", value["reports"])
     if any(
         not RUN_ID_RE.fullmatch(run_id)
         or not isinstance(digest, str)
@@ -464,7 +465,7 @@ def _read_ledger(path: Path, reports_dir: Path) -> dict[str, typing.Any]:
     ):
         raise GwsError("invalid delivery ledger")
     for run_id, raw_digest in reports.items():
-        expected_digest = typing.cast(str, raw_digest)
+        expected_digest = typing.cast("str", raw_digest)
         report = reports_dir / f"{run_id}.md"
         if report.is_symlink() or not report.is_file():
             raise GwsError(f"delivery ledger references missing report: {run_id}")
@@ -489,10 +490,14 @@ def ledger(path: Path, report: Path, record: bool) -> dict[str, typing.Any]:
         _write_atomic(
             path, json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         )
-    return {"run_id": run_id, "sha256": digest, "delivered": existing == digest}
+    return {
+        "run_id": run_id,
+        "sha256": digest,
+        "delivered": record or existing == digest,
+    }
 
 
-def main() -> None:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     p = commands.add_parser("project")
@@ -510,10 +515,18 @@ def main() -> None:
     p = commands.add_parser("restore")
     p.add_argument("--archive", type=Path, required=True)
     p.add_argument("--workspace", type=Path, required=True)
+    p = commands.add_parser("ledger-validate")
+    p.add_argument("--ledger", type=Path, required=True)
+    p.add_argument("--reports-dir", type=Path, required=True)
     p = commands.add_parser("ledger")
     p.add_argument("--ledger", type=Path, required=True)
     p.add_argument("--report", type=Path, required=True)
     p.add_argument("--record", action="store_true")
+    return parser
+
+
+def main() -> None:
+    parser = _parser()
     args = parser.parse_args()
     try:
         if args.command == "project":
@@ -526,10 +539,10 @@ def main() -> None:
             raw: typing.Any = json.loads(args.names_json.read_text())
             if not isinstance(raw, list):
                 raise GwsError("names JSON must be an array of strings")
-            raw_names = typing.cast(list[typing.Any], raw)
+            raw_names = typing.cast("list[typing.Any]", raw)
             if any(not isinstance(name, str) for name in raw_names):
                 raise GwsError("names JSON must be an array of strings")
-            names = typing.cast(list[str], raw_names)
+            names = typing.cast("list[str]", raw_names)
             generation = next_generation(names, datetime.now(UTC))
             result = {
                 "generation": generation,
@@ -541,6 +554,9 @@ def main() -> None:
             result = verify(args.archive)
         elif args.command == "restore":
             result = restore(args.archive, args.workspace)
+        elif args.command == "ledger-validate":
+            value = _read_ledger(args.ledger, args.reports_dir)
+            result = {"valid": True, "report_count": len(value["reports"])}
         else:
             result = ledger(args.ledger, args.report, args.record)
         print(json.dumps(result, sort_keys=True))
