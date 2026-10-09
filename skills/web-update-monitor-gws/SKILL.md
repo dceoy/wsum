@@ -111,11 +111,18 @@ cell array through the helper. The helper invokes the core's `load_targets`
 against a staged CSV and atomically replaces the projection only on success.
 
 To persist any state-changing operation, save the _complete_ current Drive
-workspace-folder filename list as a JSON string array. Re-list it before each
-new generation; reject duplicate snapshot filenames:
+workspace-folder listing as a JSON array of `{"name":"workspace-...zip","id":"Drive-file-ID"}`
+records. At restore, save the selected newest snapshot's exact name/ID record
+in `$EXPECTED_SNAPSHOT_JSON`; use JSON `null` only when initializing a new,
+empty folder. Keep this expectation in invocation-local scratch, separate
+from the freshly listed records. Re-list into `$DRIVE_SNAPSHOTS_JSON` before
+each generation. The helper rejects duplicate snapshot names and fails if
+the active name/ID differs from the restored or last self-committed record:
 
 ```bash
-python "$GWS_SKILL_DIR/scripts/gws.py" next-generation --names-json "$DRIVE_NAMES_JSON"
+python "$GWS_SKILL_DIR/scripts/gws.py" next-generation \
+  --snapshots-json "$DRIVE_SNAPSHOTS_JSON" \
+  --expected-snapshot-json "$EXPECTED_SNAPSHOT_JSON"
 python "$GWS_SKILL_DIR/scripts/gws.py" pack \
   --workspace "$WORKSPACE" --generation "$GENERATION" \
   --archive "$SCRATCH/workspace-$GENERATION.zip"
@@ -127,7 +134,11 @@ conversion**; download by its returned ID to a local path with the identical
 filename and compare against the `pack` result. Run `verify` on that
 download as well. Only then consider the snapshot committed, and delete old
 generations by exact file ID. Never treat a successful upload response alone
-as durable persistence.
+as durable persistence. After every verified self-commit, replace the
+invocation-local expectation with the new filename and returned Drive ID
+before another state transition. Do not replace it from a fresh listing:
+that would hide an intervening writer. A mismatch stops persistence without
+upload or retention cleanup; restore the current active snapshot before retrying.
 
 Before delivering a completed canonical Markdown report, run:
 
@@ -205,11 +216,15 @@ If the newest snapshot fails validation, fail closed and report each independent
 Persist after every workspace-changing operation before relying on the local session.
 
 1. List and strictly parse all timestamped workspace snapshots, requiring one Drive file ID per filename. If more than three exist after interrupted cleanup, retain them until a new snapshot verifies.
-2. Derive the next generation timestamp as `max(current_utc_second, newest_existing_timestamp + 1 second)`; when no prior snapshot exists, use the current UTC second. Build the complete next-workspace ZIP locally, including `manifest.json`, and use that exact timestamp in both the manifest and filename. If that filename already exists despite the monotonic derivation, stop instead of overwriting it.
+2. Compare the freshly listed active snapshot's exact filename and Drive ID
+   against the expectation captured at restore (or the most recent verified
+   self-commit). Require JSON `null` only for a new empty folder. On mismatch,
+   stop without upload or cleanup and restore the new active snapshot; never
+   publish the stale local state. Then derive the next generation timestamp as `max(current_utc_second, newest_existing_timestamp + 1 second)`; when no prior snapshot exists, use the current UTC second. Build the complete next-workspace ZIP locally, including `manifest.json`, and use that exact timestamp in both the manifest and filename. If that filename already exists despite the monotonic derivation, stop instead of overwriting it.
 3. Compute the ZIP byte length and SHA-256.
 4. Upload the new snapshot under its final timestamped filename without modifying or deleting existing snapshots, and capture the returned Drive file ID.
 5. Read the uploaded snapshot back by that exact ID, verify its byte length and SHA-256, and validate its manifest and entries exactly as for restore.
-6. Treat the verified new snapshot as the committed latest workspace generation.
+6. Treat the verified new snapshot as the committed latest workspace generation and refresh the invocation-local expected name/ID to this self-commit.
 7. Delete the oldest snapshots by their exact Drive file IDs until exactly the three newest committed generations remain. Never delete the immediately previous generation before the new one has passed read-back verification.
 
 If the upload result is ambiguous, query the exact generated filename. Continue only when exactly one file exists, download it by its Drive file ID, confirm its bytes match the locally computed length and SHA-256, and pass full snapshot validation. If none or multiple exist, or the digest differs, stop without cleanup; do not issue a second create for the same filename.

@@ -91,11 +91,30 @@ def _timestamp(value: str) -> datetime:
     return result
 
 
-def next_generation(names: list[str], now: datetime) -> str:
-    """Derive monotonic filename time and reject duplicate Drive snapshot names."""
+def _snapshot_record(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise GwsError("snapshot must contain name and id strings")
+    record = typing.cast("dict[str, object]", value)
+    if set(record) != {"name", "id"} or any(
+        not isinstance(item, str) or not item.strip() for item in record.values()
+    ):
+        raise GwsError("snapshot must contain name and id strings")
+    return typing.cast("dict[str, str]", record)
+
+
+def next_generation(snapshots: object, now: datetime, expected_snapshot: object) -> str:
+    """Reject a changed active Drive snapshot before deriving a monotonic time."""
+    if not isinstance(snapshots, list):
+        raise GwsError("snapshots JSON must be an array of name/id records")
+    expected = (
+        _snapshot_record(expected_snapshot) if expected_snapshot is not None else None
+    )
     known: set[str] = set()
     newest = None
-    for name in names:
+    active = None
+    for value in typing.cast("list[object]", snapshots):
+        record = _snapshot_record(value)
+        name = record["name"]
         match = SNAPSHOT_RE.fullmatch(name)
         if not match:
             continue
@@ -105,6 +124,9 @@ def next_generation(names: list[str], now: datetime) -> str:
         instant = _timestamp(match.group(1))
         if newest is None or instant > newest:
             newest = instant
+            active = record
+    if active != expected:
+        raise GwsError("active snapshot changed since restore or last commit")
     result = now.astimezone(UTC).replace(microsecond=0)
     if newest is not None:
         result = max(result, newest + timedelta(seconds=1))
@@ -505,7 +527,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--targets", type=Path, required=True)
     p.add_argument("--core-skill-dir", type=Path, required=True)
     p = commands.add_parser("next-generation")
-    p.add_argument("--names-json", type=Path, required=True)
+    p.add_argument("--snapshots-json", type=Path, required=True)
+    p.add_argument("--expected-snapshot-json", type=Path, required=True)
     p = commands.add_parser("pack")
     p.add_argument("--workspace", type=Path, required=True)
     p.add_argument("--archive", type=Path, required=True)
@@ -536,14 +559,11 @@ def main() -> None:
                 )
             }
         elif args.command == "next-generation":
-            raw: typing.Any = json.loads(args.names_json.read_text())
-            if not isinstance(raw, list):
-                raise GwsError("names JSON must be an array of strings")
-            raw_names = typing.cast("list[typing.Any]", raw)
-            if any(not isinstance(name, str) for name in raw_names):
-                raise GwsError("names JSON must be an array of strings")
-            names = typing.cast("list[str]", raw_names)
-            generation = next_generation(names, datetime.now(UTC))
+            generation = next_generation(
+                json.loads(args.snapshots_json.read_text()),
+                datetime.now(UTC),
+                json.loads(args.expected_snapshot_json.read_text()),
+            )
             result = {
                 "generation": generation,
                 "filename": f"workspace-{generation}.zip",

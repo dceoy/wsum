@@ -99,12 +99,88 @@ def test_reject_oversized_input_before_reading(tmp_path: Path) -> None:
 
 def test_generation_monotonicity_and_duplicates() -> None:
     now = datetime(2026, 10, 9, tzinfo=UTC)
-    assert gws.next_generation([], now) == GENERATION
-    assert (
-        gws.next_generation([f"workspace-{GENERATION}.zip"], now) == "20261009T000001Z"
-    )
+    snapshot = {"name": f"workspace-{GENERATION}.zip", "id": "restored-id"}
+    assert gws.next_generation([], now, None) == GENERATION
+    assert gws.next_generation([snapshot], now, snapshot) == "20261009T000001Z"
     with pytest.raises(gws.GwsError, match="duplicate"):
-        gws.next_generation([f"workspace-{GENERATION}.zip"] * 2, now)
+        gws.next_generation([snapshot] * 2, now, snapshot)
+
+
+@pytest.mark.parametrize(
+    "current",
+    [
+        [],
+        [{"name": f"workspace-{GENERATION}.zip", "id": "replacement-id"}],
+        [{"name": "workspace-20261009T000001Z.zip", "id": "intervening-id"}],
+    ],
+)
+def test_generation_rejects_changed_active_snapshot(
+    current: list[dict[str, str]],
+) -> None:
+    expected = {"name": f"workspace-{GENERATION}.zip", "id": "restored-id"}
+    with pytest.raises(gws.GwsError, match="active snapshot changed"):
+        gws.next_generation(current, datetime(2026, 10, 9, tzinfo=UTC), expected)
+
+
+def test_generation_refreshes_expectation_after_self_commit() -> None:
+    now = datetime(2026, 10, 9, tzinfo=UTC)
+    first = {"name": f"workspace-{GENERATION}.zip", "id": "first-id"}
+    second = {"name": "workspace-20261009T000001Z.zip", "id": "second-id"}
+    with pytest.raises(gws.GwsError, match="active snapshot changed"):
+        gws.next_generation([second, first], now, first)
+    assert gws.next_generation([second, first], now, second) == "20261009T000002Z"
+    with pytest.raises(gws.GwsError, match="active snapshot changed"):
+        gws.next_generation([first], now, None)
+
+
+@pytest.mark.parametrize(
+    ("snapshots", "expected"),
+    [({}, None), (["filename"], None), ([{"name": "x", "id": ""}], None), ([], {})],
+)
+def test_generation_rejects_invalid_connector_records(
+    snapshots: object, expected: object
+) -> None:
+    with pytest.raises(gws.GwsError, match=r"JSON|snapshot must contain"):
+        gws.next_generation(snapshots, datetime(2026, 10, 9, tzinfo=UTC), expected)
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_generation_cli_conflict_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    changed: bool,
+) -> None:
+    snapshot = {"name": f"workspace-{GENERATION}.zip", "id": "restored-id"}
+    expected = tmp_path / "expected.json"
+    expected.write_text(json.dumps(snapshot))
+    current = tmp_path / "current.json"
+    current.write_text(
+        json.dumps([{**snapshot, "id": "replacement-id"} if changed else snapshot])
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gws.py",
+            "next-generation",
+            "--snapshots-json",
+            str(current),
+            "--expected-snapshot-json",
+            str(expected),
+        ],
+    )
+    if changed:
+        with pytest.raises(SystemExit) as exc:
+            gws.main()
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert not captured.out
+        assert "active snapshot changed" in captured.err
+    else:
+        gws.main()
+        result = json.loads(capsys.readouterr().out)
+        assert result["generation"] > GENERATION
 
 
 def test_delivery_ledger_fail_closed(tmp_path: Path) -> None:
