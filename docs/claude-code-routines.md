@@ -24,13 +24,13 @@ the checks below.
 
 ### Required connector operations
 
-| Resource                        | Required operations                                                                                    |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| Sheets (Spreadsheet input only) | Read spreadsheet metadata (ordered tabs), and range values preserving row/column positions             |
-| Input Drive CSV (when used)     | Read exact-ID file size, MD5 checksum and version; download complete CSV bytes by ID                    |
-| Drive output                    | Read folder by ID; list children with IDs/MIME; create folders and immutable binding file              |
-| Drive workspaces                | List all files with IDs; create binary ZIP; download binary by ID; delete by ID                        |
-| Drive reports                   | Search exact name; create Markdown; download by ID; update existing file by ID                         |
+| Resource                        | Required operations                                                                        |
+| ------------------------------- | ------------------------------------------------------------------------------------------ |
+| Sheets (Spreadsheet input only) | Read spreadsheet metadata (ordered tabs), and range values preserving row/column positions |
+| Input Drive CSV (when used)     | Read exact-ID file size, MD5 checksum and version; download complete CSV bytes by ID       |
+| Drive output                    | Read folder by ID; list children with IDs/MIME; create folders and immutable binding file  |
+| Drive workspaces                | List all files with IDs; create binary ZIP; download binary by ID; delete by ID            |
+| Drive reports                   | Search exact name; create Markdown; download by ID; update existing file by ID             |
 
 If any required action is missing from the _actual Routine tool surface_, stop
 and report the missing operation. Do not substitute text extraction for Sheets
