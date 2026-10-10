@@ -39,6 +39,7 @@ MAX_FILES = 2000
 MAX_ENTRY = 64 * 1024 * 1024
 MAX_TOTAL = 256 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
+MAX_TARGET_CSV = 1024 * 1024
 
 
 class GwsError(ValueError):
@@ -215,6 +216,30 @@ def project(sheet: Path, destination: Path, core_skill: Path) -> int:
         temp = Path(stream.name)
     try:
         _write_projection(temp, rows, index)
+        targets = _load_core_targets(temp, core_skill)
+        temp.replace(destination)
+        return len(targets)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def project_csv(source: Path, destination: Path, core_skill: Path) -> int:
+    """Stage CSV bytes, validate with the core, then atomically replace targets."""
+    if source.is_symlink() or not source.is_file():
+        raise GwsError("CSV input must be an existing regular file")
+    with source.open("rb") as stream:
+        content = stream.read(MAX_TARGET_CSV + 1)
+    if len(content) > MAX_TARGET_CSV:
+        raise GwsError("CSV input exceeds 1 MiB")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=destination.parent, prefix=".tmp-", delete=False
+    ) as stream:
+        temp = Path(stream.name)
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
         targets = _load_core_targets(temp, core_skill)
         temp.replace(destination)
         return len(targets)
@@ -523,7 +548,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     p = commands.add_parser("project")
-    p.add_argument("--sheet-json", type=Path, required=True)
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--sheet-json", type=Path)
+    source.add_argument("--csv", type=Path)
     p.add_argument("--targets", type=Path, required=True)
     p.add_argument("--core-skill-dir", type=Path, required=True)
     p = commands.add_parser("next-generation")
@@ -554,8 +581,10 @@ def main() -> None:
     try:
         if args.command == "project":
             result = {
-                "target_groups": project(
-                    args.sheet_json, args.targets, args.core_skill_dir
+                "target_groups": (
+                    project(args.sheet_json, args.targets, args.core_skill_dir)
+                    if args.sheet_json is not None
+                    else project_csv(args.csv, args.targets, args.core_skill_dir)
                 )
             }
         elif args.command == "next-generation":
