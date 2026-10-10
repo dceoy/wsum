@@ -9,8 +9,10 @@ the checks below.
 
 1. Open the `dceoy/wsum` repository in Claude Code Routines. Confirm the
    `web-update-monitor` and `web-update-monitor-gws` skills are discoverable.
-2. Configure the Google Sheets and Google Drive connectors with access only to
-   the intended source spreadsheet and dedicated report/workspaces folders.
+2. Configure the Google Sheets connector for the intended source spreadsheet
+   and the Drive connector for **one pre-existing parent folder**, including
+   listing its children and creating the `workspaces/` and `reports/` folders
+   if missing. Supply the parent folder URL/ID in the Routine (not two paths).
 3. Configure a Python 3.11+ environment with `pypdf` installed (e.g. `uv sync`
    in the repository and run with `uv run python`).
 4. Permit outbound network requests to the monitored public URLs. Trusted
@@ -23,12 +25,26 @@ the checks below.
 | Resource         | Required operations                                                             |
 | ---------------- | ------------------------------------------------------------------------------- |
 | Sheets           | Read a specified value range into a row/column-preserving cell array            |
+| Drive parent     | Read folder by ID; list all direct children with IDs and MIME types; create child folders by parent ID |
 | Drive workspaces | List all files with IDs; create binary ZIP; download binary by ID; delete by ID |
 | Drive reports    | Search exact name; create Markdown; download by ID; update existing file by ID  |
 
 If any required action is missing from the _actual Routine tool surface_, stop
 and report the missing operation. Do not substitute text extraction for Sheets
 values or Drive binary download.
+
+## Minimal weekly Routine instruction
+
+```text
+/web-update-monitor-gws Run the weekly monitor with Google Sheet <SPREADSHEET_URL>
+(range <SHEET_RANGE>) and Google Drive parent folder <PARENT_FOLDER_URL>.
+Restore/persist the workspace, deliver Markdown reports, and report material
+changes or failures. Follow the skill's safety and recovery rules.
+```
+
+Set the weekly schedule in Routines. The skill resolves or creates
+`workspaces/` and `reports/` directly under that parent; neither child
+folder needs to be specified in the instruction.
 
 ## 1. Verify binary transfer before monitoring
 
@@ -62,8 +78,11 @@ is insufficient. Delete all throwaway files when done.
 
 - Confirm the target Google Sheet can be read by range, preserving headers,
   empty cells, duplicate URLs, multiline text and disabled rows.
-- Select an **empty** dedicated workspaces folder, and an independent
-  Markdown report folder.
+- Resolve the exact parent ID; list all its direct children. Resolve/reuse or
+  create `workspaces/` and `reports/`, then re-list and verify the child IDs.
+  For a brand-new monitor, require an **empty** `workspaces/` folder. For an
+  existing monitor, ensure its prior snapshots were moved into this folder
+  before running; never silently reset the baseline.
 - Persist a new initial workspace ZIP containing a valid
   `internal/gws/delivery.json` with `{"version":1,"reports":{}}`, plus the
   validated Sheet projection, **before** any core `check`.
@@ -89,12 +108,16 @@ is insufficient. Delete all throwaway files when done.
 7. Verify that missing Sheets permission, expired connector authorization,
    and an egress-denied HTTP 403 produce explicit errors, not a successful
    empty report or a new baseline.
+8. Verify that duplicate `workspaces`/`reports` names, a same-name non-folder,
+   inaccessible parent, incomplete child listing, and an uncertain folder
+   creation stop safely. A successful re-run reuses the same child folder IDs
+   without creating duplicates.
 
 ## Failure policy
 
-Fail closed on missing connector capabilities, damaged binaries, ambiguous
-file IDs/names, validation errors, stale Sheets projection, or a conflicting
-writer. Do not store Google tokens, cookies or API secrets in workspace ZIPs.
+Fail closed on missing connector capabilities, ambiguous parent/child folder
+resolution, damaged binaries, ambiguous file IDs/names, validation errors,
+stale Sheets projection, or a conflicting writer. Do not store Google tokens, cookies or API secrets in workspace ZIPs.
 Keep connector and monitoring errors distinct.
 
 This checklist is a **test plan**, not a claim that Anthropic's Google
