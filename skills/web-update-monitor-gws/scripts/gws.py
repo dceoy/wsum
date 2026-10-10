@@ -279,13 +279,16 @@ def folder_binding(
 ) -> dict[str, object]:
     """Create a strict immutable binding to the three Drive folder IDs."""
     ids = (parent_id, workspaces_id, reports_id)
-    if any(
-        not isinstance(value, str)
-        or not value
-        or len(value) > MAX_DRIVE_ID_LENGTH
-        or any(char.isspace() for char in value)
-        for value in ids
-    ) or len(set(ids)) != FOLDER_BINDING_ID_COUNT:
+    if (
+        any(
+            not isinstance(value, str)
+            or not value
+            or len(value) > MAX_DRIVE_ID_LENGTH
+            or any(char.isspace() for char in value)
+            for value in ids
+        )
+        or len(set(ids)) != FOLDER_BINDING_ID_COUNT
+    ):
         raise GwsError("invalid or duplicate Drive folder IDs")
     return {
         "version": 1,
