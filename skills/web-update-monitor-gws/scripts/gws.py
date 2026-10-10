@@ -281,7 +281,8 @@ def folder_binding(
     ids = (parent_id, workspaces_id, reports_id)
     if (
         any(
-            not value or len(value) > MAX_DRIVE_ID_LENGTH
+            not value
+            or len(value) > MAX_DRIVE_ID_LENGTH
             or any(char.isspace() for char in value)
             for value in ids
         )
