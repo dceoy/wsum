@@ -1,5 +1,6 @@
 """Workspace-GWS deterministic boundary regression tests."""
 
+import hashlib
 import json
 import sys
 import zipfile
@@ -363,6 +364,149 @@ def test_project_csv_cli(
             str(dest),
             "--core-skill-dir",
             str(core),
+        ],
+    )
+    gws.main()
+    assert json.loads(capsys.readouterr().out) == {"target_groups": 1}
+    assert dest.read_bytes() == source.read_bytes()
+
+
+def test_folder_binding_roundtrip_and_stable_ids(tmp_path: Path) -> None:
+    marker = tmp_path / "binding.json"
+    first = gws.binding_file(
+        marker, "parent", "workspace-original", "reports-original", create=True
+    )
+    assert first["size"] == marker.stat().st_size
+    assert first["sha256"] == hashlib.sha256(marker.read_bytes()).hexdigest()
+    assert gws.binding_file(
+        marker, "parent", "workspace-original", "reports-original", create=False
+    ) == first
+    with pytest.raises(FileExistsError):
+        gws.binding_file(
+            marker, "parent", "workspace-new", "reports-original", create=True
+        )
+    with pytest.raises(gws.GwsError, match="IDs or schema changed"):
+        gws.binding_file(
+            marker, "parent", "workspace-replacement", "reports-original", create=False
+        )
+    with pytest.raises(gws.GwsError, match="IDs or schema changed"):
+        gws.binding_file(
+            marker, "wrong-parent", "workspace-original", "reports-original",
+            create=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{}",
+        '{"version":2,"parent_id":"p","workspaces_id":"w","reports_id":"r"}',
+        '{"version":1,"parent_id":"p","workspaces_id":"w","reports_id":"r","extra":0}',
+        "not JSON",
+    ],
+)
+def test_folder_binding_rejects_modified_metadata(tmp_path: Path, content: str) -> None:
+    marker = tmp_path / "binding.json"
+    marker.write_text(content)
+    with pytest.raises((gws.GwsError, ValueError)):
+        gws.binding_file(marker, "p", "w", "r", create=False)
+
+
+def test_folder_binding_rejects_missing_symlink_or_duplicate_ids(tmp_path: Path) -> None:
+    marker = tmp_path / "binding.json"
+    with pytest.raises(gws.GwsError, match="regular file"):
+        gws.binding_file(marker, "p", "w", "r", create=False)
+    marker.write_text("{}")
+    link = tmp_path / "link.json"
+    link.symlink_to(marker)
+    with pytest.raises(gws.GwsError, match="regular file"):
+        gws.binding_file(link, "p", "w", "r", create=False)
+    with pytest.raises(gws.GwsError, match="duplicate Drive folder IDs"):
+        gws.binding_file(tmp_path / "invalid.json", "p", "p", "r", create=True)
+
+
+def test_folder_binding_cli_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                      capsys: pytest.CaptureFixture[str]) -> None:
+    marker = tmp_path / "binding.json"
+    base = [
+        "gws.py", "folder-binding", "--file", str(marker),
+        "--parent-id", "p", "--workspaces-id", "w", "--reports-id", "r",
+    ]
+    monkeypatch.setattr(sys, "argv", [*base, "--create"])
+    gws.main()
+    created = json.loads(capsys.readouterr().out)
+    monkeypatch.setattr(sys, "argv", base)
+    gws.main()
+    assert json.loads(capsys.readouterr().out) == created
+
+
+def test_drive_csv_integrity_rejects_row_truncation(tmp_path: Path) -> None:
+    core = _stub_core(tmp_path)
+    source = tmp_path / "downloaded.csv"
+    destination = tmp_path / "workspace/targets.csv"
+    complete = b"name,url\nA,https://example.com\nB,https://example.org\n"
+    source.write_bytes(complete)
+    digest = hashlib.md5(complete, usedforsecurity=False).hexdigest()
+    assert gws.project_csv(
+        source, destination, core, drive_size=len(complete), drive_md5=digest
+    ) == 1
+    assert destination.read_bytes() == complete
+    source.write_bytes(b"name,url\nA,https://example.com\n")  # valid CSV, missing row
+    with pytest.raises(gws.GwsError, match="size or MD5 mismatch"):
+        gws.project_csv(
+            source, destination, core, drive_size=len(complete), drive_md5=digest
+        )
+    assert destination.read_bytes() == complete
+
+
+def test_drive_csv_integrity_rejects_same_length_corruption(tmp_path: Path) -> None:
+    core = _stub_core(tmp_path)
+    source = tmp_path / "downloaded.csv"
+    destination = tmp_path / "targets.csv"
+    original = b"name,url\nA,https://example.com\n"
+    source.write_bytes(original)
+    digest = hashlib.md5(original, usedforsecurity=False).hexdigest()
+    source.write_bytes(original.replace(b"A,", b"B,"))
+    with pytest.raises(gws.GwsError, match="size or MD5 mismatch"):
+        gws.project_csv(
+            source, destination, core, drive_size=len(original), drive_md5=digest
+        )
+    assert not destination.exists()
+    with pytest.raises(gws.GwsError, match="both size and MD5"):
+        gws.project_csv(source, destination, core, drive_size=len(original))
+    with pytest.raises(gws.GwsError, match="invalid Drive CSV"):
+        gws.project_csv(
+            source, destination, core, drive_size=len(original), drive_md5="invalid"
+        )
+
+
+def test_drive_csv_cli_requires_integrity_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    core = _stub_core(tmp_path)
+    source = tmp_path / "downloaded.csv"
+    source.write_text("name,url\nA,https://example.com\n")
+    dest = tmp_path / "targets.csv"
+    base = [
+        "gws.py", "project", "--drive-csv", str(source), "--targets", str(dest),
+        "--core-skill-dir", str(core),
+    ]
+    monkeypatch.setattr(sys, "argv", base)
+    with pytest.raises(SystemExit) as exc:
+        gws.main()
+    assert exc.value.code == 1
+    assert "requires --drive-size and --drive-md5" in capsys.readouterr().err
+    assert not dest.exists()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            *base, "--drive-size", str(source.stat().st_size),
+            "--drive-md5", hashlib.md5(
+                source.read_bytes(), usedforsecurity=False
+            ).hexdigest(),
         ],
     )
     gws.main()
