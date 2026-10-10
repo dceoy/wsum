@@ -1,13 +1,13 @@
 ---
 name: web-update-monitor-gws
-description: Compose Google Workspace connectors with web-update-monitor so a Google Sheet supplies targets while Google Drive persists complete versioned monitor workspaces and completed Markdown reports.
+description: Run web-update-monitor from a CSV table or Google Spreadsheet using one Google Drive output folder for persistent snapshots and Markdown reports.
 license: MIT
-compatibility: Requires the installed web-update-monitor skill, local scratch storage, Google Sheets connector read access to the source spreadsheet, and Google Drive connector folder lookup/creation plus binary upload/download and read/write access beneath one dedicated parent folder.
+compatibility: Requires the installed web-update-monitor skill, local scratch storage, Google Sheets metadata/range-value reads for Spreadsheet inputs, and Google Drive connector folder lookup/creation plus binary upload/download and read/write access beneath the selected output folder.
 ---
 
 # Google Workspace Web Update Monitor
 
-Use this composite skill when Google Sheets should be the target source and Google Drive should persist the complete cross-run monitor workspace plus completed Markdown monitoring reports.
+Use this composite skill with **two user-supplied values**: one targets table (CSV or Google Spreadsheet) and one existing Google Drive output folder. The skill discovers input table details and manages its own `workspaces/` and `reports/` subfolders.
 
 Keep Google integration outside the core monitor. The core `web-update-monitor` skill owns monitoring state, evidence, reports, and resumable review transactions inside its workspace. This composite owns only external projection, workspace synchronization, Markdown delivery to Drive, and delivery idempotency.
 
@@ -15,8 +15,8 @@ Keep Google integration outside the core monitor. The core `web-update-monitor` 
 
 ```mermaid
 flowchart LR
-    GS["Google Sheet"] -->|project| CSV["internal/gws/targets.csv"]
-    DP["Google Drive parent folder"] --> DS["workspaces/<br/>workspace-YYYYMMDDTHHMMSSZ.zip × 3"]
+    GS["CSV or Google Spreadsheet"] -->|validate / project| CSV["internal/gws/targets.csv"]
+    DP["Google Drive output folder"] --> DS["workspaces/<br/>workspace-YYYYMMDDTHHMMSSZ.zip × 3"]
     DP --> DR["reports/"]
     DS <-->|restore / persist| WS["workspace snapshot"]
     WS --> WORKSPACE["output/ + internal/"]
@@ -45,8 +45,11 @@ Before the first monitor run:
    If Routines uses an outbound allowlist, explicitly allow target domains. A
    Routines egress-denied HTTP 403 is **not** a website 403: do not use the core
    Web-fetch fallback to bypass the environment's network policy.
-2. Require Google Sheets **range/cell value read** (preserving row/column
-   coordinates); a Drive text extraction tool is not a substitute.
+2. Discover the input type from the supplied file, URL, or ID.
+   For Spreadsheet inputs, require Sheets metadata (tab order) and **range/cell
+   value read** (preserving row/column coordinates); Drive text extraction is
+   not a substitute. For Drive CSV inputs, require exact-ID binary download
+   instead; for local CSV inputs no Google Sheets connector is needed.
 3. Require Drive exact-ID folder metadata, complete direct-child listing with
    stable file IDs and MIME types, folder creation under a specific parent,
    binary ZIP upload, exact-ID binary download, exact-ID delete (snapshot
@@ -99,20 +102,31 @@ python "$GWS_SKILL_DIR/scripts/gws.py" ledger-validate \
   --reports-dir "$WORKSPACE/output/report"
 ```
 
-Save the Sheets range-value response **as JSON data** in a scratch file with
-shape `{"values":[["name","url"],["Example","https://example.com"]]}`.
-Project and validate it _after restore_ and _before pending reconciliation_:
+Acquire the **current** targets input after each restore or initialization
+and before pending reconciliation. For a Google Spreadsheet, save the Sheets
+range-value response as JSON data in a scratch file with shape
+`{"values":[["name","url"],["Example","https://example.com"]]}`; do not
+summarize or rewrite cells. For CSV, save the exact source bytes locally
+without changing its encoding or line endings.
 
 ```bash
+# Google Spreadsheet
 python "$GWS_SKILL_DIR/scripts/gws.py" project \
   --sheet-json "$SHEET_JSON" \
   --targets "$WORKSPACE/internal/gws/targets.csv" \
   --core-skill-dir "$WEB_UPDATE_MONITOR_SKILL_DIR"
+
+# Local or Drive-downloaded CSV
+python "$GWS_SKILL_DIR/scripts/gws.py" project \
+  --csv "$SOURCE_CSV" \
+  --targets "$WORKSPACE/internal/gws/targets.csv" \
+  --core-skill-dir "$WEB_UPDATE_MONITOR_SKILL_DIR"
 ```
 
-Do not summarize or rewrite cells in the agent; pass the raw structured
-cell array through the helper. The helper invokes the core's `load_targets`
-against a staged CSV and atomically replaces the projection only on success.
+Use exactly one source option. Both paths validate the entire staged CSV
+with the installed core's `load_targets` and replace the cached projection
+atomically **only on success**. The CSV path preserves original bytes and the
+core's 1 MiB input limit; the Sheet path builds the canonical CSV projection.
 
 To persist any state-changing operation, save the _complete_ current Drive
 workspace-folder listing as a JSON array of `{"name":"workspace-...zip","id":"Drive-file-ID"}`
@@ -163,13 +177,15 @@ solve Google MCP transfer-size limits or distributed locking. See
 
 ## Required runtime inputs
 
-Resolve these values from the user's request or Routine configuration:
+The **only required user inputs** (prompt or Routine configuration) are:
 
-- source Google Spreadsheet
-- worksheet or range containing targets, readable through the Google Sheets connector
-- one existing Google Drive **parent folder** (URL or stable folder ID) for this logical monitor; the composite resolves or creates its `workspaces/` and `reports/` children
-- installed `web-update-monitor` skill root resolved through runtime skill discovery
-- local scratch workspace for the current run
+- **Input targets table:** local CSV path, Google Drive CSV file URL/ID, or Google Spreadsheet URL/ID.
+- **Output folder:** one existing Google Drive folder URL/ID, used as the parent of managed `workspaces/` and `reports/` folders.
+
+No worksheet name, range, workspace directory, state file, or report folder
+needs to be supplied. The agent discovers both installed skills and creates
+a fresh local scratch workspace automatically on each invocation. An optional
+worksheet/range override can select a non-default tab.
 
 Use a stable workspace key and a dedicated parent folder for one logical monitor. Never share the same parent folder between unrelated target sets or overlapping Routines.
 
@@ -177,7 +193,7 @@ Never put connector credentials, access tokens, cookies, or other secrets into t
 
 ## Resolve Google Drive folders from one parent
 
-The Routine provides **only the existing parent folder's URL or ID**, not separate
+The Routine provides the **existing output folder URL or ID**, not separate
 report/workspace destinations. After checking connector capabilities and passing
 the binary-transfer smoke test, resolve the same parent and its children on
 **every invocation**, before restoring any snapshot, fetching targets, or
@@ -207,7 +223,7 @@ does not call Drive APIs.
 Drive layout:
 
 ```text
-<configured-parent>/
+<output-folder>/
 ├── workspaces/  # Complete, versioned workspace ZIP files
 └── reports/     # Canonical Markdown reports
 ```
@@ -220,7 +236,7 @@ when a previously used workspace is absent.
 
 ## Persist the complete cross-run workspace
 
-Persist the monitor workspace as timestamped ZIP snapshots in the resolved Drive `WORKSPACES_FOLDER_ID` (`<configured-parent>/workspaces/`). Keep at most the three most recent committed snapshots:
+Persist the monitor workspace as timestamped ZIP snapshots in the resolved Drive `WORKSPACES_FOLDER_ID` (`<output-folder>/workspaces/`). Keep at most the three most recent committed snapshots:
 
 ```text
 workspaces/
