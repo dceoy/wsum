@@ -42,6 +42,8 @@ MAX_TOTAL = 256 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
 MAX_TARGET_CSV = 1024 * 1024
 MAX_BINDING_BYTES = 4096
+MAX_DRIVE_ID_LENGTH = 256
+FOLDER_BINDING_ID_COUNT = 3
 
 
 class GwsError(ValueError):
@@ -272,17 +274,18 @@ def project_csv(
         temp.unlink(missing_ok=True)
 
 
-
-def folder_binding(parent_id: str, workspaces_id: str, reports_id: str) -> dict[str, object]:
+def folder_binding(
+    parent_id: str, workspaces_id: str, reports_id: str
+) -> dict[str, object]:
     """Create a strict immutable binding to the three Drive folder IDs."""
     ids = (parent_id, workspaces_id, reports_id)
     if any(
         not isinstance(value, str)
         or not value
-        or len(value) > 256
+        or len(value) > MAX_DRIVE_ID_LENGTH
         or any(char.isspace() for char in value)
         for value in ids
-    ) or len(set(ids)) != 3:
+    ) or len(set(ids)) != FOLDER_BINDING_ID_COUNT:
         raise GwsError("invalid or duplicate Drive folder IDs")
     return {
         "version": 1,
