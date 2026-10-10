@@ -25,7 +25,6 @@ the checks below.
 
 | Resource                        | Required operations                                                                                    |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| ----------------                | -------------------------------------------------------------------------------                        |
 | Sheets (Spreadsheet input only) | Read spreadsheet metadata (ordered tabs), and range values preserving row/column positions             |
 | Input Drive CSV (when used)     | Read file metadata and download complete CSV bytes by exact ID                                         |
 | Drive output                    | Read folder by ID; list all direct children with IDs and MIME types; create child folders by parent ID |
