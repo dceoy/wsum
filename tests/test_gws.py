@@ -343,17 +343,28 @@ def test_project_csv_rejects_missing_symlink_or_large_source(tmp_path: Path) -> 
 
 
 def test_project_csv_cli(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     core = _stub_core(tmp_path)
     source = tmp_path / "targets.csv"
     source.write_text("name,url\nA,https://example.com\n")
     dest = tmp_path / "output.csv"
-    monkeypatch.setattr(sys, "argv", [
-        "gws.py", "project", "--csv", str(source), "--targets", str(dest),
-        "--core-skill-dir", str(core),
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gws.py",
+            "project",
+            "--csv",
+            str(source),
+            "--targets",
+            str(dest),
+            "--core-skill-dir",
+            str(core),
+        ],
+    )
     gws.main()
     assert json.loads(capsys.readouterr().out) == {"target_groups": 1}
     assert dest.read_bytes() == source.read_bytes()
