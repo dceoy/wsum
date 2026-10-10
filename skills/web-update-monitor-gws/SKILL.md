@@ -239,7 +239,7 @@ report folder IDs. Never overwrite, delete, or silently recreate this file.
    folders under the exact parent ID, re-list, and require one of each with
    the returned IDs. Do not blindly retry an ambiguous create. Project and
    validate the selected targets and commit/read-back-verify the **initial
-   workspace ZIP** (per Restore) *before* binding or running the core monitor.
+   workspace ZIP** (per Restore) _before_ binding or running the core monitor.
    Then generate the binding JSON, create it exactly once under the parent,
    download the created file by its ID and verify its bytes and fields. Re-list
    the parent, require a single binding filename matching that created ID,
