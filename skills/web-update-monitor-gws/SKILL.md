@@ -50,10 +50,12 @@ Before the first monitor run:
    value read** (preserving row/column coordinates); Drive text extraction is
    not a substitute. For Drive CSV inputs, require exact-ID binary download
    instead; for local CSV inputs no Google Sheets connector is needed.
-3. Require Drive exact-ID folder metadata, complete direct-child listing with
-   stable file IDs and MIME types, folder creation under a specific parent,
-   binary ZIP upload, exact-ID binary download, exact-ID delete (snapshot
-   retention), and Markdown create/read/update with exact IDs (report delivery).
+3. Require Drive exact-ID folder/file metadata, complete direct-child listing
+   with stable IDs and MIME types, folder creation under a specific parent,
+   exact-ID binary create/download/delete (snapshots), and exact-ID Markdown
+   create/read/update (reports). Also require creating and downloading the
+   immutable parent-level binding JSON by exact file ID. For Drive CSV inputs,
+   require file size and MD5 checksum metadata (`size`, `md5Checksum`).
    Do not assume these tools are available merely because the Google connector
    is enabled.
 4. Execute a throwaway connector round-trip before operational writes:
@@ -116,17 +118,28 @@ python "$GWS_SKILL_DIR/scripts/gws.py" project \
   --targets "$WORKSPACE/internal/gws/targets.csv" \
   --core-skill-dir "$WEB_UPDATE_MONITOR_SKILL_DIR"
 
-# Local or Drive-downloaded CSV
+# Local CSV
 python "$GWS_SKILL_DIR/scripts/gws.py" project \
   --csv "$SOURCE_CSV" \
   --targets "$WORKSPACE/internal/gws/targets.csv" \
   --core-skill-dir "$WEB_UPDATE_MONITOR_SKILL_DIR"
+
+# Google Drive CSV, downloaded by its exact file ID
+python "$GWS_SKILL_DIR/scripts/gws.py" project \
+  --drive-csv "$SOURCE_CSV" \
+  --drive-size "$DRIVE_CSV_SIZE" --drive-md5 "$DRIVE_CSV_MD5" \
+  --targets "$WORKSPACE/internal/gws/targets.csv" \
+  --core-skill-dir "$WEB_UPDATE_MONITOR_SKILL_DIR"
 ```
 
-Use exactly one source option. Both paths validate the entire staged CSV
-with the installed core's `load_targets` and replace the cached projection
-atomically **only on success**. The CSV path preserves original bytes and the
-core's 1 MiB input limit; the Sheet path builds the canonical CSV projection.
+Use exactly one source option. The helper validates the staged CSV with the
+installed core's `load_targets` and replaces the cached projection atomically
+**only on success**. The CSV paths preserve original bytes and the core's
+1 MiB limit; the Sheet path builds the canonical CSV projection. The Drive CSV
+path additionally compares byte length and MD5 of the **same downloaded bytes**
+against the original Drive file's metadata before staging any configuration.
+These checks detect valid-CSV row truncation as well as equal-length corruption.
+Never substitute `--csv` for `--drive-csv` to bypass integrity checking.
 
 To persist any state-changing operation, save the _complete_ current Drive
 workspace-folder listing as a JSON array of `{"name":"workspace-...zip","id":"Drive-file-ID"}`
@@ -191,48 +204,93 @@ Use a stable workspace key and a dedicated parent folder for one logical monitor
 
 Never put connector credentials, access tokens, cookies, or other secrets into the workspace or Drive snapshots.
 
-## Resolve Google Drive folders from one parent
+## Resolve and bind the Google Drive folders
 
-The Routine provides the **existing output folder URL or ID**, not separate
-report/workspace destinations. After checking connector capabilities and passing
-the binary-transfer smoke test, resolve the same parent and its children on
-**every invocation**, before restoring any snapshot, fetching targets, or
-delivering reports. The Google connector owns all Drive operations; `gws.py`
-does not call Drive APIs.
+The Routine supplies only the **existing output folder URL or ID**. After the
+connector smoke test, resolve its exact Drive ID and fully list its direct
+children on **every invocation**. Do this before restoring, monitoring, or
+publishing. The Google connector owns Drive calls; `gws.py` validates the
+binding locally but does not call Drive APIs.
 
-1. Resolve the supplied parent to an exact stable Drive ID. Verify it is an
-   accessible folder (`application/vnd.google-apps.folder`) and list **all**
-   direct children, following pagination. Listing errors, missing permissions,
-   truncated results, invalid parent IDs, or an inaccessible parent are failures,
-   never evidence of an empty folder. Do not search Drive globally by name or
-   create the parent implicitly.
-2. For each exact child name `workspaces` and `reports`, inspect **all**
-   direct children of the given parent. If exactly one match is a folder, reuse
-   its ID (even if it contains existing data). If multiple items have that name
-   or the sole match is not a folder, **stop**; do not choose one or overwrite it.
-   If no item matches, create a folder of that exact name **under the parent ID**.
-   Re-list the parent and require exactly one matching folder whose ID equals
-   the created ID. If the create response is uncertain, re-list and accept only
-   one unambiguous matching folder. Never blindly retry creation.
-3. Bind these exact IDs as `WORKSPACES_FOLDER_ID` and `REPORTS_FOLDER_ID`.
-   Scope all subsequent listing, upload, read, update, and deletion to the
-   appropriate resolved folder. If resolution of either child fails, stop before
-   workspace initialization, monitoring, or report publication; never fall back
-   to the parent, another same-named folder, or an empty workspace.
+Maintain an **immutable** file named `web-update-monitor-gws.binding.json`
+directly under the output folder, outside the replaceable `workspaces/` and
+`reports/` folders. It stores a version and the exact parent, workspace, and
+report folder IDs. Never overwrite, delete, or silently recreate this file.
+
+1. Resolve the output folder by exact ID and verify it is an accessible folder
+   (`application/vnd.google-apps.folder`). List **all** direct children,
+   following pagination and retaining their stable IDs and MIME types.
+   Incomplete listings, missing permissions, or inaccessible metadata are
+   errors, not empty folders. Reject duplicate exact names, including the
+   binding file, and non-folder objects named `workspaces` or `reports`.
+2. **Existing binding:** require exactly one file of the expected name and
+   correct non-folder MIME type. Download it by exact file ID. For each child
+   folder, require its exact name, folder MIME type, stable file ID, and direct
+   parent relationship. Verify the downloaded binding against those IDs with
+   the helper below. **Never create replacement child folders** when a
+   binding exists. On any missing, renamed, moved, or replaced folder, fail
+   closed even if a new empty folder has the expected name. A bound
+   `workspaces/` folder with zero snapshots is also a failure; never
+   establish another baseline.
+3. **First-time initialization only:** when no binding exists, require that
+   neither `workspaces` nor `reports` exists under the parent (even empty).
+   Otherwise stop for explicit manual recovery/migration; do not adopt
+   previously used or partially initialized folders by name. Create both
+   folders under the exact parent ID, re-list, and require one of each with
+   the returned IDs. Do not blindly retry an ambiguous create. Project and
+   validate the selected targets and commit/read-back-verify the **initial
+   workspace ZIP** (per Restore) *before* binding or running the core monitor.
+   Then generate the binding JSON, create it exactly once under the parent,
+   download the created file by its ID and verify its bytes and fields. Re-list
+   the parent, require a single binding filename matching that created ID,
+   and recheck both child IDs. Only then may the first `check` run.
+   If interrupted before binding is committed, stop on the next invocation
+   and require manual reconciliation. Do not reset the monitor automatically.
+4. Bind the verified IDs as `WORKSPACES_FOLDER_ID` and
+   `REPORTS_FOLDER_ID`. Scope all subsequent listing, creation, download,
+   update, and deletion to those **exact IDs**, not filename searches outside
+   the verified folders.
+
+Create and verify the parent binding with the deterministic helper:
+
+```bash
+# Only after the initial workspace ZIP has been verified
+python "$GWS_SKILL_DIR/scripts/gws.py" folder-binding \
+  --file "$SCRATCH/folder-binding.json" --create \
+  --parent-id "$OUTPUT_FOLDER_ID" \
+  --workspaces-id "$WORKSPACES_FOLDER_ID" \
+  --reports-id "$REPORTS_FOLDER_ID"
+
+# On first-run Drive read-back AND on every subsequent Routine invocation
+python "$GWS_SKILL_DIR/scripts/gws.py" folder-binding \
+  --file "$DOWNLOADED_BINDING_JSON" \
+  --parent-id "$OUTPUT_FOLDER_ID" \
+  --workspaces-id "$WORKSPACES_FOLDER_ID" \
+  --reports-id "$REPORTS_FOLDER_ID"
+```
+
+Upload the created JSON as `web-update-monitor-gws.binding.json` without
+conversion, compare exact read-back bytes and SHA-256 with the create output,
+then run the helper validation. The parent binding is **not** part of workspace
+ZIPs or snapshot retention. Neither corrupted/missing bindings nor missing
+snapshots can be repaired by silently creating a fresh baseline.
 
 Drive layout:
 
 ```text
 <output-folder>/
-├── workspaces/  # Complete, versioned workspace ZIP files
-└── reports/     # Canonical Markdown reports
+├── web-update-monitor-gws.binding.json  # Immutable folder ID binding
+├── workspaces/                          # Versioned workspace ZIP files
+└── reports/                             # Canonical Markdown reports
 ```
 
-This changes the destination configuration, not existing monitor state or
-report filenames. For an existing installation, place its original workspace
-snapshots and report files in the corresponding child folders **before** using
-the new parent configuration. Do not silently migrate, discard, or reset state
-when a previously used workspace is absent.
+An installation created with the older two-folder configuration must be
+migrated explicitly: identify the correct original folder IDs, preserve
+all snapshots and reports, and verify the newest snapshot before installing
+the parent binding. Automatic adoption or a clean reinitialization of
+existing folders is forbidden. The binding protects against replacement of
+the child folders; loss of the entire parent and its binding cannot be
+distinguished from a genuinely new output folder using only the two inputs.
 
 ## Persist the complete cross-run workspace
 
@@ -258,7 +316,17 @@ Place a UTF-8 `manifest.json` at the ZIP root. It must contain a schema version,
 
 ### Restore
 
-List the entire resolved Drive `WORKSPACES_FOLDER_ID`. If no timestamped workspace snapshot exists, initialize a new monitor only when the folder is empty. For that brand-new monitor, create `internal/gws/delivery.json` immediately as the empty version-1 ledger `{"version":1,"reports":{}}`. After the current Sheet has been projected and validated, persist an initial complete workspace snapshot containing that empty ledger **before any core `check`, pending finalization, or other monitoring state transition**. This makes initialization explicit and prevents an undelivered first report from later being inferred as already delivered. If any other file exists, fail closed without creating or deleting anything. The composite accepts only the current timestamped workspace snapshots; use a new empty `workspaces/` folder for a fresh monitor.
+List the entire resolved Drive `WORKSPACES_FOLDER_ID`. If no timestamped
+snapshot exists, initialization is permitted **only** during the explicit
+first-time setup above, with no parent binding and two newly created empty
+child folders. Initialize `internal/gws/delivery.json` as
+`{"version":1,"reports":{}}`. Project and validate the current input CSV or
+Spreadsheet, then persist/read-back-verify the first complete snapshot
+**before** creating the immutable parent binding or calling core `check`.
+If a binding already exists, an empty folder is a missing-state error, not
+a new baseline. Any unexpected file in the workspace folder also stops
+initialization. Never fall back to another snapshot or initialize on a
+missing/corrupted binding.
 
 When timestamped snapshots exist, consider only files whose names exactly match `workspace-YYYYMMDDTHHMMSSZ.zip`, parse their timestamps strictly, and select the newest snapshot by its filename timestamp. Google Drive allows duplicate names, so require exactly one Drive file ID for each timestamp; duplicate files for one generation fail closed. Download the selected snapshot by its exact file ID. Do not use Drive modified time or listing order to choose the active workspace.
 
@@ -309,11 +377,16 @@ Resolve the supplied input on **every run**, before pending review or monitoring
 
 1. **Local CSV path:** require an existing regular `.csv` file in the
    Routine's accessible filesystem; read it as bytes.
-2. **Google Drive CSV URL or ID:** resolve it to one exact file ID, verify
-   its file metadata identifies CSV (not a Google-native Sheet), download
-   its bytes by exact ID into local scratch, and reject errors, ambiguity,
-   unsupported conversions, or truncated transfers. Do not use Drive text
-   extraction.
+2. **Google Drive CSV URL or ID:** resolve one exact file ID, verify it is
+   a binary CSV rather than a Google-native Sheet, and obtain its `size` and
+   `md5Checksum` metadata (a full 32-hex MD5). These fields are **required**:
+   missing, invalid, or unsupported checksum/size access blocks monitoring.
+   Download the exact file bytes by ID; provide both metadata values to
+   `project --drive-csv --drive-size --drive-md5` so the helper rejects a
+   truncated CSV (even if it ends at a valid record boundary) or same-size
+   corruption. Re-read file ID and metadata after download and require the
+   same size, checksum, and file version if exposed. Do not use Drive text
+   extraction, Sheets export, or `--csv` as a bypass.
 3. **Google Spreadsheet URL or ID:** resolve the exact spreadsheet ID and
    retrieve sheet metadata and values through the Sheets connector. Unless
    the user optionally selected a tab/range, choose the **first grid worksheet
@@ -466,7 +539,9 @@ Do not convert the report to a Google Doc or create an additional presentation c
 
 ## Failure semantics
 
+- Parent binding missing with existing child folders, or binding checksum/schema/ID mismatch, or bound workspace snapshots missing: stop without creating replacement state. Do not bypass the binding during recovery.
 - Drive parent or child folder resolution failure (missing capabilities, inaccessible parent, incomplete listing, duplicate names, non-folder match, or uncertain create result): stop without initializing a workspace, fetching targets, publishing reports, or deleting Drive files.
+- Drive CSV metadata, byte-length, MD5, or stable-version comparison failure: never project the partial CSV, resume pending reviews, or fetch targets.
 - CSV/Spreadsheet source or projection failure: do not replace the restored/cached CSV or start new fetches.
 - Workspace ZIP or manifest validation failure: do not start from an empty baseline and do not silently fall back to an older snapshot.
 - Pending review exists: first reconcile it against the current authoritative targets projection, discard it if removed or disabled, otherwise resume it through the core API without refetching that target.
