@@ -412,7 +412,9 @@ def test_folder_binding_rejects_modified_metadata(tmp_path: Path, content: str) 
         gws.binding_file(marker, "p", "w", "r", create=False)
 
 
-def test_folder_binding_rejects_missing_symlink_or_duplicate_ids(tmp_path: Path) -> None:
+def test_folder_binding_rejects_missing_symlink_or_duplicate_ids(
+    tmp_path: Path,
+) -> None:
     marker = tmp_path / "binding.json"
     with pytest.raises(gws.GwsError, match="regular file"):
         gws.binding_file(marker, "p", "w", "r", create=False)
@@ -425,8 +427,11 @@ def test_folder_binding_rejects_missing_symlink_or_duplicate_ids(tmp_path: Path)
         gws.binding_file(tmp_path / "invalid.json", "p", "p", "r", create=True)
 
 
-def test_folder_binding_cli_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                      capsys: pytest.CaptureFixture[str]) -> None:
+def test_folder_binding_cli_roundtrip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     marker = tmp_path / "binding.json"
     base = [
         "gws.py", "folder-binding", "--file", str(marker),
