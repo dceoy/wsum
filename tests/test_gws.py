@@ -378,9 +378,12 @@ def test_folder_binding_roundtrip_and_stable_ids(tmp_path: Path) -> None:
     )
     assert first["size"] == marker.stat().st_size
     assert first["sha256"] == hashlib.sha256(marker.read_bytes()).hexdigest()
-    assert gws.binding_file(
-        marker, "parent", "workspace-original", "reports-original", create=False
-    ) == first
+    assert (
+        gws.binding_file(
+            marker, "parent", "workspace-original", "reports-original", create=False
+        )
+        == first
+    )
     with pytest.raises(FileExistsError):
         gws.binding_file(
             marker, "parent", "workspace-new", "reports-original", create=True
@@ -391,7 +394,10 @@ def test_folder_binding_roundtrip_and_stable_ids(tmp_path: Path) -> None:
         )
     with pytest.raises(gws.GwsError, match="IDs or schema changed"):
         gws.binding_file(
-            marker, "wrong-parent", "workspace-original", "reports-original",
+            marker,
+            "wrong-parent",
+            "workspace-original",
+            "reports-original",
             create=False,
         )
 
@@ -434,8 +440,16 @@ def test_folder_binding_cli_roundtrip(
 ) -> None:
     marker = tmp_path / "binding.json"
     base = [
-        "gws.py", "folder-binding", "--file", str(marker),
-        "--parent-id", "p", "--workspaces-id", "w", "--reports-id", "r",
+        "gws.py",
+        "folder-binding",
+        "--file",
+        str(marker),
+        "--parent-id",
+        "p",
+        "--workspaces-id",
+        "w",
+        "--reports-id",
+        "r",
     ]
     monkeypatch.setattr(sys, "argv", [*base, "--create"])
     gws.main()
@@ -452,9 +466,12 @@ def test_drive_csv_integrity_rejects_row_truncation(tmp_path: Path) -> None:
     complete = b"name,url\nA,https://example.com\nB,https://example.org\n"
     source.write_bytes(complete)
     digest = hashlib.md5(complete, usedforsecurity=False).hexdigest()
-    assert gws.project_csv(
-        source, destination, core, drive_size=len(complete), drive_md5=digest
-    ) == 1
+    assert (
+        gws.project_csv(
+            source, destination, core, drive_size=len(complete), drive_md5=digest
+        )
+        == 1
+    )
     assert destination.read_bytes() == complete
     source.write_bytes(b"name,url\nA,https://example.com\n")  # valid CSV, missing row
     with pytest.raises(gws.GwsError, match="size or MD5 mismatch"):
@@ -495,8 +512,14 @@ def test_drive_csv_cli_requires_integrity_metadata(
     source.write_text("name,url\nA,https://example.com\n")
     dest = tmp_path / "targets.csv"
     base = [
-        "gws.py", "project", "--drive-csv", str(source), "--targets", str(dest),
-        "--core-skill-dir", str(core),
+        "gws.py",
+        "project",
+        "--drive-csv",
+        str(source),
+        "--targets",
+        str(dest),
+        "--core-skill-dir",
+        str(core),
     ]
     monkeypatch.setattr(sys, "argv", base)
     with pytest.raises(SystemExit) as exc:
@@ -508,10 +531,11 @@ def test_drive_csv_cli_requires_integrity_metadata(
         sys,
         "argv",
         [
-            *base, "--drive-size", str(source.stat().st_size),
-            "--drive-md5", hashlib.md5(
-                source.read_bytes(), usedforsecurity=False
-            ).hexdigest(),
+            *base,
+            "--drive-size",
+            str(source.stat().st_size),
+            "--drive-md5",
+            hashlib.md5(source.read_bytes(), usedforsecurity=False).hexdigest(),
         ],
     )
     gws.main()
