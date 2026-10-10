@@ -295,3 +295,65 @@ def test_validate_restored_zero_report_ledger(
             gws.main()
         assert exc.value.code == 1
         assert "gws:" in capsys.readouterr().err
+
+
+def _stub_core(tmp_path: Path) -> Path:
+    skill = tmp_path / "core"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "scripts/workspace.py").write_text(
+        "from pathlib import Path\n"
+        "def load_targets(path):\n"
+        "    content = Path(path).read_text(encoding='utf-8')\n"
+        "    if 'invalid' in content:\n"
+        "        raise ValueError('invalid CSV')\n"
+        "    return [{'id': 1}]\n"
+    )
+    return skill
+
+
+def test_project_csv_preserves_bytes_and_atomic_validation(tmp_path: Path) -> None:
+    core = _stub_core(tmp_path)
+    source = tmp_path / "input.csv"
+    dest = tmp_path / "workspace/internal/gws/targets.csv"
+    content = b'name,url\r\n"A, B",https://example.com\r\n'
+    source.write_bytes(content)
+    assert gws.project_csv(source, dest, core) == 1
+    assert dest.read_bytes() == content
+    source.write_text("name,url\ninvalid,https://example.com\n")
+    with pytest.raises(ValueError, match="invalid CSV"):
+        gws.project_csv(source, dest, core)
+    assert dest.read_bytes() == content
+
+
+def test_project_csv_rejects_missing_symlink_or_large_source(tmp_path: Path) -> None:
+    core = _stub_core(tmp_path)
+    source = tmp_path / "input.csv"
+    dest = tmp_path / "workspace/targets.csv"
+    with pytest.raises(gws.GwsError, match="regular file"):
+        gws.project_csv(source, dest, core)
+    source.write_text("name,url\nA,https://example.com\n")
+    symlink = tmp_path / "link.csv"
+    symlink.symlink_to(source)
+    with pytest.raises(gws.GwsError, match="regular file"):
+        gws.project_csv(symlink, dest, core)
+    source.write_bytes(b"x" * (gws.MAX_TARGET_CSV + 1))
+    with pytest.raises(gws.GwsError, match="1 MiB"):
+        gws.project_csv(source, dest, core)
+    assert not dest.exists()
+
+
+def test_project_csv_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    core = _stub_core(tmp_path)
+    source = tmp_path / "targets.csv"
+    source.write_text("name,url\nA,https://example.com\n")
+    dest = tmp_path / "output.csv"
+    monkeypatch.setattr(sys, "argv", [
+        "gws.py", "project", "--csv", str(source), "--targets", str(dest),
+        "--core-skill-dir", str(core),
+    ])
+    gws.main()
+    assert json.loads(capsys.readouterr().out) == {"target_groups": 1}
+    assert dest.read_bytes() == source.read_bytes()
