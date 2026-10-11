@@ -34,11 +34,16 @@ FIELDS = (
 SNAPSHOT_RE = re.compile(r"^workspace-(\d{8}T\d{6}Z)\.zip$")
 RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+MD5_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 MAX_ZIP = 128 * 1024 * 1024
 MAX_FILES = 2000
 MAX_ENTRY = 64 * 1024 * 1024
 MAX_TOTAL = 256 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
+MAX_TARGET_CSV = 1024 * 1024
+MAX_BINDING_BYTES = 4096
+MAX_DRIVE_ID_LENGTH = 256
+FOLDER_BINDING_ID_COUNT = 3
 
 
 class GwsError(ValueError):
@@ -220,6 +225,105 @@ def project(sheet: Path, destination: Path, core_skill: Path) -> int:
         return len(targets)
     finally:
         temp.unlink(missing_ok=True)
+
+
+def project_csv(
+    source: Path,
+    destination: Path,
+    core_skill: Path,
+    *,
+    drive_size: int | None = None,
+    drive_md5: str | None = None,
+) -> int:
+    """Validate local or Drive CSV bytes before atomically replacing targets."""
+    if (drive_size is None) != (drive_md5 is None):
+        raise GwsError("Drive CSV requires both size and MD5 metadata")
+    if drive_size is not None and (
+        isinstance(drive_size, bool)
+        or drive_size <= 0
+        or drive_size > MAX_TARGET_CSV
+        or not isinstance(drive_md5, str)
+        or not MD5_RE.fullmatch(drive_md5)
+    ):
+        raise GwsError("invalid Drive CSV size or MD5 metadata")
+    if source.is_symlink() or not source.is_file():
+        raise GwsError("CSV input must be an existing regular file")
+    with source.open("rb") as stream:
+        content = stream.read(MAX_TARGET_CSV + 1)
+    if len(content) > MAX_TARGET_CSV:
+        raise GwsError("CSV input exceeds 1 MiB")
+    if drive_size is not None and (
+        len(content) != drive_size
+        or hashlib.md5(content, usedforsecurity=False).hexdigest()
+        != typing.cast("str", drive_md5).lower()
+    ):
+        raise GwsError("Drive CSV download size or MD5 mismatch")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=destination.parent, prefix=".tmp-", delete=False
+    ) as stream:
+        temp = Path(stream.name)
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        targets = _load_core_targets(temp, core_skill)
+        temp.replace(destination)
+        return len(targets)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def folder_binding(
+    parent_id: str, workspaces_id: str, reports_id: str
+) -> dict[str, object]:
+    """Create a strict immutable binding to the three Drive folder IDs."""
+    ids = (parent_id, workspaces_id, reports_id)
+    if (
+        any(
+            not value
+            or len(value) > MAX_DRIVE_ID_LENGTH
+            or any(char.isspace() for char in value)
+            for value in ids
+        )
+        or len(set(ids)) != FOLDER_BINDING_ID_COUNT
+    ):
+        raise GwsError("invalid or duplicate Drive folder IDs")
+    return {
+        "version": 1,
+        "parent_id": parent_id,
+        "workspaces_id": workspaces_id,
+        "reports_id": reports_id,
+    }
+
+
+def binding_file(
+    path: Path,
+    parent_id: str,
+    workspaces_id: str,
+    reports_id: str,
+    *,
+    create: bool,
+) -> dict[str, object]:
+    """Create once, or verify an exact immutable parent-folder binding."""
+    expected = folder_binding(parent_id, workspaces_id, reports_id)
+    content = json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("xb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    else:
+        if path.is_symlink() or not path.is_file():
+            raise GwsError("folder binding must be a regular file")
+        if path.stat().st_size > MAX_BINDING_BYTES:
+            raise GwsError("folder binding exceeds size limit")
+        actual: typing.Any = json.loads(path.read_bytes())
+        if actual != expected or not isinstance(actual, dict):
+            raise GwsError("Drive folder binding IDs or schema changed")
+        content = path.read_bytes()
+    return {"size": len(content), "sha256": _digest(content), "binding": expected}
 
 
 def _workspace_files(workspace: Path) -> list[tuple[str, Path]]:
@@ -523,9 +627,20 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     p = commands.add_parser("project")
-    p.add_argument("--sheet-json", type=Path, required=True)
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--sheet-json", type=Path)
+    source.add_argument("--csv", type=Path)
+    source.add_argument("--drive-csv", type=Path)
+    p.add_argument("--drive-size", type=int)
+    p.add_argument("--drive-md5")
     p.add_argument("--targets", type=Path, required=True)
     p.add_argument("--core-skill-dir", type=Path, required=True)
+    p = commands.add_parser("folder-binding")
+    p.add_argument("--file", type=Path, required=True)
+    p.add_argument("--parent-id", required=True)
+    p.add_argument("--workspaces-id", required=True)
+    p.add_argument("--reports-id", required=True)
+    p.add_argument("--create", action="store_true")
     p = commands.add_parser("next-generation")
     p.add_argument("--snapshots-json", type=Path, required=True)
     p.add_argument("--expected-snapshot-json", type=Path, required=True)
@@ -553,11 +668,35 @@ def main() -> None:
     args = parser.parse_args()
     try:
         if args.command == "project":
+            if args.drive_csv is None and (
+                args.drive_size is not None or args.drive_md5 is not None
+            ):
+                raise GwsError("Drive CSV metadata requires --drive-csv")
+            if args.drive_csv is not None and (
+                args.drive_size is None or args.drive_md5 is None
+            ):
+                raise GwsError("Drive CSV requires --drive-size and --drive-md5")
             result = {
-                "target_groups": project(
-                    args.sheet_json, args.targets, args.core_skill_dir
+                "target_groups": (
+                    project(args.sheet_json, args.targets, args.core_skill_dir)
+                    if args.sheet_json is not None
+                    else project_csv(
+                        args.drive_csv if args.drive_csv is not None else args.csv,
+                        args.targets,
+                        args.core_skill_dir,
+                        drive_size=args.drive_size,
+                        drive_md5=args.drive_md5,
+                    )
                 )
             }
+        elif args.command == "folder-binding":
+            result = binding_file(
+                args.file,
+                args.parent_id,
+                args.workspaces_id,
+                args.reports_id,
+                create=args.create,
+            )
         elif args.command == "next-generation":
             generation = next_generation(
                 json.loads(args.snapshots_json.read_text()),

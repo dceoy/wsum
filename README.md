@@ -6,14 +6,14 @@ The core skill lives in `skills/web-update-monitor/`. It intentionally has two r
 
 A second composite, `skills/web-update-monitor-llm-wiki/`, compiles durable captured evidence from the core into a source-backed Markdown knowledge base. The core also gains an opt-in `finalize --archive-evidence` output for it.
 
-A thin composite integration skill lives in `skills/web-update-monitor-gws/`. It keeps Google-specific orchestration outside the core while using Google Sheets as the target source and Google Drive for complete versioned workspace persistence plus completed Markdown report delivery.
+A thin composite integration skill lives in `skills/web-update-monitor-gws/`. It keeps Google-specific orchestration outside the core while accepting either a CSV targets table or Google Spreadsheet as input, and one Google Drive output folder for versioned workspace persistence and Markdown report delivery.
 
 ## Agent Skills
 
 The repository ships these canonical skills:
 
 - `skills/web-update-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
-- `skills/web-update-monitor-gws/`: a connector-driven composite skill that projects a Google Sheet into the core CSV contract, persists the complete `output/` and `internal/` workspace roots as three retained timestamped ZIP generations in Drive, and publishes completed runs as Markdown files in Drive.
+- `skills/web-update-monitor-gws/`: a connector-driven composite skill that validates a CSV or projects a Google Spreadsheet into the core CSV contract, persists the complete `output/` and `internal/` workspace roots as three retained timestamped ZIP generations in Drive, and publishes completed runs as Markdown files in Drive.
 - `skills/web-update-monitor-llm-wiki/`: a composite skill with one deterministic helper (`scripts/wiki.py`) that turns committed evidence bundles into cited Markdown pages with a processed ledger and recoverable compilation transactions.
 
 To install the core skill in an Agent Skills-compatible runtime, use the `web-update-monitor` package from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain). To use the Google Workspace composite, install **both** `web-update-monitor` and `web-update-monitor-gws`; the composite package intentionally delegates to the core package instead of duplicating its runtime helpers. The LLM wiki composite follows the same rule: install `web-update-monitor` and `web-update-monitor-llm-wiki`, and let the runtime's skill discovery locate the core instead of assuming a sibling path.
@@ -22,8 +22,11 @@ To install the core skill in an Agent Skills-compatible runtime, use the `web-up
 
 ```mermaid
 flowchart LR
-    GS["Google Sheet"] --> CSV["internal/gws/targets.csv"]
-    DS["Google Drive workspaces/<br/>workspace-YYYYMMDDTHHMMSSZ.zip × 3"] <-->|restore / persist| WS["workspace snapshot"]
+    GS["CSV or Google Spreadsheet"] --> CSV["internal/gws/targets.csv"]
+    DP["Google Drive output folder"] --> B["Immutable folder ID binding"]
+    DP --> DS["workspaces/<br/>workspace-YYYYMMDDTHHMMSSZ.zip × 3"]
+    DP --> DR["reports/"]
+    DS <-->|restore / persist| WS["workspace snapshot"]
     WS --> WORKSPACE["output/ + internal/"]
     CSV --> CORE["web-update-monitor"]
     WORKSPACE --> CORE
@@ -31,20 +34,20 @@ flowchart LR
     CORE --> REPORT["output/report/<run-id>.md"]
     REPORT -->|run complete| GMD["Drive Markdown file"]
     GMD -->|verify| DELIVERY["internal/gws/delivery.json"]
-    GMD --> DR["Google Drive report folder"]
+    GMD --> DR
 ```
 
 The core automatically reads newly added navigation links from changed HTML pages and RSS/Atom feeds, including linked PDFs. Traversal defaults to depth 1 and at most 100 fetched links per target; `check --link-depth <N> --max-links <N>` changes those run-level limits, and depth 0 disables linked-document fetching. It stores child evidence in the parent pending transaction and includes it in the same semantic review. Initial observations establish the parent baseline without following existing links.
 
 The core groups interests by exact trimmed URL and fetches each enabled URL once. Semantic review considers the parent diff and linked evidence for every enabled interest: material for any interest means material for the URL. Write one managed report section explaining the affected interests without repeating the same change, and finalize once per URL.
 
-The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite persists the complete `output/` and `internal/` roots as timestamped workspace snapshots (`workspace-YYYYMMDDTHHMMSSZ.zip`), restores the newest generation by filename timestamp, and retains only the three newest committed snapshots. This includes reports, core state, evidence, the cached Google Sheets projection, and a compact delivery ledger; after restore, the Sheet projection is regenerated before pending reconciliation or new fetches.
+The core exposes resumable pending reviews directly. `check --compact` returns small review handles, `pending --target-id` returns one bounded parent diff plus linked-document evidence on demand, and a target with an existing pending review is not refetched. The Google Workspace composite persists the complete `output/` and `internal/` roots as timestamped workspace snapshots (`workspace-YYYYMMDDTHHMMSSZ.zip`), restores the newest generation by filename timestamp, and retains only the three newest committed snapshots. This includes reports, core state, evidence, the cached validated targets CSV, and a compact delivery ledger; after restore, the selected CSV or Spreadsheet is revalidated and projected before pending reconciliation or new fetches.
 
 Markdown remains the canonical core and user-facing Google Drive report format. Because each committed workspace snapshot already contains the complete `output/` tree, the composite delivers completed `output/report/<run-id>.md` files directly without duplicating report content into a queue. A single `internal/gws/delivery.json` ledger stores only delivered run IDs and report SHA-256 digests, so completed historical reports are skipped without Drive calls. Pending delivery still uses exact-filename lookup plus byte verification to make retries converge on the same Drive file instead of creating duplicates.
 
-Read `skills/web-update-monitor-gws/SKILL.md` for connector orchestration and recovery semantics.
+Read `skills/web-update-monitor-gws/SKILL.md` for connector orchestration and recovery semantics. The output folder holds an immutable `web-update-monitor-gws.binding.json` with the stable IDs of its `workspaces/` and `reports/` children; a missing or mismatched binding stops the monitor instead of silently resetting its baseline. Existing two-folder deployments require **explicit migration and binding** after verifying the original snapshots; the composite does not adopt or migrate unbound folders automatically.
 
-For **Claude Code Routines**, first check actual Google Sheets range reads and Google Drive binary ZIP create/download/verification, and configure public-network access. The Google Workspace composite includes a deterministic local Python helper for Sheet-to-CSV projection, safe ZIP snapshot pack/verify/restore, generation naming, and delivery-ledger validation (`skills/web-update-monitor-gws/scripts/gws.py`). Google connector transfer and authorization remain the agent's responsibility. Run the [Routines E2E compatibility checklist](docs/claude-code-routines.md) before enabling a recurring schedule; this integration has not been verified against a live Routine.
+For **Claude Code Routines**, specify only an **input targets table** (local CSV, Drive CSV or Google Spreadsheet) and one existing **Drive output folder** URL/ID; the composite resolves or creates `workspaces/` and `reports/` directly beneath it. It selects the first grid worksheet and entire used range automatically for Spreadsheet inputs; no A1 range is required. First check the applicable CSV/Sheets read tools, Drive folder listing/creation and binary ZIP create/download/verification, and public-network access. The composite's Python helper supports byte-preserving CSV validation (plus exact Drive size/MD5 checks), Sheet-to-CSV projection, immutable folder-binding validation, safe ZIP snapshot pack/verify/restore, generation naming, and delivery-ledger validation (`skills/web-update-monitor-gws/scripts/gws.py`). Google connector transfer and authorization remain the agent's responsibility. Run the [Routines E2E compatibility checklist](docs/claude-code-routines.md) before enabling a recurring schedule; this integration has not been verified against a live Routine.
 
 ### LLM wiki composition
 
@@ -105,7 +108,7 @@ workspace/
     └── evidence/
 ```
 
-Users normally read only `output/`; `internal/` is managed by the skills and should not be edited manually. Edit the selected CSV when changing core monitoring targets. In the Google Workspace composite workflow, the authoritative Spreadsheet projects to `$WORKSPACE/internal/gws/targets.csv`, which is passed explicitly to the core.
+Users normally read only `output/`; `internal/` is managed by the skills and should not be edited manually. Edit the selected CSV when changing core monitoring targets. In the Google Workspace composite workflow, the authoritative input CSV or Spreadsheet is validated/projected to `$WORKSPACE/internal/gws/targets.csv`, which is passed explicitly to the core.
 
 ### Generated files
 
