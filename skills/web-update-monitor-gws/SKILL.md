@@ -310,7 +310,7 @@ Each ZIP is a self-contained workspace generation. Archive every regular file be
 - `output/`: all user-facing generated artifacts, including `output/report/`
 - `internal/`: all implementation data, including core state, evidence, the Google Workspace projection, and the compact delivery ledger
 
-Exclude only hidden temporary files created for atomic replacement or other explicitly transient scratch artifacts. Preserve file bytes exactly; do not require archived workspace files to be UTF-8. The restored `internal/gws/targets.csv` is only a cached projection: after restore, the Google Sheet remains authoritative and the projection must be regenerated and atomically replaced before pending reconciliation, finalization, or new fetches.
+Exclude only hidden temporary files created for atomic replacement or other explicitly transient scratch artifacts. Preserve file bytes exactly; do not require archived workspace files to be UTF-8. The restored `internal/gws/targets.csv` is only a cached projection: after restore, the selected targets table remains authoritative and the projection must be regenerated and atomically replaced before pending reconciliation, finalization, or new fetches.
 
 Place a UTF-8 `manifest.json` at the ZIP root. It must contain a schema version, the snapshot generation timestamp matching the filename, and for every archived workspace file its normalized relative path, byte length, and SHA-256 digest. The manifest itself is metadata, not a workspace file.
 
