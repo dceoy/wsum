@@ -106,8 +106,19 @@ is insufficient. Delete all throwaway files when done.
 2. End that session. Run again in a **fresh** session and restore the latest
    ZIP by its ID and filename, using `gws.py restore` into a new workspace.
    Unchanged content must not be reported as a first observation.
-3. Change a controlled target. Verify review/finalize and one Markdown report
-   per completed run; pending review must block early report publication.
+3. Change a controlled public target with independently inspectable primary
+   corroboration and confirm `web-update-report-gws` first judges materiality,
+   invokes `web-update-research` exactly once for that material URL, and
+   invokes the monitor's `finalize` exactly once with the returned Markdown.
+   Verify distinct **Observed changes**, **Verified context**, and **Analysis
+   (inference)** sections and inspected source URLs. Verify one delivered
+   Markdown report per completed run, and that pending reviews block delivery.
+   Also test a **non-material** change: no research invocation, no report.
+   Disable public-web search in a test run: a material change must still yield
+   a fact-only report with an explicit independent-verification limitation.
+   Simulate a transient search/page-open failure: allow at most one retry,
+   then finalize a qualified fact-only report if the retry fails. Confirm
+   research is not silently retried for an already finalized revision.
 4. Check byte-identical Markdown read-back before `gws.py ledger --record`.
    Repeat the run and verify that no duplicate report file is created.
 5. Verify at most three committed ZIP generations remain. Force an incomplete
@@ -118,7 +129,15 @@ is insufficient. Delete all throwaway files when done.
    previously committed snapshot.
 7. Verify that missing Sheets permission, expired connector authorization,
    and an egress-denied HTTP 403 produce explicit errors, not a successful
-   empty report or a new baseline.
+   empty report or a new baseline. Separately use a controlled public target
+   whose static fetch returns a website HTTP 403 and the main agent can read:
+   verify `agent_fetch_required` triggers Web fetch of the returned final URL,
+   monitor `ingest` with original `run_id`/`target_id` and the exact
+   `link_depth`/`max_links` (and `--links` when available), workspace
+   persistence, and subsequent pending/materiality/research/finalize stages.
+   Verify baseline-only ingestion does not research. When Web fetch also
+   fails, report that target and preserve the previous baseline; never bypass
+   an egress-denied 403 or replace the source with a search snippet.
 8. Verify that missing or duplicated binding files, replaced/renamed child
    folders, empty bound `workspaces/`, inaccessible output folder, incomplete
    listings and ambiguous creates **stop**, with no baseline reset. Verify that
