@@ -8,7 +8,7 @@ the checks below.
 ## Setup
 
 1. Open the `dceoy/wsum` repository in Claude Code Routines. Confirm the
-   `wsum-monitor` and `wsum-gws` skills are discoverable.
+   `wsum-monitor`, `wsum-research`, and `wsum-gws` skills are discoverable.
 2. Supply **only** (a) an input targets table (local CSV path, Drive CSV URL/ID,
    or Google Spreadsheet URL/ID) and (b) one existing Drive **output folder**
    URL/ID. For a Spreadsheet, enable the Sheets connector; for Drive-hosted
