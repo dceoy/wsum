@@ -39,7 +39,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"skills/web-update-monitor-gws/scripts/gws.py" = [
+"skills/wsum-gws/scripts/gws.py" = [
   "implicit-namespace-package",  # executable skill helper, not an import package
   "docstring-missing-returns",  # concise helper docstrings
   "docstring-missing-exception",  # failures carry contextual GwsError messages
@@ -53,7 +53,7 @@ ignore = [
   "undocumented-public-function",  # CLI helpers have descriptive names
   "print",  # JSON CLI output
 ]
-"skills/web-update-monitor/scripts/workspace.py" = [
+"skills/wsum-monitor/scripts/workspace.py" = [
   "complex-structure",  # explicit filesystem safety branches stay visible
   "docstring-missing-returns",  # concise helper docstrings are sufficient here
   "docstring-missing-exception",  # errors are represented by WorkspaceError messages
@@ -67,7 +67,7 @@ ignore = [
   "too-many-return-statements",  # state outcomes map directly to returned actions
   "too-many-statements-in-try-clause",  # atomic pending writes stay in one transaction
 ]
-"skills/web-update-monitor/scripts/monitor.py" = [
+"skills/wsum-monitor/scripts/monitor.py" = [
   "any-type",  # Any is required at urllib callback boundaries
   "blind-except",  # urllib exposes heterogeneous transport failures
   "docstring-missing-returns",  # concise helper docstrings are sufficient here
@@ -76,17 +76,6 @@ ignore = [
   "implicit-namespace-package",  # skill scripts are executable helpers, not a Python package
   "magic-value-comparison", # protocol constants such as HTTP ports are self-explanatory
   "print",    # CLI writes its JSON result to stdout/stderr
-]
-"skills/web-update-monitor-llm-wiki/scripts/wiki.py" = [
-  "docstring-missing-returns",  # concise helper docstrings are sufficient here
-  "docstring-missing-exception",  # errors are represented by WikiError messages
-  "f-string-in-exception",  # evidence and draft errors are intentionally contextual
-  "implicit-namespace-package",  # skill scripts are executable helpers, not a package
-  "magic-value-comparison",  # explicit size and count limits stay visible
-  "raise-vanilla-args",  # WikiError messages are defined at the decision site
-  "raw-string-in-exception",  # CLI errors are intentionally direct literal messages
-  "too-many-locals",  # draft validation keeps related checks together
-  "print",  # CLI writes its JSON result to stdout/stderr
 ]
 "tests/**/*.py" = [
   "undocumented-public-function",    # test names describe their behavior
@@ -111,9 +100,8 @@ exclude = [
   ".claude",
 ]
 extraPaths = [
-  "skills/web-update-monitor/scripts",
-  "skills/web-update-monitor-llm-wiki/scripts",
-  "skills/web-update-monitor-gws/scripts",
+  "skills/wsum-monitor/scripts",
+  "skills/wsum-gws/scripts",
 ]
 venvPath = "."
 venv = ".venv"
@@ -121,8 +109,7 @@ typeCheckingMode = "strict"
 
 [tool.pytest.ini_options]
 addopts = [
-  "--cov=skills/web-update-monitor/scripts",
-  "--cov=skills/web-update-monitor-llm-wiki/scripts",
+  "--cov=skills/wsum-monitor/scripts",
   "--cov-branch",
   "--capture=no",
 ]
@@ -132,8 +119,7 @@ python_functions = ["test_*"]
 
 [tool.coverage.run]
 source = [
-  "skills/web-update-monitor/scripts",
-  "skills/web-update-monitor-llm-wiki/scripts",
+  "skills/wsum-monitor/scripts",
 ]
 
 [tool.coverage.report]

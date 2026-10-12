@@ -8,7 +8,7 @@ the checks below.
 ## Setup
 
 1. Open the `dceoy/wsum` repository in Claude Code Routines. Confirm the
-   `web-update-monitor` and `web-update-monitor-gws` skills are discoverable.
+   `wsum-monitor` and `wsum-gws` skills are discoverable.
 2. Supply **only** (a) an input targets table (local CSV path, Drive CSV URL/ID,
    or Google Spreadsheet URL/ID) and (b) one existing Drive **output folder**
    URL/ID. For a Spreadsheet, enable the Sheets connector; for Drive-hosted
@@ -17,9 +17,10 @@ the checks below.
    creation, and an immutable binding JSON at the parent level.
 3. Configure a Python 3.11+ environment with `pypdf` installed (e.g. `uv sync`
    in the repository and run with `uv run python`).
-4. Permit outbound network requests to the monitored public URLs. Trusted
+4. Check public-web search and individual source-opening support for follow-up research. If unavailable, require an explicit fact-only report with independent verification marked unavailable.
+5. Permit outbound network requests to the monitored public URLs. Trusted
    allowlists may block Python fetches even when the connector itself works.
-5. Configure at most one active Routine per logical workspace. A schedule
+6. Configure at most one active Routine per logical workspace. A schedule
    should not overlap its prior invocation; timestamp ordering is not a lock.
 
 ### Required connector operations
@@ -39,9 +40,9 @@ values or Drive binary download.
 ## Minimal weekly Routine instruction
 
 ```text
-/web-update-monitor-gws Run the weekly monitor with input targets table
+/wsum-gws Run the weekly monitor with input targets table
 <CSV_PATH_OR_DRIVE_CSV_OR_SPREADSHEET_URL> and output Drive folder <OUTPUT_FOLDER_URL>.
-Follow the skill instructions; report material changes and failures.
+Follow the skill instructions; use wsum-research for material changes, distinguish observed facts from external evidence and inference, and report failures.
 ```
 
 Set the weekly schedule in Routines. The skill derives the first worksheet
@@ -55,7 +56,7 @@ Using the local helper, build a disposable workspace containing
 `output/` and `internal/` files, then create a named snapshot:
 
 ```bash
-python skills/web-update-monitor-gws/scripts/gws.py pack \
+python skills/wsum-gws/scripts/gws.py pack \
   --workspace "$TEST_WORKSPACE" \
   --generation 20261009T000000Z \
   --archive "$SCRATCH/workspace-20261009T000000Z.zip"
@@ -67,7 +68,7 @@ original snapshot filename. Independently compare byte length and SHA-256
 against the `pack` command output, then run:
 
 ```bash
-python skills/web-update-monitor-gws/scripts/gws.py verify \
+python skills/wsum-gws/scripts/gws.py verify \
   --archive "$DOWNLOADED/workspace-20261009T000000Z.zip"
 ```
 

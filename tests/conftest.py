@@ -5,11 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-SCRIPTS = Path(__file__).parents[1] / "skills" / "web-update-monitor" / "scripts"
-WIKI_SCRIPTS = (
-    Path(__file__).parents[1] / "skills" / "web-update-monitor-llm-wiki" / "scripts"
-)
+SCRIPTS = Path(__file__).parents[1] / "skills" / "wsum-monitor" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
-sys.path.insert(0, str(WIKI_SCRIPTS))
-GWS_SCRIPTS = Path(__file__).parents[1] / "skills/web-update-monitor-gws/scripts"
+GWS_SCRIPTS = Path(__file__).parents[1] / "skills/wsum-gws/scripts"
 sys.path.insert(0, str(GWS_SCRIPTS))

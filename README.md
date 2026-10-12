@@ -2,21 +2,21 @@
 
 Local-first Agent Skills for detecting meaningful updates on public websites and documents.
 
-The core skill lives in `skills/web-update-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns target CSV validation, state, and report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The target CSV path is passed explicitly to the core and is independent of the workspace used for state and reports. The agent edits the selected target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
+The core skill lives in `skills/wsum-monitor/`. It intentionally has two runtime helpers: `workspace.py` owns target CSV validation, state, and report orchestration, while `monitor.py` owns safe fetching, normalization, hashing, and bounded diffing. The target CSV path is passed explicitly to the core and is independent of the workspace used for state and reports. The agent edits the selected target list, judges whether a detected change matters, and composes report sections for material changes. All material changes finalized from one check run are aggregated into a single Markdown report.
 
-A second composite, `skills/web-update-monitor-llm-wiki/`, compiles durable captured evidence from the core into a source-backed Markdown knowledge base. The core also gains an opt-in `finalize --archive-evidence` output for it.
+A composite at `skills/wsum-research/` follows up on material changes with bounded web research, source-verified context, and explicitly labeled analysis **before** report finalization.
 
-A thin composite integration skill lives in `skills/web-update-monitor-gws/`. It keeps Google-specific orchestration outside the core while accepting either a CSV targets table or Google Spreadsheet as input, and one Google Drive output folder for versioned workspace persistence and Markdown report delivery.
+A thin composite integration skill lives in `skills/wsum-gws/`. It keeps Google-specific orchestration outside the core while accepting either a CSV targets table or Google Spreadsheet as input, and one Google Drive output folder for versioned workspace persistence and Markdown report delivery.
 
 ## Agent Skills
 
 The repository ships these canonical skills:
 
-- `skills/web-update-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
-- `skills/web-update-monitor-gws/`: a connector-driven composite skill that validates a CSV or projects a Google Spreadsheet into the core CSV contract, persists the complete `output/` and `internal/` workspace roots as three retained timestamped ZIP generations in Drive, and publishes completed runs as Markdown files in Drive.
-- `skills/web-update-monitor-llm-wiki/`: a composite skill with one deterministic helper (`scripts/wiki.py`) that turns committed evidence bundles into cited Markdown pages with a processed ledger and recoverable compilation transactions.
+- `skills/wsum-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
+- `skills/wsum-gws/`: a connector-driven composite skill that validates a CSV or projects a Google Spreadsheet into the core CSV contract, persists the complete `output/` and `internal/` workspace roots as three retained timestamped ZIP generations in Drive, and publishes completed runs as Markdown files in Drive.
+- `skills/wsum-research/`: research material updates and compose evidence-grounded explanatory sections for the canonical report.
 
-To install the core skill in an Agent Skills-compatible runtime, use the `web-update-monitor` package from a published GitHub release or from the `agent-skills` artifact of a successful [Package agent skills workflow run](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain). To use the Google Workspace composite, install **both** `web-update-monitor` and `web-update-monitor-gws`; the composite package intentionally delegates to the core package instead of duplicating its runtime helpers. The LLM wiki composite follows the same rule: install `web-update-monitor` and `web-update-monitor-llm-wiki`, and let the runtime's skill discovery locate the core instead of assuming a sibling path.
+Install `wsum-monitor` alone for local monitoring, or add `wsum-research` for researched reports. For Google Workspace workflows install all three: `wsum-monitor`, `wsum-research`, and `wsum-gws`. Composites resolve dependencies by skill discovery, not relative paths. Obtain the packages from releases or the [Agent Skills packaging workflow](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain).
 
 ### Google Workspace composition
 
@@ -28,7 +28,7 @@ flowchart LR
     DP --> DR["reports/"]
     DS <-->|restore / persist| WS["workspace snapshot"]
     WS --> WORKSPACE["output/ + internal/"]
-    CSV --> CORE["web-update-monitor"]
+    CSV --> CORE["wsum-monitor"]
     WORKSPACE --> CORE
     CORE --> WORKSPACE
     CORE --> REPORT["output/report/<run-id>.md"]
@@ -45,33 +45,30 @@ The core exposes resumable pending reviews directly. `check --compact` returns s
 
 Markdown remains the canonical core and user-facing Google Drive report format. Because each committed workspace snapshot already contains the complete `output/` tree, the composite delivers completed `output/report/<run-id>.md` files directly without duplicating report content into a queue. A single `internal/gws/delivery.json` ledger stores only delivered run IDs and report SHA-256 digests, so completed historical reports are skipped without Drive calls. Pending delivery still uses exact-filename lookup plus byte verification to make retries converge on the same Drive file instead of creating duplicates.
 
-Read `skills/web-update-monitor-gws/SKILL.md` for connector orchestration and recovery semantics. The output folder holds an immutable `web-update-monitor-gws.binding.json` with the stable IDs of its `workspaces/` and `reports/` children; a missing or mismatched binding stops the monitor instead of silently resetting its baseline. Existing two-folder deployments require **explicit migration and binding** after verifying the original snapshots; the composite does not adopt or migrate unbound folders automatically.
+Read `skills/wsum-gws/SKILL.md` for connector orchestration and recovery semantics. The output folder holds an immutable `web-update-monitor-gws.binding.json` with the stable IDs of its `workspaces/` and `reports/` children; a missing or mismatched binding stops the monitor instead of silently resetting its baseline. Existing two-folder deployments require **explicit migration and binding** after verifying the original snapshots; the composite does not adopt or migrate unbound folders automatically.
 
-For **Claude Code Routines**, specify only an **input targets table** (local CSV, Drive CSV or Google Spreadsheet) and one existing **Drive output folder** URL/ID; the composite resolves or creates `workspaces/` and `reports/` directly beneath it. It selects the first grid worksheet and entire used range automatically for Spreadsheet inputs; no A1 range is required. First check the applicable CSV/Sheets read tools, Drive folder listing/creation and binary ZIP create/download/verification, and public-network access. The composite's Python helper supports byte-preserving CSV validation (plus exact Drive size/MD5 checks), Sheet-to-CSV projection, immutable folder-binding validation, safe ZIP snapshot pack/verify/restore, generation naming, and delivery-ledger validation (`skills/web-update-monitor-gws/scripts/gws.py`). Google connector transfer and authorization remain the agent's responsibility. Run the [Routines E2E compatibility checklist](docs/claude-code-routines.md) before enabling a recurring schedule; this integration has not been verified against a live Routine.
+For **Claude Code Routines**, specify only an **input targets table** (local CSV, Drive CSV or Google Spreadsheet) and one existing **Drive output folder** URL/ID; the composite resolves or creates `workspaces/` and `reports/` directly beneath it. It selects the first grid worksheet and entire used range automatically for Spreadsheet inputs; no A1 range is required. First check the applicable CSV/Sheets read tools, Drive folder listing/creation and binary ZIP create/download/verification, and public-network access. The composite's Python helper supports byte-preserving CSV validation (plus exact Drive size/MD5 checks), Sheet-to-CSV projection, immutable folder-binding validation, safe ZIP snapshot pack/verify/restore, generation naming, and delivery-ledger validation (`skills/wsum-gws/scripts/gws.py`). Google connector transfer and authorization remain the agent's responsibility. Run the [Routines E2E compatibility checklist](docs/claude-code-routines.md) before enabling a recurring schedule; this integration has not been verified against a live Routine.
 
-### LLM wiki composition
+### Follow-up research
 
 ```mermaid
 flowchart LR
-    CSV["selected target CSV"] --> CORE["web-update-monitor"]
-    CORE -->|"finalize --archive-evidence"| EV["internal/evidence/&lt;ingestion-id&gt;/"]
-    CORE --> REPORT["output/report/&lt;run-id&gt;.md"]
-    EV -->|"list / read / validate / apply"| WIKI["web-update-monitor-llm-wiki"]
-    WIKI --> KB["output/knowledge/<br/>SCHEMA.md, index.md, pages/"]
+    MON["wsum-monitor: material update"] --> RESEARCH["wsum-research: targeted web search"]
+    RESEARCH --> FACTS["Observed facts + verified context + labeled inference"]
+    FACTS --> FINAL["wsum-monitor: finalize report"]
+    FINAL --> GWS["wsum-gws: verified Drive delivery"]
 ```
 
-Detection, semantic materiality review, and one report per run stay in the core. With `finalize --archive-evidence`, a material decision also commits **captured evidence**: the complete normalized parent candidate, the bounded diff, exactly the retained linked-document excerpts with their completeness flags, digests, the enabled-interest context, and a commit receipt. The archive obligation is part of the core's existing recoverable finalization: a versioned intent freezes the decision, evidence is staged, the snapshot and report are applied, and `committed.json` is published last. `check`, `discard`, pending replacement, and later finalizations recover an outstanding intent first, so a crash can neither erase the only evidence nor leave an accepted snapshot without it. Ordinary `finalize` and the Google Workspace composite are unchanged unless they opt in.
+Research runs after materiality review and **before** the core finalizes a report. The verified facts and the agent's analysis are separate report sections; failed or unavailable search results are disclosed, not filled with guesses. This preserves the single canonical `output/report/<run-id>.md` output and its Google Drive SHA-256 ledger. See [the research skill](skills/wsum-research/SKILL.md).
 
-The wiki composite compiles that evidence asynchronously, one ingestion at a time, using the agent for routing and synthesis and `wiki.py` for deterministic work: listing digest-verified bundles in stable order, bounded line-range reads, draft validation (schema, paths, links, citations that resolve to verified evidence, expected hashes), a write-ahead transaction, a processed ledger, an exclusive lock, and replay recovery. Version 1 is update-driven (first observations do not seed the wiki), never prunes evidence automatically, and does not support page deletion or renaming. Hashes prove integrity, not authenticity or factual truth, and semantic source-support review remains the agent's responsibility.
-
-Read `skills/web-update-monitor-llm-wiki/SKILL.md` for the compilation workflow, draft format, limits, and the explicit conflict reconciliation procedure.
+The core's optional `finalize --archive-evidence` feature remains available for captured monitored evidence, independent of research. It does not archive externally searched web pages.
 
 ## Workspace
 
-Pass the target CSV and the state/report workspace as separate inputs. The CSV may have any filename and may live outside the workspace. Relative `--targets` paths are resolved from the process working directory. A template is available at `skills/web-update-monitor/examples/targets.csv`.
+Pass the target CSV and the state/report workspace as separate inputs. The CSV may have any filename and may live outside the workspace. Relative `--targets` paths are resolved from the process working directory. A template is available at `skills/wsum-monitor/examples/targets.csv`.
 
 ```bash
-python skills/web-update-monitor/scripts/workspace.py \
+python skills/wsum-monitor/scripts/workspace.py \
   --workspace /path/to/workspace --targets /path/to/monitored-sites.csv check --compact
 ```
 
@@ -89,7 +86,7 @@ These synthetic reserved example-domain URLs illustrate four interests and three
 
 Each CSV row defines an interest. `name` and `url` are required; optional fields are `publisher`, `category`, `keywords`, `criteria`, `priority`, and `enabled`. Repeated exact URLs share one fetch and review while retaining every row's metadata. A URL is monitored when any interest is enabled, and a change is material when it matters to any enabled interest.
 
-Use `criteria` to describe report-worthy changes and `keywords` as semantic hints. Priority is a positive integer used for display; blank enabled values default to true. The core rejects unknown or duplicate headers, invalid rows, and whole-cell ditto values. See [the core CSV contract](skills/web-update-monitor/SKILL.md#workspace) for the complete parsing and validation rules. Never include credentials or secrets.
+Use `criteria` to describe report-worthy changes and `keywords` as semantic hints. Priority is a positive integer used for display; blank enabled values default to true. The core rejects unknown or duplicate headers, invalid rows, and whole-cell ditto values. See [the core CSV contract](skills/wsum-monitor/SKILL.md#workspace) for the complete parsing and validation rules. Never include credentials or secrets.
 
 The workspace separates user-facing artifacts from implementation data at the root. The selected target CSV is a separate input:
 
@@ -116,27 +113,27 @@ Users normally read only `output/`; `internal/` is managed by the skills and sho
 - `internal/state/snapshots/<target-id>.txt`: the accepted normalized baseline.
 - `internal/state/pending/<target-id>/`: the candidate and review context retained until finalization.
 - `internal/state/recovery/`: durable transaction records for interrupted writes.
-- `internal/evidence/<ingestion-id>/`: optional captured evidence and commit receipt for wiki compilation.
+- `internal/evidence/<ingestion-id>/`: optional captured monitored evidence and commit receipt.
 
-The core owns internal files and uses temporary files beside their destinations for atomic replacement. See [the core skill](skills/web-update-monitor/SKILL.md) for schema, limits, and recovery details.
+The core owns internal files and uses temporary files beside their destinations for atomic replacement. See [the core skill](skills/wsum-monitor/SKILL.md) for schema, limits, and recovery details.
 
 ## Agent workflow
 
-Read `skills/web-update-monitor/SKILL.md` for the complete core procedure. At a high level, the agent edits the selected target CSV when requested, passes its path to the core, checks enabled targets, reviews bounded parent diffs and newly linked document contents for materiality, and contributes each material target to one run-level Markdown report. The helper handles deterministic state transitions and per-target errors.
+Read `skills/wsum-monitor/SKILL.md` for the complete core procedure. At a high level, the agent edits the selected target CSV when requested, passes its path to the core, checks enabled targets, reviews bounded parent diffs and newly linked document contents for materiality, and contributes each material target to one run-level Markdown report. The helper handles deterministic state transitions and per-target errors.
 
 ## Deterministic workspace facade
 
 For development or agent orchestration, run:
 
 ```bash
-python skills/web-update-monitor/scripts/workspace.py \
+python skills/wsum-monitor/scripts/workspace.py \
   --workspace /path/to/workspace --targets /path/to/monitored-sites.csv check --compact
 ```
 
 The compact form keeps batch output small. Existing pending targets are returned as review handles without refetching, while unrelated targets continue normally. Fetch one pending review's bounded diff on demand:
 
 ```bash
-python skills/web-update-monitor/scripts/workspace.py \
+python skills/wsum-monitor/scripts/workspace.py \
   --workspace /path/to/workspace --targets /path/to/monitored-sites.csv \
   pending --target-id <target-id>
 ```
@@ -146,7 +143,7 @@ Before semantic judgment or automated finalization, validate the current configu
 After the agent decides whether a change is material for any enabled interest, it passes an internal decision to:
 
 ```bash
-python skills/web-update-monitor/scripts/workspace.py \
+python skills/wsum-monitor/scripts/workspace.py \
   --workspace /path/to/workspace --targets /path/to/monitored-sites.csv \
   finalize < decision.json
 ```
@@ -165,12 +162,12 @@ Then run tests and validate the canonical skills with the [Agent Skills referenc
 
 ```bash
 uv run pytest
-skills-ref validate skills/web-update-monitor
-skills-ref validate skills/web-update-monitor-gws
-skills-ref validate skills/web-update-monitor-llm-wiki
+skills-ref validate skills/wsum-monitor
+skills-ref validate skills/wsum-gws
+skills-ref validate skills/wsum-research
 ```
 
-`monitor.py` can fetch a public HTTP(S) URL or normalize a supplied local/rendered document. `workspace.py` validates targets and owns pending review transactions, safe report writing, atomic snapshot promotion, and optional evidence archival. `skills/web-update-monitor-llm-wiki/scripts/wiki.py` owns wiki validation, ledger, and recovery. Every runtime helper is included in the 100% branch-coverage gate.
+`monitor.py` handles fetching and normalization; `workspace.py` owns state, reports and optional monitored-evidence archival. Both core helpers remain under full test coverage.
 
 Browser-rendered targets are outside the CSV workspace workflow. Do not auto-escalate a static failure to browser rendering. Use browser input only when the browser tool can enforce public-unicast egress, bounded redirects and subresources, a total timeout, and a maximum artifact size. Never provide cookies or credentials.
 
