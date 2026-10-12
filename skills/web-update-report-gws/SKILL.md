@@ -340,7 +340,7 @@ first-time setup above, with no parent binding and two newly created empty
 child folders. Initialize `internal/gws/delivery.json` as
 `{"version":1,"reports":{}}`. Project and validate the current input CSV or
 Spreadsheet, then persist/read-back-verify the first complete snapshot
-*before* creating the immutable parent binding or calling core `check`.
+before creating the immutable parent binding or calling core `check`.
 If a binding already exists, an empty folder is a missing-state error, not
 a new baseline. Any unexpected file in the workspace folder also stops
 initialization. Never fall back to another snapshot or initialize on a
@@ -537,7 +537,7 @@ Require `internal/gws/delivery.json` in every restored current-format workspace.
 
 ## Publish completed runs as Markdown files in Google Drive
 
-Do not publish a run while `pending` still lists any review with the same `run_id`. Complete material research (or explicitly report its unavailability) *before* finalization and publication; never mutate a delivered report. A later material finalize from that run may change the canonical Markdown report.
+Do not publish a run while `pending` still lists any review with the same `run_id`. Complete material research (or explicitly report its unavailability) before finalization and publication; never mutate a delivered report. A later material finalize from that run may change the canonical Markdown report.
 
 After restore, ledger validation, and pending reconciliation, enumerate canonical regular files directly under `output/report/`. For each filename matching the core run-ID form `YYYYMMDDTHHMMSSZ-xxxxxxxx.md` (eight lowercase hexadecimal suffix characters), reject malformed names and compute the SHA-256 of the canonical bytes:
 
