@@ -1,15 +1,15 @@
 ---
-name: wsum-gws
-description: Run wsum-monitor from a CSV table or Google Spreadsheet using one Google Drive output folder for persistent snapshots and Markdown reports.
+name: web-update-monitor-gws
+description: Run web-update-monitor from a CSV table or Google Spreadsheet using one Google Drive output folder for persistent snapshots and Markdown reports.
 license: MIT
-compatibility: Requires the installed wsum-monitor and wsum-research skills, local scratch storage, Google Sheets metadata/range-value reads for Spreadsheet inputs, and Google Drive connector folder lookup/creation plus binary upload/download and read/write access beneath the selected output folder.
+compatibility: Requires the installed web-update-monitor and web-update-research skills, local scratch storage, Google Sheets metadata/range-value reads for Spreadsheet inputs, and Google Drive connector folder lookup/creation plus binary upload/download and read/write access beneath the selected output folder.
 ---
 
 # Google Workspace Web Update Monitor
 
 Use this composite skill with **two user-supplied values**: one targets table (CSV or Google Spreadsheet) and one existing Google Drive output folder. The skill discovers input table details and manages its own `workspaces/` and `reports/` subfolders.
 
-Keep Google integration outside the core monitor. The core `wsum-monitor` skill owns monitoring state, evidence, reports, and resumable review transactions inside its workspace. Delegate research-backed drafting of material report sections to `wsum-research`. This composite owns external projection, workspace synchronization, Markdown delivery to Drive, and delivery idempotency.
+Keep Google integration outside the core monitor. The core `web-update-monitor` skill owns monitoring state, evidence, reports, and resumable review transactions inside its workspace. Delegate research-backed drafting of material report sections to `web-update-research`. This composite owns external projection, workspace synchronization, Markdown delivery to Drive, and delivery idempotency.
 
 ## Architecture
 
@@ -20,7 +20,7 @@ flowchart LR
     DP --> DR["reports/"]
     DS <-->|restore / persist| WS["workspace snapshot"]
     WS --> WORKSPACE["output/ + internal/"]
-    CSV --> CORE["wsum-monitor"]
+    CSV --> CORE["web-update-monitor"]
     WORKSPACE --> CORE
     CORE --> WORKSPACE
     CORE --> REPORT["output/report/<run-id>.md"]
@@ -40,7 +40,7 @@ the Google connection name. This skill is not a standalone Google API client.
 
 Before the first monitor run:
 
-1. Discover **all three** installed skills (`wsum-monitor`, `wsum-research`, and `wsum-gws`), the Python >=3.11 runtime and `pypdf`,
+1. Discover **all three** installed skills (`web-update-monitor`, `web-update-research`, and `web-update-monitor-gws`), the Python >=3.11 runtime and `pypdf`,
    a writable local scratch directory, and public-network access to each target.
    If Routines uses an outbound allowlist, explicitly allow target domains. A
    Routines egress-denied HTTP 403 is **not** a website 403: do not use the core
@@ -58,7 +58,7 @@ Before the first monitor run:
    require file size and MD5 checksum metadata (`size`, `md5Checksum`).
    Do not assume these tools are available merely because the Google connector
    is enabled.
-4. Check the host agent's web-search and page-opening capabilities for `wsum-research`. If unavailable, label independently researched context as unavailable in fact-only material reports; do not invent sources.
+4. Check the host agent's web-search and page-opening capabilities for `web-update-research`. If unavailable, label independently researched context as unavailable in fact-only material reports; do not invent sources.
 5. Execute a throwaway connector round-trip before operational writes:
    create local ZIP samples of increasing size, upload each to a disposable
    Drive folder, download by returned ID, compare byte length and SHA-256,
@@ -80,7 +80,7 @@ network denial as failures, not as an empty first-run workspace.
 The composite's deterministic work is implemented by
 `scripts/gws.py` (Python standard library only); Google connector calls
 remain the agent's responsibility. Resolve `GWS_SKILL_DIR` from the installed
-composite and `WSUM_MONITOR_SKILL_DIR` from installed core skill discovery.
+composite and `WEB_UPDATE_MONITOR_SKILL_DIR` from installed core skill discovery.
 
 After downloading the latest exact-ID ZIP under its original filename, restore
 it into a **nonexistent** scratch workspace (not a previously used directory):
@@ -117,20 +117,20 @@ without changing its encoding or line endings.
 python "$GWS_SKILL_DIR/scripts/gws.py" project \
   --sheet-json "$SHEET_JSON" \
   --targets "$WORKSPACE/internal/gws/targets.csv" \
-  --core-skill-dir "$WSUM_MONITOR_SKILL_DIR"
+  --core-skill-dir "$WEB_UPDATE_MONITOR_SKILL_DIR"
 
 # Local CSV
 python "$GWS_SKILL_DIR/scripts/gws.py" project \
   --csv "$SOURCE_CSV" \
   --targets "$WORKSPACE/internal/gws/targets.csv" \
-  --core-skill-dir "$WSUM_MONITOR_SKILL_DIR"
+  --core-skill-dir "$WEB_UPDATE_MONITOR_SKILL_DIR"
 
 # Google Drive CSV, downloaded by its exact file ID
 python "$GWS_SKILL_DIR/scripts/gws.py" project \
   --drive-csv "$SOURCE_CSV" \
   --drive-size "$DRIVE_CSV_SIZE" --drive-md5 "$DRIVE_CSV_MD5" \
   --targets "$WORKSPACE/internal/gws/targets.csv" \
-  --core-skill-dir "$WSUM_MONITOR_SKILL_DIR"
+  --core-skill-dir "$WEB_UPDATE_MONITOR_SKILL_DIR"
 ```
 
 Use exactly one source option. The helper validates the staged CSV with the
@@ -368,7 +368,7 @@ Do not overlap invocations using the same workspace key. Timestamp ordering and 
 
 ## Resolve the core skill dependency
 
-Resolve the installed `wsum-monitor` and `wsum-research` skills through runtime discovery; read `wsum-research/SKILL.md` before reviewing and finalizing material changes. Record the resolved absolute skill root as `WSUM_MONITOR_SKILL_DIR`.
+Resolve the installed `web-update-monitor` and `web-update-research` skills through runtime discovery; read `web-update-research/SKILL.md` before reviewing and finalizing material changes. Record the resolved absolute skill root as `WEB_UPDATE_MONITOR_SKILL_DIR`.
 
 Do not assume the core package is a sibling of this composite package, and do not resolve `scripts/workspace.py` relative to this composite skill. Every core CLI invocation below must use the resolved core skill root.
 
@@ -444,14 +444,14 @@ After the current targets table has been projected successfully, use the already
 List pending handles through the core API, passing the current projection so review metadata is refreshed from the current targets table:
 
 ```bash
-python "$WSUM_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSPACE" \
+python "$WEB_UPDATE_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSPACE" \
   --targets "$TARGETS_CSV" pending
 ```
 
 For each handle, fetch only that target's full review:
 
 ```bash
-python "$WSUM_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSPACE" \
+python "$WEB_UPDATE_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSPACE" \
   --targets "$TARGETS_CSV" pending \
   --target-id "<target-id>"
 ```
@@ -466,7 +466,7 @@ Reconcile against **all current rows for the exact trimmed URL**, not one matchi
 - full reviews for valid removed/all-disabled URLs contain `interests=[]` even when a recovery handle remains; discard before semantic judgment
 - after each discard, commit the complete workspace as a new timestamped Drive workspace snapshot before continuing
 
-For each still-valid pending review, judge both the parent diff and all linked-document evidence against every current enabled interest's `criteria`, supplemented by `keywords`. A change material for any enabled interest is material for the URL. For a material change, delegate focused web research and the managed section (observed facts, verified context, analysis, sources/limitations) to `wsum-research`; on unavailable search, provide a clearly labeled fact-only section. Then finalize once with the existing `target_id,revision,material,report` contract, passing `--targets "$TARGETS_CSV"` to the core command. Keywords never filter fetching, traversal, or materiality by exact match; priority never changes fetching, cadence, limits, or materiality. Preserve `manual_review_required` for a non-material decision with truncated/incomplete evidence. Never read `internal/state/pending/` directly or recreate review revisions in this composite.
+For each still-valid pending review, judge both the parent diff and all linked-document evidence against every current enabled interest's `criteria`, supplemented by `keywords`. A change material for any enabled interest is material for the URL. For a material change, delegate focused web research and the managed section (observed facts, verified context, analysis, sources/limitations) to `web-update-research`; on unavailable search, provide a clearly labeled fact-only section. Then finalize once with the existing `target_id,revision,material,report` contract, passing `--targets "$TARGETS_CSV"` to the core command. Keywords never filter fetching, traversal, or materiality by exact match; priority never changes fetching, cadence, limits, or materiality. Preserve `manual_review_required` for a non-material decision with truncated/incomplete evidence. Never read `internal/state/pending/` directly or recreate review revisions in this composite.
 
 Missing/invalid projection is distinct from valid absence. Core `pending` may provide saved context for recovery inspection, but this automated workflow must obtain and completely validate the current targets table before any semantic judgment or finalization. A projection failure stops fetching and finalization, even if an older CSV is still present.
 
@@ -484,13 +484,13 @@ Commit the complete workspace as a new timestamped Drive workspace snapshot afte
 Use the compact core interface:
 
 ```bash
-python "$WSUM_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSPACE" \
+python "$WEB_UPDATE_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSPACE" \
   --targets "$TARGETS_CSV" check --compact
 ```
 
 The core returns compact review handles instead of embedding every diff in the batch response. If a target already has a pending review, that target is not refetched; its existing handle is returned while unrelated targets continue to be checked. Link traversal defaults to `--link-depth 1 --max-links 100`; append either option to the core `check` invocation when the workflow needs a different run-level limit. Depth 0 disables linked-document fetching, and `--max-links` accepts 1 through 100.
 
-For each `review` handle, call `pending --target-id`, judge the bounded parent diff and any `link_review` evidence together for every current enabled interest, invoke `wsum-research` for each material report section, and call `finalize` once per URL. Do not research non-material updates. Preserve linked-document context with the rest of `internal/state/`; it requires no additional connector state or Spreadsheet columns.
+For each `review` handle, call `pending --target-id`, judge the bounded parent diff and any `link_review` evidence together for every current enabled interest, invoke `web-update-research` for each material report section, and call `finalize` once per URL. Do not research non-material updates. Preserve linked-document context with the rest of `internal/state/`; it requires no additional connector state or Spreadsheet columns.
 
 This keeps the connector/composite boundary small:
 

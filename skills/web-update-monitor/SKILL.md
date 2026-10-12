@@ -1,5 +1,5 @@
 ---
-name: wsum-monitor
+name: web-update-monitor
 description: Monitor public HTTP(S) websites, PDFs, and feeds for meaningful changes using local state, CSV target lists, configurable-depth reading of newly added links, resumable semantic reviews, and one concise Markdown report per run.
 license: MIT
 compatibility: Requires Python 3.11+ with pypdf >=6.19,<7 and outbound HTTP(S) access to monitored public targets. HTTP 403 fallback additionally requires the host agent's Web fetch capability.
