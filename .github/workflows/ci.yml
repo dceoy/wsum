@@ -83,14 +83,3 @@ jobs:
           /tmp/skills-ref/bin/skills-ref validate skills/web-update-monitor
           /tmp/skills-ref/bin/skills-ref validate skills/web-update-report-gws
           /tmp/skills-ref/bin/skills-ref validate skills/web-update-research
-
-  prettier-debug:
-    runs-on: ubuntu-slim
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Show Prettier normalization
-        run: |
-          npx --yes prettier@3.9.6 --write skills/web-update-report-gws/SKILL.md
-          git diff --no-ext-diff -- skills/web-update-report-gws/SKILL.md
