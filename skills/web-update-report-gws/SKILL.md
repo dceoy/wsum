@@ -43,7 +43,7 @@ Call `web-update-report-gws` once per run; **it owns every child-skill invocatio
 
 1. **Restore and validate** the immutable Drive folder binding, newest verified workspace ZIP, GWS delivery ledger, and currently selected CSV or Spreadsheet. Project the table to `internal/gws/targets.csv`; never use an old projection when current input fails.
 2. **Resume first**: enumerate and reconcile saved pending reviews using the monitor's public `pending`/`discard` interface. Never read or mutate `internal/state/` directly, and persist after every state change. Then run `web-update-monitor`'s `check --compact` for new updates. A pending target is not refetched.
-3. **Determine materiality**: for each valid review handle call `pending --target-id` with the current projected CSV, examine parent diff and linked evidence for **all** enabled interests, and make exactly one URL-scoped materiality decision. The monitoring rules remain authoritative. If non-material, call monitor `finalize` with `material: false` and no report. Honor `manual_review_required` for incomplete non-material evidence.
+3. **Determine materiality**: for each valid review handle call `pending --target-id` with the current projected CSV, examine parent diff and linked evidence for all enabled interests, and make exactly one URL-scoped materiality decision. The monitoring rules remain authoritative. If non-material, call monitor `finalize` with `material: false` and no report. Honor `manual_review_required` for incomplete non-material evidence.
 4. **Research material updates only**: pass the exact current pending review (including `target_id`, `revision`, `run_id`, URL, interests, diff, and link evidence/completeness flags), the materiality decision, and the output-report language/instructions to `web-update-research`. It performs bounded web search and **returns one Markdown level-two section**, keeping observed changes, external verification, and inference separate. **It must not call monitor, finalize, write files, or deliver to Drive.**
 5. **Commit once**: validate that the returned section references the monitored URL and affected interests, distinguishes fact from inference, contains source links or explicit verification limits, and fits the core report limits. Then the orchestrator alone calls monitor `finalize` with the unchanged `target_id`, `revision`, `material: true`, and `report` section. On unavailable or failed external search, use a properly qualified **fact-only** section; never drop a material observation. Respect `snapshot_conflict` and recovery rules. Persist the complete workspace ZIP after the transition.
 6. **Publish completed runs only**: no Drive report is sent while any pending review from that `run_id` remains. Deliver the canonical `output/report/<run-id>.md` exactly as written by the monitor; read back and verify its hash before recording `internal/gws/delivery.json`. Never enrich, edit, or overwrite a previously delivered canonical report merely because further research becomes available.
@@ -159,7 +159,7 @@ against the original Drive file's metadata before staging any configuration.
 These checks detect valid-CSV row truncation as well as equal-length corruption.
 Never substitute `--csv` for `--drive-csv` to bypass integrity checking.
 
-To persist any state-changing operation, save the **complete** current Drive
+To persist any state-changing operation, save the complete current Drive
 workspace-folder listing as a JSON array of `{"name":"workspace-...zip","id":"Drive-file-ID"}`
 records. At restore, save the selected newest snapshot's exact name/ID record
 in `$EXPECTED_SNAPSHOT_JSON`; use JSON `null` only when initializing a new,
@@ -257,7 +257,7 @@ report folder IDs. Never overwrite, delete, or silently recreate this file.
    folders under the exact parent ID, re-list, and require one of each with
    the returned IDs. Do not blindly retry an ambiguous create. Project and
    validate the selected targets and commit/read-back-verify the **initial
-   workspace ZIP** (per Restore) **before** binding or running the core monitor.
+   workspace ZIP** (per Restore) before binding or running the core monitor.
    Then generate the binding JSON, create it exactly once under the parent,
    download the created file by its ID and verify its bytes and fields. Re-list
    the parent, require a single binding filename matching that created ID,
@@ -340,7 +340,7 @@ first-time setup above, with no parent binding and two newly created empty
 child folders. Initialize `internal/gws/delivery.json` as
 `{"version":1,"reports":{}}`. Project and validate the current input CSV or
 Spreadsheet, then persist/read-back-verify the first complete snapshot
-***before*** creating the immutable parent binding or calling core `check`.
+*before* creating the immutable parent binding or calling core `check`.
 If a binding already exists, an empty folder is a missing-state error, not
 a new baseline. Any unexpected file in the workspace folder also stops
 initialization. Never fall back to another snapshot or initialize on a
@@ -537,7 +537,7 @@ Require `internal/gws/delivery.json` in every restored current-format workspace.
 
 ## Publish completed runs as Markdown files in Google Drive
 
-Do not publish a run while `pending` still lists any review with the same `run_id`. Complete material research (or explicitly report its unavailability) ***before*** finalization and publication; never mutate a delivered report. A later material finalize from that run may change the canonical Markdown report.
+Do not publish a run while `pending` still lists any review with the same `run_id`. Complete material research (or explicitly report its unavailability) *before* finalization and publication; never mutate a delivered report. A later material finalize from that run may change the canonical Markdown report.
 
 After restore, ledger validation, and pending reconciliation, enumerate canonical regular files directly under `output/report/`. For each filename matching the core run-ID form `YYYYMMDDTHHMMSSZ-xxxxxxxx.md` (eight lowercase hexadecimal suffix characters), reject malformed names and compute the SHA-256 of the canonical bytes:
 
