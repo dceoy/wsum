@@ -39,7 +39,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"skills/web-update-monitor-gws/scripts/gws.py" = [
+"skills/web-update-report-gws/scripts/gws.py" = [
   "implicit-namespace-package",  # executable skill helper, not an import package
   "docstring-missing-returns",  # concise helper docstrings
   "docstring-missing-exception",  # failures carry contextual GwsError messages
@@ -101,7 +101,7 @@ exclude = [
 ]
 extraPaths = [
   "skills/web-update-monitor/scripts",
-  "skills/web-update-monitor-gws/scripts",
+  "skills/web-update-report-gws/scripts",
 ]
 venvPath = "."
 venv = ".venv"

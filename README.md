@@ -6,17 +6,17 @@ The core skill lives in `skills/web-update-monitor/`. It intentionally has two r
 
 A composite at `skills/web-update-research/` follows up on material changes with bounded web research, source-verified context, and explicitly labeled analysis **before** report finalization.
 
-A thin composite integration skill lives in `skills/web-update-monitor-gws/`. It keeps Google-specific orchestration outside the core while accepting either a CSV targets table or Google Spreadsheet as input, and one Google Drive output folder for versioned workspace persistence and Markdown report delivery.
+The entrypoint `skills/web-update-report-gws/` orchestrates the full pipeline: monitor changes, research only material updates, finalize one cited Markdown report per run, persist the workspace, and deliver the report through Google Drive. It accepts only a CSV or Spreadsheet targets table and one output Drive folder.
 
 ## Agent Skills
 
 The repository ships these canonical skills:
 
 - `skills/web-update-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
-- `skills/web-update-monitor-gws/`: a connector-driven composite skill that validates a CSV or projects a Google Spreadsheet into the core CSV contract, persists the complete `output/` and `internal/` workspace roots as three retained timestamped ZIP generations in Drive, and publishes completed runs as Markdown files in Drive.
-- `skills/web-update-research/`: research material updates and compose evidence-grounded explanatory sections for the canonical report.
+- `skills/web-update-report-gws/`: the single Google Workspace **orchestrator**; restores/projects input, calls monitor then research for material changes, finalizes through the monitor, snapshots the workspace, and publishes verified Markdown reports.
+- `skills/web-update-research/`: consume already material pending reviews, perform follow-up web research, and **return** evidence-grounded Markdown sections without state or delivery side effects.
 
-Install `web-update-monitor` alone for local monitoring, or add `web-update-research` for researched reports. For Google Workspace workflows install all three: `web-update-monitor`, `web-update-research`, and `web-update-monitor-gws`. Composites resolve dependencies by skill discovery, not relative paths. Obtain the packages from releases or the [Agent Skills packaging workflow](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain).
+Install `web-update-monitor` alone for local monitoring. For a complete Google Workspace run, invoke **only** `web-update-report-gws` after installing all three skills (`web-update-monitor`, `web-update-research`, and `web-update-report-gws`); the orchestrator calls the other skills internally. Composites resolve dependencies by skill discovery, not relative paths. Obtain the packages from releases or the [Agent Skills packaging workflow](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain).
 
 ### Google Workspace composition
 
@@ -28,8 +28,12 @@ flowchart LR
     DP --> DR["reports/"]
     DS <-->|restore / persist| WS["workspace snapshot"]
     WS --> WORKSPACE["output/ + internal/"]
-    CSV --> CORE["web-update-monitor"]
-    WORKSPACE --> CORE
+    CSV --> ORCH["web-update-report-gws: orchestrate"]
+    WORKSPACE --> ORCH
+    ORCH --> CORE["web-update-monitor: check / pending"]
+    CORE -->|material only| RESEARCH["web-update-research"]
+    RESEARCH -->|Markdown section| ORCH
+    ORCH -->|finalize| CORE
     CORE --> WORKSPACE
     CORE --> REPORT["output/report/<run-id>.md"]
     REPORT -->|run complete| GMD["Drive Markdown file"]
@@ -45,21 +49,24 @@ The core exposes resumable pending reviews directly. `check --compact` returns s
 
 Markdown remains the canonical core and user-facing Google Drive report format. Because each committed workspace snapshot already contains the complete `output/` tree, the composite delivers completed `output/report/<run-id>.md` files directly without duplicating report content into a queue. A single `internal/gws/delivery.json` ledger stores only delivered run IDs and report SHA-256 digests, so completed historical reports are skipped without Drive calls. Pending delivery still uses exact-filename lookup plus byte verification to make retries converge on the same Drive file instead of creating duplicates.
 
-Read `skills/web-update-monitor-gws/SKILL.md` for connector orchestration and recovery semantics. The output folder holds an immutable `web-update-monitor-gws.binding.json` with the stable IDs of its `workspaces/` and `reports/` children; a missing or mismatched binding stops the monitor instead of silently resetting its baseline. Existing two-folder deployments require **explicit migration and binding** after verifying the original snapshots; the composite does not adopt or migrate unbound folders automatically.
+Read `skills/web-update-report-gws/SKILL.md` for the full monitor → research → finalize → Drive pipeline, including connector orchestration and recovery semantics. The output folder holds an immutable `web-update-monitor-gws.binding.json` with the stable IDs of its `workspaces/` and `reports/` children; a missing or mismatched binding stops the monitor instead of silently resetting its baseline. Existing two-folder deployments require **explicit migration and binding** after verifying the original snapshots; the composite does not adopt or migrate unbound folders automatically.
 
-For **Claude Code Routines**, specify only an **input targets table** (local CSV, Drive CSV or Google Spreadsheet) and one existing **Drive output folder** URL/ID; the composite resolves or creates `workspaces/` and `reports/` directly beneath it. It selects the first grid worksheet and entire used range automatically for Spreadsheet inputs; no A1 range is required. First check the applicable CSV/Sheets read tools, Drive folder listing/creation and binary ZIP create/download/verification, and public-network access. The composite's Python helper supports byte-preserving CSV validation (plus exact Drive size/MD5 checks), Sheet-to-CSV projection, immutable folder-binding validation, safe ZIP snapshot pack/verify/restore, generation naming, and delivery-ledger validation (`skills/web-update-monitor-gws/scripts/gws.py`). Google connector transfer and authorization remain the agent's responsibility. Run the [Routines E2E compatibility checklist](docs/claude-code-routines.md) before enabling a recurring schedule; this integration has not been verified against a live Routine.
+For **Claude Code Routines**, invoke `/web-update-report-gws` and specify only an **input targets table** (local CSV, Drive CSV or Google Spreadsheet) and one existing **Drive output folder** URL/ID; the composite resolves or creates `workspaces/` and `reports/` directly beneath it. It selects the first grid worksheet and entire used range automatically for Spreadsheet inputs; no A1 range is required. First check the applicable CSV/Sheets read tools, Drive folder listing/creation and binary ZIP create/download/verification, and public-network access. The composite's Python helper supports byte-preserving CSV validation (plus exact Drive size/MD5 checks), Sheet-to-CSV projection, immutable folder-binding validation, safe ZIP snapshot pack/verify/restore, generation naming, and delivery-ledger validation (`skills/web-update-report-gws/scripts/gws.py`). Google connector transfer and authorization remain the agent's responsibility. Run the [Routines E2E compatibility checklist](docs/claude-code-routines.md) before enabling a recurring schedule; this integration has not been verified against a live Routine.
 
 ### Follow-up research
 
 ```mermaid
 flowchart LR
-    MON["web-update-monitor: material update"] --> RESEARCH["web-update-research: targeted web search"]
-    RESEARCH --> FACTS["Observed facts + verified context + labeled inference"]
-    FACTS --> FINAL["web-update-monitor: finalize report"]
-    FINAL --> GWS["web-update-monitor-gws: verified Drive delivery"]
+    GWS["web-update-report-gws (entrypoint)"] --> MON["web-update-monitor: check / materiality"]
+    MON -->|material review| RESEARCH["web-update-research: search / draft"]
+    RESEARCH -->|report section| GWS
+    GWS -->|finalize once| MON
+    MON --> FINAL["canonical report"]
+    FINAL --> GWS
+    GWS --> DRIVE["verified Drive delivery"]
 ```
 
-Research runs after materiality review and **before** the core finalizes a report. The verified facts and the agent's analysis are separate report sections; failed or unavailable search results are disclosed, not filled with guesses. This preserves the single canonical `output/report/<run-id>.md` output and its Google Drive SHA-256 ledger. See [the research skill](skills/web-update-research/SKILL.md).
+The GWS orchestrator executes monitoring first, calls research **only** after it judges a change material, then finalizes once per URL through the monitor. The verified facts and the agent's analysis are separate report sections; failed or unavailable search results are disclosed, not filled with guesses. This preserves the single canonical `output/report/<run-id>.md` output and its Google Drive SHA-256 ledger. See [the research skill](skills/web-update-research/SKILL.md).
 
 The core's optional `finalize --archive-evidence` feature remains available for captured monitored evidence, independent of research. It does not archive externally searched web pages.
 
@@ -163,7 +170,7 @@ Then run tests and validate the canonical skills with the [Agent Skills referenc
 ```bash
 uv run pytest
 skills-ref validate skills/web-update-monitor
-skills-ref validate skills/web-update-monitor-gws
+skills-ref validate skills/web-update-report-gws
 skills-ref validate skills/web-update-research
 ```
 
@@ -174,3 +181,7 @@ Browser-rendered targets are outside the CSV workspace workflow. Do not auto-esc
 ## Repository boundary
 
 Do not commit operational target CSV files (regardless of filename), fetched production content, `output/`, `internal/`, credentials, browser profiles, or other deployment data. The example CSV is tracked documentation data.
+
+### Existing Google Drive workspaces
+
+Renaming the orchestration skill **does not rename** the immutable `web-update-monitor-gws.binding.json` file inside an existing Drive output folder. The on-Drive folder IDs, `workspaces/` snapshots, `reports/` Markdown files, and delivery ledger remain unchanged. Update the Routine command and installed Skill package name; do **not** reinitialize the Drive workspace or replace its binding. Run the cross-session smoke test before relying on the updated Routine.

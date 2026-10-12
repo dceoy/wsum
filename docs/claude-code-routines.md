@@ -8,7 +8,7 @@ the checks below.
 ## Setup
 
 1. Open the `dceoy/wsum` repository in Claude Code Routines. Confirm the
-   `web-update-monitor`, `web-update-research`, and `web-update-monitor-gws` skills are discoverable.
+   `web-update-monitor`, `web-update-research`, and `web-update-report-gws` skills are discoverable.
 2. Supply **only** (a) an input targets table (local CSV path, Drive CSV URL/ID,
    or Google Spreadsheet URL/ID) and (b) one existing Drive **output folder**
    URL/ID. For a Spreadsheet, enable the Sheets connector; for Drive-hosted
@@ -37,18 +37,18 @@ If any required action is missing from the _actual Routine tool surface_, stop
 and report the missing operation. Do not substitute text extraction for Sheets
 values or Drive binary download.
 
-## Minimal weekly Routine instruction
+## Minimal weekly Routine instruction (single entrypoint)
 
 ```text
-/web-update-monitor-gws Run the weekly monitor with input targets table
+/web-update-report-gws Run the weekly monitor with input targets table
 <CSV_PATH_OR_DRIVE_CSV_OR_SPREADSHEET_URL> and output Drive folder <OUTPUT_FOLDER_URL>.
-Follow the skill instructions; use web-update-research for material changes, distinguish observed facts from external evidence and inference, and report failures.
+Execute the internal web-update-monitor -> web-update-research pipeline for material changes; separate observed facts, verified context and inference, finalize once, and report failures.
 ```
 
 Set the weekly schedule in Routines. The skill derives the first worksheet
 and entire used range for Spreadsheet inputs by default, validates CSV inputs
 with the core CSV parser, and resolves or creates `workspaces/` and `reports/`
-under the output folder. No separate range or internal directory is required.
+under the output folder. No separate range or internal directory is required. Do not invoke either child skill separately: this command owns orchestration, report finalization and delivery.
 
 ## 1. Verify binary transfer before monitoring
 
@@ -56,7 +56,7 @@ Using the local helper, build a disposable workspace containing
 `output/` and `internal/` files, then create a named snapshot:
 
 ```bash
-python skills/web-update-monitor-gws/scripts/gws.py pack \
+python skills/web-update-report-gws/scripts/gws.py pack \
   --workspace "$TEST_WORKSPACE" \
   --generation 20261009T000000Z \
   --archive "$SCRATCH/workspace-20261009T000000Z.zip"
@@ -68,7 +68,7 @@ original snapshot filename. Independently compare byte length and SHA-256
 against the `pack` command output, then run:
 
 ```bash
-python skills/web-update-monitor-gws/scripts/gws.py verify \
+python skills/web-update-report-gws/scripts/gws.py verify \
   --archive "$DOWNLOADED/workspace-20261009T000000Z.zip"
 ```
 
