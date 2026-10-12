@@ -30,20 +30,25 @@ For a local run, discover the installed `wsum-monitor` skill and use its `worksp
 **Affected interests:** <enabled interest names>
 
 ### Observed changes
+
 - <What the monitored source demonstrably changed, with monitored links. Attribute its assertions.>
 
 ### Verified context
+
 - <Independent, actually opened primary/credible source links, publisher and available dates.>
 - <Explicitly distinguish unverified external claims.>
 
 ### Analysis (inference)
+
 - <Practical or technical significance derived from facts, not represented as an observation.>
 - <Qualitative confidence: high / medium / low; short justification and key uncertainty.>
 
 ### What to watch
+
 - <Checkable next conditions or official events that could confirm or overturn the analysis.>
 
 ### Sources and limitations
+
 - <Relevant source links and dates; missing sources, truncated evidence, or research limitations.>
 ```
 
