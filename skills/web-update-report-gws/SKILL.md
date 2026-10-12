@@ -159,7 +159,7 @@ against the original Drive file's metadata before staging any configuration.
 These checks detect valid-CSV row truncation as well as equal-length corruption.
 Never substitute `--csv` for `--drive-csv` to bypass integrity checking.
 
-To persist any state-changing operation, save the _complete_ current Drive
+To persist any state-changing operation, save the *complete* current Drive
 workspace-folder listing as a JSON array of `{"name":"workspace-...zip","id":"Drive-file-ID"}`
 records. At restore, save the selected newest snapshot's exact name/ID record
 in `$EXPECTED_SNAPSHOT_JSON`; use JSON `null` only when initializing a new,
@@ -257,7 +257,7 @@ report folder IDs. Never overwrite, delete, or silently recreate this file.
    folders under the exact parent ID, re-list, and require one of each with
    the returned IDs. Do not blindly retry an ambiguous create. Project and
    validate the selected targets and commit/read-back-verify the **initial
-   workspace ZIP** (per Restore) _before_ binding or running the core monitor.
+   workspace ZIP** (per Restore) *before* binding or running the core monitor.
    Then generate the binding JSON, create it exactly once under the parent,
    download the created file by its ID and verify its bytes and fields. Re-list
    the parent, require a single binding filename matching that created ID,
