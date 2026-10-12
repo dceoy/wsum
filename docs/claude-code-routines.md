@@ -8,7 +8,7 @@ the checks below.
 ## Setup
 
 1. Open the `dceoy/wsum` repository in Claude Code Routines. Confirm the
-   `web-update-monitor` and `web-update-monitor-gws` skills are discoverable.
+   `web-update-monitor`, `web-update-research`, and `web-update-report-gws` skills are discoverable.
 2. Supply **only** (a) an input targets table (local CSV path, Drive CSV URL/ID,
    or Google Spreadsheet URL/ID) and (b) one existing Drive **output folder**
    URL/ID. For a Spreadsheet, enable the Sheets connector; for Drive-hosted
@@ -17,9 +17,10 @@ the checks below.
    creation, and an immutable binding JSON at the parent level.
 3. Configure a Python 3.11+ environment with `pypdf` installed (e.g. `uv sync`
    in the repository and run with `uv run python`).
-4. Permit outbound network requests to the monitored public URLs. Trusted
+4. Check public-web search and individual source-opening support for follow-up research. If unavailable, require an explicit fact-only report with independent verification marked unavailable.
+5. Permit outbound network requests to the monitored public URLs. Trusted
    allowlists may block Python fetches even when the connector itself works.
-5. Configure at most one active Routine per logical workspace. A schedule
+6. Configure at most one active Routine per logical workspace. A schedule
    should not overlap its prior invocation; timestamp ordering is not a lock.
 
 ### Required connector operations
@@ -36,18 +37,18 @@ If any required action is missing from the _actual Routine tool surface_, stop
 and report the missing operation. Do not substitute text extraction for Sheets
 values or Drive binary download.
 
-## Minimal weekly Routine instruction
+## Minimal weekly Routine instruction (single entrypoint)
 
 ```text
-/web-update-monitor-gws Run the weekly monitor with input targets table
+/web-update-report-gws Run the weekly monitor with input targets table
 <CSV_PATH_OR_DRIVE_CSV_OR_SPREADSHEET_URL> and output Drive folder <OUTPUT_FOLDER_URL>.
-Follow the skill instructions; report material changes and failures.
+Execute the internal web-update-monitor -> web-update-research pipeline for material changes; separate observed facts, verified context and inference, finalize once, and report failures.
 ```
 
 Set the weekly schedule in Routines. The skill derives the first worksheet
 and entire used range for Spreadsheet inputs by default, validates CSV inputs
 with the core CSV parser, and resolves or creates `workspaces/` and `reports/`
-under the output folder. No separate range or internal directory is required.
+under the output folder. No separate range or internal directory is required. Do not invoke either child skill separately: this command owns orchestration, report finalization and delivery.
 
 ## 1. Verify binary transfer before monitoring
 
@@ -55,7 +56,7 @@ Using the local helper, build a disposable workspace containing
 `output/` and `internal/` files, then create a named snapshot:
 
 ```bash
-python skills/web-update-monitor-gws/scripts/gws.py pack \
+python skills/web-update-report-gws/scripts/gws.py pack \
   --workspace "$TEST_WORKSPACE" \
   --generation 20261009T000000Z \
   --archive "$SCRATCH/workspace-20261009T000000Z.zip"
@@ -67,7 +68,7 @@ original snapshot filename. Independently compare byte length and SHA-256
 against the `pack` command output, then run:
 
 ```bash
-python skills/web-update-monitor-gws/scripts/gws.py verify \
+python skills/web-update-report-gws/scripts/gws.py verify \
   --archive "$DOWNLOADED/workspace-20261009T000000Z.zip"
 ```
 
@@ -105,8 +106,19 @@ is insufficient. Delete all throwaway files when done.
 2. End that session. Run again in a **fresh** session and restore the latest
    ZIP by its ID and filename, using `gws.py restore` into a new workspace.
    Unchanged content must not be reported as a first observation.
-3. Change a controlled target. Verify review/finalize and one Markdown report
-   per completed run; pending review must block early report publication.
+3. Change a controlled public target with independently inspectable primary
+   corroboration and confirm `web-update-report-gws` first judges materiality,
+   invokes `web-update-research` exactly once for that material URL, and
+   invokes the monitor's `finalize` exactly once with the returned Markdown.
+   Verify distinct **Observed changes**, **Verified context**, and **Analysis
+   (inference)** sections and inspected source URLs. Verify one delivered
+   Markdown report per completed run, and that pending reviews block delivery.
+   Also test a **non-material** change: no research invocation, no report.
+   Disable public-web search in a test run: a material change must still yield
+   a fact-only report with an explicit independent-verification limitation.
+   Simulate a transient search/page-open failure: allow at most one retry,
+   then finalize a qualified fact-only report if the retry fails. Confirm
+   research is not silently retried for an already finalized revision.
 4. Check byte-identical Markdown read-back before `gws.py ledger --record`.
    Repeat the run and verify that no duplicate report file is created.
 5. Verify at most three committed ZIP generations remain. Force an incomplete
@@ -117,7 +129,15 @@ is insufficient. Delete all throwaway files when done.
    previously committed snapshot.
 7. Verify that missing Sheets permission, expired connector authorization,
    and an egress-denied HTTP 403 produce explicit errors, not a successful
-   empty report or a new baseline.
+   empty report or a new baseline. Separately use a controlled public target
+   whose static fetch returns a website HTTP 403 and the main agent can read:
+   verify `agent_fetch_required` triggers Web fetch of the returned final URL,
+   monitor `ingest` with original `run_id`/`target_id` and the exact
+   `link_depth`/`max_links` (and `--links` when available), workspace
+   persistence, and subsequent pending/materiality/research/finalize stages.
+   Verify baseline-only ingestion does not research. When Web fetch also
+   fails, report that target and preserve the previous baseline; never bypass
+   an egress-denied 403 or replace the source with a search snippet.
 8. Verify that missing or duplicated binding files, replaced/renamed child
    folders, empty bound `workspaces/`, inaccessible output folder, incomplete
    listings and ambiguous creates **stop**, with no baseline reset. Verify that
