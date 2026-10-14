@@ -60,7 +60,7 @@ Execute the internal web-update-monitor -> web-update-research pipeline for mate
 Set the weekly schedule in Routines. The skill derives the first worksheet
 and entire used range for Spreadsheet inputs by default, validates CSV inputs
 with the core CSV parser, and resolves or creates `workspaces/` and `reports/`
-under the output folder. No extra range, internal directory, or common context is required. To add context, append `Context source: <GOOGLE_DOCS_OR_DRIVE_MD_URL_OR_FILE_ID>` or an inline `Common context:` block, but **not both**. The orchestrator resolves the selected source once before workspace mutations and forwards its full text to both materiality review and follow-up research, preserving target-specific `criteria`. If omitted, retain previous behavior. Do not invoke either child skill separately: this command owns orchestration, report finalization and delivery.
+under the output folder. No extra range, internal directory, or common context is required. To add context, append `Context source: <GOOGLE_DOCS_OR_DRIVE_MD_URL_OR_FILE_ID>` or an inline `Common context:` block, but **not both**. When supplied, the orchestrator resolves the selected source once before workspace mutations and forwards its full text to both materiality review and follow-up research, preserving target-specific `criteria`. If omitted, retain previous behavior. Do not invoke either child skill separately: this command owns orchestration, report finalization and delivery.
 
 ### Common-context acceptance cases
 
