@@ -18,9 +18,9 @@ The repository ships these canonical skills:
 
 Install `web-update-monitor` alone for local monitoring. For a complete Google Workspace run, invoke **only** `web-update-report-gws` after installing all three skills (`web-update-monitor`, `web-update-research`, and `web-update-report-gws`); the orchestrator calls the other skills internally. Composites resolve dependencies by skill discovery, not relative paths. Obtain the packages from releases or the [Agent Skills packaging workflow](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain).
 
-### Run-wide common context
+### Optional run-wide common context
 
-Common context is **not required**. If supplied, choose one mode per invocation: inline `Common context:` or `Context source:` pointing to an explicitly selected Google Docs URL/file ID or Google Drive-hosted Markdown URL/file ID. Local Markdown paths are not supported by this GWS entrypoint. No additional CSV column or CLI flag is required. The targets table and output Drive folder are still the only required resources.
+Only the targets table and output Drive folder are required. To add shared guidance for materiality review and research, supply **either** inline `Common context:` or `Context source:` with an explicit Google Docs or Drive-hosted `.md` ID/URL. Local context paths are not supported by the GWS skill.
 
 ```text
 /web-update-report-gws
@@ -28,11 +28,9 @@ Targets: <CSV_OR_SPREADSHEET_URL>
 Output: <DRIVE_FOLDER_URL>
 ```
 
-Optionally append `Context source: <GOOGLE_DOCS_OR_DRIVE_MD_URL_OR_FILE_ID>` or a free-form `Common context:` block describing goals, priorities, intended audience, research direction and report style. **Do not specify both modes at once.** With neither, the invocation above is complete and existing behavior is unchanged.
+Optionally append `Context source: <GOOGLE_DOCS_OR_DRIVE_MD_URL_OR_FILE_ID>` or a `Common context:` block. Supplying both is an error; supplying neither preserves existing behavior.
 
-The orchestrator obtains the full Google Doc via authenticated Docs read/plain-text export, or downloads a Drive `.md` by exact ID. Context must be complete, nonempty UTF-8 text **≤128 KiB** after normalization. When a context source is supplied, missing permissions, missing files, unsupported format, truncation or other validation failures **stop the run before monitoring**, never silently falling back to stale context. Each scheduled invocation rereads the selected source, so document edits automatically affect subsequent runs and resumed pending reviews (without rewriting prior finalized reports).
-
-**When provided**, the same resolved context reaches the monitor's agent-side materiality review and the research skill. Target-level `criteria`/`keywords` remain authoritative; context supplements relevance and analysis, never filters fetches or suppresses explicitly report-worthy changes. The document supplies background/preferences rather than executable instructions. Resolved text stays in invocation memory. If an authenticated connector requires a file reference, stage only the selected source bytes in a private per-invocation temporary directory outside the managed workspace, then delete them immediately after validation and before workspace mutations. Keep source text out of logs, target CSVs, pending records, workspace snapshots, reports and the delivery ledger.
+The GWS skill rereads selected sources each run, rejects invalid/incomplete or oversized (>128 KiB) context, and does not persist the source text. Context supplements—not overrides—each target's `criteria` and `keywords`. See [the GWS skill](skills/web-update-report-gws/SKILL.md#optional-common-context-run-wide) for validation and security rules.
 
 ### Google Workspace composition
 
