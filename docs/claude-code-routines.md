@@ -20,7 +20,7 @@ the checks below.
 4. Check public-web search and individual source-opening support for follow-up research. If unavailable, require an explicit fact-only report with independent verification marked unavailable.
 5. Permit outbound network requests to the monitored public URLs. Trusted
    allowlists may block Python fetches even when the connector itself works.
-6. When `Context source:` is provided, verify complete authenticated Google Docs body/plain-text export, exact-ID Drive Markdown download, or access to the explicitly selected local Markdown file. Missing, unreadable, empty, invalid UTF-8, unsupported or oversized (>128 KiB) context must stop the run **before** any monitoring mutations; never use snippets or fall back to cached context.
+6. When `Context source:` is provided, verify complete authenticated Google Docs body/plain-text export, exact-ID Drive Markdown download, or access to the explicitly selected local Markdown file. Missing, unreadable, empty, invalid UTF-8, unsupported or oversized (>128 KiB normalized) context must stop the run **before** any monitoring mutations; never use snippets or fall back to cached context.
 7. Configure at most one active Routine per logical workspace. A schedule
    should not overlap its prior invocation; timestamp ordering is not a lock.
 
@@ -39,6 +39,13 @@ the checks below.
 If any required action is missing from the _actual Routine tool surface_, stop
 and report the missing operation. Do not substitute text extraction for Sheets
 values or Drive binary download.
+
+If an authenticated context connector returns a file reference that requires
+local materialization, verify it can stage only the selected source bytes in a
+private, invocation-specific disposable directory outside the managed workspace.
+Enforce the 256 KiB plus optional 3-byte BOM raw limit and 128 KiB normalized
+UTF-8 text limit. Delete staged bytes immediately on success or failure and
+confirm cleanup before workspace mutation; do not log or persist source text.
 
 ## Minimal weekly Routine instruction (single entrypoint)
 
@@ -65,6 +72,7 @@ During the cross-session smoke test, inspect the actual agent decisions and repo
 5. Exercise a Google Doc, Drive Markdown and local Markdown separately. Verify that identical normalized content produces equivalent relevance/research decisions. Edit a Doc between invocations and confirm fresh content is used, including when resuming a previously pending review without changing its hashes/revision.
 6. Simulate an inaccessible Doc, absent local path, unsupported Drive file, empty/invalid UTF-8/oversized text, truncated export and an arbitrary web URL. Verify each fails before workspace mutation, without stale/no-context fallback.
 7. Supply both `Common context:` and `Context source:` and verify explicit validation failure. Verify existing CSV schema, snapshot contents and report delivery remain unchanged.
+8. Exercise a connector that returns a file reference. Verify bounded private staging outside the managed workspace, cleanup after successful reads and failures, and no source text in logs, workspace files or snapshots.
 
 ## 1. Verify binary transfer before monitoring
 
