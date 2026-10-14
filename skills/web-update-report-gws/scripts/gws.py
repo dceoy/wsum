@@ -239,9 +239,7 @@ def project_csv(
         isinstance(drive_size, bool) or drive_size <= 0 or drive_size > MAX_TARGET_CSV
     ):
         raise GwsError("invalid Drive CSV size metadata")
-    if drive_sha256 is not None and (
-        not isinstance(drive_sha256, str) or not SHA_RE.fullmatch(drive_sha256)
-    ):
+    if drive_sha256 is not None and not SHA_RE.fullmatch(drive_sha256):
         raise GwsError("invalid Drive CSV SHA-256 metadata")
     if source.is_symlink() or not source.is_file():
         raise GwsError("CSV input must be an existing regular file")
@@ -275,7 +273,7 @@ def compare_transfer(source: Path, downloaded: Path) -> dict[str, typing.Any]:
         raise GwsError("transfer input must be an existing regular file")
     if source.samefile(downloaded):
         raise GwsError("transfer source and downloaded file must be distinct")
-    results = []
+    results: list[tuple[int, str]] = []
     for path in (source, downloaded):
         with path.open("rb") as stream:
             results.append(
