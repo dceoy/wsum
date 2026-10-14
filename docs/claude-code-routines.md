@@ -9,9 +9,9 @@ the checks below.
 
 1. Open the `dceoy/wsum` repository in Claude Code Routines. Confirm the
    `web-update-monitor`, `web-update-research`, and `web-update-report-gws` skills are discoverable.
-2. Supply **only** (a) an input targets table (local CSV path, Drive CSV URL/ID,
+2. Supply the **two required resources**: (a) an input targets table (local CSV path, Drive CSV URL/ID,
    or Google Spreadsheet URL/ID) and (b) one existing Drive **output folder**
-   URL/ID. For a Spreadsheet, enable the Sheets connector; for Drive-hosted
+   URL/ID. Optionally include a run-wide `Common context:` block in the Routine prompt. For a Spreadsheet, enable the Sheets connector; for Drive-hosted
    CSV, require binary download plus `size` and `md5Checksum` metadata.
    The output folder must permit child listing, `workspaces/` and `reports/`
    creation, and an immutable binding JSON at the parent level.
@@ -42,13 +42,26 @@ values or Drive binary download.
 ```text
 /web-update-report-gws Run the weekly monitor with input targets table
 <CSV_PATH_OR_DRIVE_CSV_OR_SPREADSHEET_URL> and output Drive folder <OUTPUT_FOLDER_URL>.
+Common context:
+  Goal: Assess changes affecting AI agent operations and cloud deployments.
+  Focus: AI coding agents, Cloudflare Workers, and security advisories.
+  Report: Japanese; explain practical impact and follow-up conditions.
 Execute the internal web-update-monitor -> web-update-research pipeline for material changes; separate observed facts, verified context and inference, finalize once, and report failures.
 ```
 
 Set the weekly schedule in Routines. The skill derives the first worksheet
 and entire used range for Spreadsheet inputs by default, validates CSV inputs
 with the core CSV parser, and resolves or creates `workspaces/` and `reports/`
-under the output folder. No separate range or internal directory is required. Do not invoke either child skill separately: this command owns orchestration, report finalization and delivery.
+under the output folder. No separate range, common-context file, or internal directory is required. The optional common context must reach both materiality review and follow-up research without overwriting target-specific `criteria`; if omitted, retain previous behavior. Do not invoke either child skill separately: this command owns orchestration, report finalization and delivery.
+
+### Common-context acceptance cases
+
+During the cross-session smoke test, inspect the actual agent decisions and report, not merely the prompt text:
+
+1. Run with a common context and two enabled interests having different `criteria`. Verify the context influences the **agent-side** materiality explanation for both interests and the downstream research/report focus, while an explicitly report-worthy change is not suppressed.
+2. Run without common context. Verify the original per-interest `criteria` and `keywords` alone determine the judgment and that no extra file/column is required.
+3. Resume a pending review with revised common context. Verify the current prompt governs its review and research without mutating its revision, hashes, candidate, or target list; do not revisit finalized reports.
+4. Include a focus topic absent from the monitored delta. Verify it does not cause extra fetching or fabricated claims, and that evidence/source attribution and fact-versus-inference separation remain intact.
 
 ## 1. Verify binary transfer before monitoring
 
