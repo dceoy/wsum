@@ -40,14 +40,10 @@ If any required action is missing from the _actual Routine tool surface_, stop
 and report the missing operation. Do not substitute text extraction for Sheets
 values or Drive binary download.
 
-If an authenticated context connector returns a file reference that requires
-local materialization, verify it can stage only the selected source bytes in a
-private, invocation-specific disposable directory outside the managed workspace.
-Require trusted size metadata within the 256 KiB plus optional 3-byte BOM raw
-limit, or a bounded read/copy that stops at that limit; stop if the connector
-cannot enforce a bound. Enforce the 128 KiB normalized UTF-8 text limit. Delete
-staged bytes immediately on success or failure and confirm cleanup before
-workspace mutation; do not log or persist source text.
+For connectors requiring file-reference materialization, verify bounded (256 KiB
+plus optional BOM) temporary staging outside the workspace and cleanup on both
+success and failure. Do not persist context or proceed if the bound or cleanup fails.
+See the GWS skill's context contract for details.
 
 ## Minimal weekly Routine instruction (single entrypoint)
 
@@ -64,16 +60,12 @@ under the output folder. No extra range, internal directory, or common context i
 
 ### Common-context acceptance cases
 
-During the cross-session smoke test, inspect the actual agent decisions and report, not merely the prompt text:
+Verify the agent's decisions and reports across these scenarios:
 
-1. Run with inline common context and two enabled interests having different `criteria`. Verify the context influences the **agent-side** materiality explanation for both interests and the downstream research/report focus, while an explicitly report-worthy change is not suppressed.
-2. Run without common context. Verify the original per-interest `criteria` and `keywords` alone determine the judgment and that no extra file/column is required.
-3. Resume a pending review with revised common context. Verify the current prompt governs its review and research without mutating its revision, hashes, candidate, or target list; do not revisit finalized reports.
-4. Include a focus topic absent from the monitored delta. Verify it does not cause extra fetching or fabricated claims, and that evidence/source attribution and fact-versus-inference separation remain intact.
-5. Exercise a Google Doc and Drive Markdown separately. Verify that identical normalized content produces equivalent relevance/research decisions. Edit a Doc between invocations and confirm fresh content is used, including when resuming a previously pending review without changing its hashes/revision.
-6. Simulate an inaccessible Doc, an explicitly supplied local `.md` path (unsupported by GWS), unsupported Drive file, empty/invalid UTF-8/oversized text, truncated export and an arbitrary web URL. Verify each fails before workspace mutation, without stale/no-context fallback.
-7. Supply both `Common context:` and `Context source:` and verify explicit validation failure. Verify existing CSV schema, snapshot contents and report delivery remain unchanged.
-8. Exercise a connector that returns a file reference. Verify bounded private staging outside the managed workspace, cleanup after successful reads and failures, and no source text in logs, workspace files or snapshots.
+1. No context: ordinary target-specific `criteria`/`keywords` behavior, with no extra input.
+2. Inline, Google Doc, and Drive Markdown context: same text yields equivalent decisions; context informs multiple interests and research without overriding explicit criteria. A modified Doc affects the next run or resumed pending review without rewriting saved evidence.
+3. Invalid sources: reject local `.md` paths, missing permissions, incomplete exports, unsupported types/URLs, invalid or empty UTF-8, oversized content, and simultaneous input modes before workspace mutation.
+4. Security: no extra fetching or invented findings from context-only topics; transient staged source files are bounded and cleaned up, with no context persisted in logs, snapshots, pending reviews, or reports.
 
 ## 1. Verify binary transfer before monitoring
 
