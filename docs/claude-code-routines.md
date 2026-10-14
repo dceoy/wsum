@@ -33,8 +33,8 @@ the checks below.
 | Drive output                    | Read folder by ID; list children with IDs/MIME; create folders and immutable binding file  |
 | Drive workspaces                | List all files with IDs; create binary ZIP; download binary by ID; delete by ID            |
 | Drive reports                   | Search exact name; create Markdown; download by ID; update existing file by ID             |
-| Context Google Docs (optional)  | Exact file ID and native MIME verification; full body read or complete plain-text export  |
-| Context Drive .md (optional)    | Exact file ID and stored Markdown verification; download complete UTF-8 original bytes    |
+| Context Google Docs (optional)  | Exact file ID and native MIME verification; full body read or complete plain-text export   |
+| Context Drive .md (optional)    | Exact file ID and stored Markdown verification; download complete UTF-8 original bytes     |
 
 If any required action is missing from the _actual Routine tool surface_, stop
 and report the missing operation. Do not substitute text extraction for Sheets
