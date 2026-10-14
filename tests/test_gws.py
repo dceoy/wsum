@@ -597,6 +597,17 @@ def test_compare_transfer_rejects_symlinks_and_missing_files(tmp_path: Path) -> 
         gws.compare_transfer(source, downloaded)
 
 
+def test_compare_transfer_rejects_aliases(tmp_path: Path) -> None:
+    source = tmp_path / "source.zip"
+    downloaded = tmp_path / "downloaded.zip"
+    source.write_bytes(b"original")
+    with pytest.raises(gws.GwsError, match="must be distinct"):
+        gws.compare_transfer(source, source)
+    downloaded.hardlink_to(source)
+    with pytest.raises(gws.GwsError, match="must be distinct"):
+        gws.compare_transfer(source, downloaded)
+
+
 def test_drive_csv_cli_sha256_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
