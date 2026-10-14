@@ -9,9 +9,9 @@ the checks below.
 
 1. Open the `dceoy/wsum` repository in Claude Code Routines. Confirm the
    `web-update-monitor`, `web-update-research`, and `web-update-report-gws` skills are discoverable.
-2. Supply **only** (a) an input targets table (local CSV path, Drive CSV URL/ID,
+2. Supply the **two required resources**: (a) an input targets table (local CSV path, Drive CSV URL/ID,
    or Google Spreadsheet URL/ID) and (b) one existing Drive **output folder**
-   URL/ID. For a Spreadsheet, enable the Sheets connector; for Drive-hosted
+   URL/ID. You may omit common context entirely, or optionally include **either** `Common context:` inline or `Context source:` selecting a Google Doc or Drive Markdown file. For a Spreadsheet, enable the Sheets connector; for Drive-hosted
    CSV, require binary download plus `size` and `md5Checksum` metadata.
    The output folder must permit child listing, `workspaces/` and `reports/`
    creation, and an immutable binding JSON at the parent level.
@@ -20,7 +20,8 @@ the checks below.
 4. Check public-web search and individual source-opening support for follow-up research. If unavailable, require an explicit fact-only report with independent verification marked unavailable.
 5. Permit outbound network requests to the monitored public URLs. Trusted
    allowlists may block Python fetches even when the connector itself works.
-6. Configure at most one active Routine per logical workspace. A schedule
+6. When `Context source:` is provided, verify complete authenticated Google Docs body/plain-text export or exact-ID Drive Markdown download. Missing, unreadable, empty, invalid UTF-8, unsupported or oversized (>128 KiB normalized) context must stop the run **before** any monitoring mutations; never use snippets or fall back to cached context.
+7. Configure at most one active Routine per logical workspace. A schedule
    should not overlap its prior invocation; timestamp ordering is not a lock.
 
 ### Required connector operations
@@ -32,10 +33,17 @@ the checks below.
 | Drive output                    | Read folder by ID; list children with IDs/MIME; create folders and immutable binding file  |
 | Drive workspaces                | List all files with IDs; create binary ZIP; download binary by ID; delete by ID            |
 | Drive reports                   | Search exact name; create Markdown; download by ID; update existing file by ID             |
+| Context Google Docs (optional)  | Exact file ID and native MIME verification; full body read or complete plain-text export   |
+| Context Drive .md (optional)    | Exact file ID and stored Markdown verification; download complete UTF-8 original bytes     |
 
 If any required action is missing from the _actual Routine tool surface_, stop
 and report the missing operation. Do not substitute text extraction for Sheets
 values or Drive binary download.
+
+For connectors requiring file-reference materialization, verify bounded (256 KiB
+plus optional BOM) temporary staging outside the workspace and cleanup on both
+success and failure. Do not persist context or proceed if the bound or cleanup fails.
+See the GWS skill's context contract for details.
 
 ## Minimal weekly Routine instruction (single entrypoint)
 
@@ -48,7 +56,16 @@ Execute the internal web-update-monitor -> web-update-research pipeline for mate
 Set the weekly schedule in Routines. The skill derives the first worksheet
 and entire used range for Spreadsheet inputs by default, validates CSV inputs
 with the core CSV parser, and resolves or creates `workspaces/` and `reports/`
-under the output folder. No separate range or internal directory is required. Do not invoke either child skill separately: this command owns orchestration, report finalization and delivery.
+under the output folder. No extra range, internal directory, or common context is required. To add context, append `Context source: <GOOGLE_DOCS_OR_DRIVE_MD_URL_OR_FILE_ID>` or an inline `Common context:` block, but **not both**. When supplied, the orchestrator resolves the selected source once before workspace mutations and forwards its full text to both materiality review and follow-up research, preserving target-specific `criteria`. If omitted, retain previous behavior. Do not invoke either child skill separately: this command owns orchestration, report finalization and delivery.
+
+### Common-context acceptance cases
+
+Verify the agent's decisions and reports across these scenarios:
+
+1. No context: ordinary target-specific `criteria`/`keywords` behavior, with no extra input.
+2. Inline, Google Doc, and Drive Markdown context: same text yields equivalent decisions; context informs multiple interests and research without overriding explicit criteria. A modified Doc affects the next run or resumed pending review without rewriting saved evidence.
+3. Invalid sources: reject local `.md` paths, missing permissions, incomplete exports, unsupported types/URLs, invalid or empty UTF-8, oversized content, and simultaneous input modes before workspace mutation.
+4. Security: no extra fetching or invented findings from context-only topics; transient staged source files are bounded and cleaned up, with no raw context text copied into logs, snapshots, pending reviews, or reports.
 
 ## 1. Verify binary transfer before monitoring
 
