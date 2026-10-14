@@ -643,11 +643,19 @@ def test_drive_csv_cli_sha256_metadata(
     gws.main()
     assert json.loads(capsys.readouterr().out) == {"target_groups": 1}
     monkeypatch.setattr(
-        sys, "argv",
+        sys,
+        "argv",
         [
-            "gws.py", "project", "--csv", str(source),
-            "--drive-sha256", "0" * 64,
-            "--targets", str(destination), "--core-skill-dir", str(core),
+            "gws.py",
+            "project",
+            "--csv",
+            str(source),
+            "--drive-sha256",
+            "0" * 64,
+            "--targets",
+            str(destination),
+            "--core-skill-dir",
+            str(core),
         ],
     )
     with pytest.raises(SystemExit):
@@ -665,10 +673,15 @@ def test_compare_transfer_cli(
     source.write_bytes(b"\0\xffsnapshot")
     downloaded.write_bytes(source.read_bytes())
     monkeypatch.setattr(
-        sys, "argv",
+        sys,
+        "argv",
         [
-            "gws.py", "compare-transfer", "--source", str(source),
-            "--downloaded", str(downloaded),
+            "gws.py",
+            "compare-transfer",
+            "--source",
+            str(source),
+            "--downloaded",
+            str(downloaded),
         ],
     )
     gws.main()
