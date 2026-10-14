@@ -3,7 +3,31 @@
 This checklist verifies the **actual Routines environment**. Connector names and
 marketing descriptions are not evidence that the required MCP operations or
 binary payload sizes are supported. Do not schedule the workflow before passing
-the checks below.
+the checks below. In particular, a connector that exposes binary data only as
+base64 in agent-visible text is **incompatible** and must fail before any input
+download or operational workspace creation.
+
+## 0. Mandatory file-backed transport preflight
+
+Inspect the real connector tool signatures before fetching the input CSV or
+context, restoring snapshots, or creating managed folders. Require an exact-ID
+Drive upload **from a local file** and an exact-ID Drive download **to a local
+file**, both bypassing the model's output. A genuine file-reference handoff or
+mounted/authenticated Drive directory is acceptable if bytes are staged and
+read programmatically. A tool returning a base64 string to the agent, or
+accepting a base64 argument composed by the agent, does not satisfy this,
+even when the payload is just 10 KiB. **Never transcribe base64**, split it
+into text chunks, recreate a CSV from rendered content, or fall back to
+`base64 -d` on agent-written text.
+
+Verify that the file-backed route supports at least 1 MiB in both directions
+and the actual anticipated ZIP size (local ZIPs are bounded to 128 MiB).
+If either direction lacks file-backed transfer or payload support is uncertain,
+**stop here** with an explicit capability error and no Drive writes. In
+particular, Cowork/Claude environments exposing only `create_file`,
+`download_file_content`, and model-visible base64 are not compatible.
+Installing a truly file-backed connector or mounting Drive is a prerequisite,
+not a workaround available through another `gws.py` flag.
 
 ## Setup
 
@@ -12,7 +36,7 @@ the checks below.
 2. Supply the **two required resources**: (a) an input targets table (local CSV path, Drive CSV URL/ID,
    or Google Spreadsheet URL/ID) and (b) one existing Drive **output folder**
    URL/ID. You may omit common context entirely, or optionally include **either** `Common context:` inline or `Context source:` selecting a Google Doc or Drive Markdown file. For a Spreadsheet, enable the Sheets connector; for Drive-hosted
-   CSV, require binary download plus `size` metadata.
+   CSV, require file-backed binary download plus `size` metadata.
    The output folder must permit child listing, `workspaces/` and `reports/`
    creation, and an immutable binding JSON at the parent level.
 3. Configure a Python 3.11+ environment with `pypdf` installed (e.g. `uv sync`
@@ -29,16 +53,19 @@ the checks below.
 | Resource                        | Required operations                                                                        |
 | ------------------------------- | ------------------------------------------------------------------------------------------ |
 | Sheets (Spreadsheet input only) | Read spreadsheet metadata (ordered tabs), and range values preserving row/column positions |
-| Input Drive CSV (when used)     | Read exact-ID file size and version; download complete CSV bytes by ID                     |
+| Input Drive CSV (when used)     | Read exact-ID file size and version; download bytes by ID directly to a local file         |
 | Drive output                    | Read folder by ID; list children with IDs/MIME; create folders and immutable binding file  |
-| Drive workspaces                | List all files with IDs; create binary ZIP; download binary by ID; delete by ID            |
+| Drive workspaces                | List IDs; upload ZIP from local file; download by ID to local file; delete by ID           |
 | Drive reports                   | Search exact name; create Markdown; download by ID; update existing file by ID             |
 | Context Google Docs (optional)  | Exact file ID and native MIME verification; full body read or complete plain-text export   |
 | Context Drive .md (optional)    | Exact file ID and stored Markdown verification; download complete UTF-8 original bytes     |
 
 If any required action is missing from the _actual Routine tool surface_, stop
-and report the missing operation. Do not substitute text extraction for Sheets
-values or Drive binary download.
+and report the missing operation **before** accepting a connector's inline
+base64 as input. Do not substitute text extraction for Sheets values or Drive
+binary download. The 10 KiB/100 KiB/1 MiB smoke test is performed **after**
+confirming file-backed transfer, never to discover whether agent-mediated
+base64 might happen to work.
 
 For connectors requiring file-reference materialization, verify bounded (256 KiB
 plus optional BOM) temporary staging outside the workspace and cleanup on both
@@ -79,15 +106,20 @@ python skills/web-update-report-gws/scripts/gws.py pack \
   --archive "$SCRATCH/workspace-20261009T000000Z.zip"
 ```
 
-Use the connector to upload it _as bytes_, then download the same file by its
-returned Drive ID. Save the downloaded binary to a local file with the
-original snapshot filename. Independently compare byte length and SHA-256
-against the `pack` command output, then run:
+Upload the ZIP directly **from its local file**, download by returned exact
+Drive ID directly **into another local file**, and compare via the helper
+(without showing or writing any binary/base64 payload in agent text):
 
 ```bash
+python skills/web-update-report-gws/scripts/gws.py compare-transfer \
+  --source "$SCRATCH/workspace-20261009T000000Z.zip" \
+  --downloaded "$DOWNLOADED/workspace-20261009T000000Z.zip"
 python skills/web-update-report-gws/scripts/gws.py verify \
   --archive "$DOWNLOADED/workspace-20261009T000000Z.zip"
 ```
+
+Require the size and SHA-256 returned by `compare-transfer` to agree with
+`pack` as well.
 
 Repeat with ZIP payloads around **10 KiB, 100 KiB and 1 MiB**. Use
 incompressible test data so the _ZIP sizes_, not just source sizes, satisfy
@@ -101,8 +133,10 @@ is insufficient. Delete all throwaway files when done.
   selected via metadata and its entire used range can be read, preserving
   headers, empty cells, duplicate URLs, multiline text and disabled rows.
   For a local CSV, validate its exact bytes with the core loader. For a Drive
-  CSV, require `size`, download by exact ID, and compare the downloaded
-  byte length with that metadata **before** projecting the CSV.
+  CSV, require `size`, download by exact ID directly to a local file, and
+  compare the downloaded byte length with that metadata **before** projecting
+  the CSV. Pass `--drive-sha256` too only when a trusted checksum for the
+  exact source revision is available; do not fabricate or require an MD5.
 - List the exact output folder's complete direct children. For a new monitor
   require **no** existing `workspaces`, `reports` or binding file. Create both
   child folders by parent ID and re-list to verify their IDs. An existing
@@ -165,12 +199,14 @@ is insufficient. Delete all throwaway files when done.
 10. Download a syntactically valid **row-truncated Drive CSV** and require the
     expected-size verification to reject it before reconciling pending
     state. Also reject missing or invalid size metadata. Equal-size altered
-    CSV cannot be detected by the size check alone.
+    CSV cannot be detected by the size check alone; when trusted SHA-256 is
+    available, a same-size altered CSV must be rejected before projection.
 
 ## Failure policy
 
-Fail closed on missing connector capabilities, missing/mismatched folder bindings,
-ambiguous parent/child IDs, damaged binaries, missing or mismatched CSV size,
+Fail closed on missing **file-backed** binary upload/download capability (even
+for small files), missing/mismatched folder bindings, ambiguous parent/child
+IDs, damaged binaries, missing or mismatched CSV size or supplied SHA-256,
 validation errors, stale input projection, or a conflicting writer. Do not store
 Google tokens, cookies, or API secrets in workspace ZIPs.
 Keep connector and monitoring errors distinct.
