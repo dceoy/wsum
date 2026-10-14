@@ -276,7 +276,9 @@ def compare_transfer(source: Path, downloaded: Path) -> dict[str, typing.Any]:
         if path.is_symlink() or not path.is_file():
             raise GwsError("transfer input must be an existing regular file")
         with path.open("rb") as stream:
-            results.append(_stream_digest(stream, MAX_ZIP, "transfer size limit exceeded"))
+            results.append(
+                _stream_digest(stream, MAX_ZIP, "transfer size limit exceeded")
+            )
     if results[0] != results[1]:
         raise GwsError("Drive transfer size or SHA-256 mismatch")
     size, digest = results[0]
