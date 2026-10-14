@@ -28,7 +28,9 @@ Output: <DRIVE_FOLDER_URL>
 
 This two-input invocation is complete; no common context is necessary. To provide context, add `Context source: <GOOGLE_DOCS_OR_DRIVE_MARKDOWN_URL_OR_FILE_ID>` or a multi-line `Common context:` block, never both.
 
-### Resolve the context source (before any monitoring mutation)
+### Resolve a supplied context source (before any monitoring mutation)
+
+Only perform these source-resolution steps when `Context source:` is present; with no common context, skip source resolution and proceed with the two required resources.
 
 1. Parse the single explicit source locator. Do **not** retrieve context implicitly from monitored websites, Spreadsheet/CSV cells, previous reports or Drive name searches.
 2. For Google Docs, resolve the **exact file ID**, verify its Drive MIME type `application/vnd.google-apps.document`, and obtain the **complete document body** using an authenticated Docs read or a complete plain-text export. Flatten heading, paragraph, and table text as needed; style and layout are not instructions.
@@ -248,7 +250,7 @@ The **only required resource inputs** (prompt or Routine configuration) are:
 - **Input targets table:** local CSV path, Google Drive CSV file URL/ID, or Google Spreadsheet URL/ID.
 - **Output folder:** one existing Google Drive folder URL/ID, used as the parent of managed `workspaces/` and `reports/` folders.
 
-Optionally supply **either** inline `Common context:` **or** `Context source:` with one Google Doc/Drive Markdown URL or ID; local Markdown paths are not supported. The orchestrator resolves and validates the text once before mutations and propagates it to monitoring judgment and research; it is not part of the targets table or persistent state. No worksheet name, range, workspace directory, state file, or report folder
+Optionally supply **either** inline `Common context:` **or** `Context source:` with one Google Doc/Drive Markdown URL or ID; local Markdown paths are not supported. When supplied, the orchestrator resolves and validates the text once before mutations and propagates it to monitoring judgment and research; it is not part of the targets table or persistent state. No worksheet name, range, workspace directory, state file, or report folder
 needs to be supplied. The agent discovers both installed skills and creates
 a fresh local scratch workspace automatically on each invocation. An optional
 worksheet/range override can select a non-default tab.
