@@ -459,50 +459,32 @@ def test_folder_binding_cli_roundtrip(
     assert json.loads(capsys.readouterr().out) == created
 
 
-def test_drive_csv_integrity_rejects_row_truncation(tmp_path: Path) -> None:
+def test_drive_csv_size_rejects_row_truncation(tmp_path: Path) -> None:
     core = _stub_core(tmp_path)
     source = tmp_path / "downloaded.csv"
     destination = tmp_path / "workspace/targets.csv"
     complete = b"name,url\nA,https://example.com\nB,https://example.org\n"
     source.write_bytes(complete)
-    digest = hashlib.md5(complete, usedforsecurity=False).hexdigest()
-    assert (
-        gws.project_csv(
-            source, destination, core, drive_size=len(complete), drive_md5=digest
-        )
-        == 1
-    )
+    assert gws.project_csv(source, destination, core, drive_size=len(complete)) == 1
     assert destination.read_bytes() == complete
     source.write_bytes(b"name,url\nA,https://example.com\n")  # valid CSV, missing row
-    with pytest.raises(gws.GwsError, match="size or MD5 mismatch"):
-        gws.project_csv(
-            source, destination, core, drive_size=len(complete), drive_md5=digest
-        )
+    with pytest.raises(gws.GwsError, match="size mismatch"):
+        gws.project_csv(source, destination, core, drive_size=len(complete))
     assert destination.read_bytes() == complete
 
 
-def test_drive_csv_integrity_rejects_same_length_corruption(tmp_path: Path) -> None:
+def test_drive_csv_size_metadata_validation(tmp_path: Path) -> None:
     core = _stub_core(tmp_path)
     source = tmp_path / "downloaded.csv"
     destination = tmp_path / "targets.csv"
-    original = b"name,url\nA,https://example.com\n"
-    source.write_bytes(original)
-    digest = hashlib.md5(original, usedforsecurity=False).hexdigest()
-    source.write_bytes(original.replace(b"A,", b"B,"))
-    with pytest.raises(gws.GwsError, match="size or MD5 mismatch"):
-        gws.project_csv(
-            source, destination, core, drive_size=len(original), drive_md5=digest
-        )
+    source.write_bytes(b"name,url\nA,https://example.com\n")
+    for invalid in (0, -1, True, gws.MAX_TARGET_CSV + 1):
+        with pytest.raises(gws.GwsError, match="invalid Drive CSV size"):
+            gws.project_csv(source, destination, core, drive_size=invalid)
     assert not destination.exists()
-    with pytest.raises(gws.GwsError, match="both size and MD5"):
-        gws.project_csv(source, destination, core, drive_size=len(original))
-    with pytest.raises(gws.GwsError, match="invalid Drive CSV"):
-        gws.project_csv(
-            source, destination, core, drive_size=len(original), drive_md5="invalid"
-        )
 
 
-def test_drive_csv_cli_requires_integrity_metadata(
+def test_drive_csv_cli_requires_size_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -525,18 +507,12 @@ def test_drive_csv_cli_requires_integrity_metadata(
     with pytest.raises(SystemExit) as exc:
         gws.main()
     assert exc.value.code == 1
-    assert "requires --drive-size and --drive-md5" in capsys.readouterr().err
+    assert "requires --drive-size" in capsys.readouterr().err
     assert not dest.exists()
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            *base,
-            "--drive-size",
-            str(source.stat().st_size),
-            "--drive-md5",
-            hashlib.md5(source.read_bytes(), usedforsecurity=False).hexdigest(),
-        ],
+        [*base, "--drive-size", str(source.stat().st_size)],
     )
     gws.main()
     assert json.loads(capsys.readouterr().out) == {"target_groups": 1}
