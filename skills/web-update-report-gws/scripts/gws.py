@@ -271,10 +271,12 @@ def project_csv(
 
 def compare_transfer(source: Path, downloaded: Path) -> dict[str, typing.Any]:
     """Compare file-backed round-trip bytes without passing payloads to the model."""
+    if any(path.is_symlink() or not path.is_file() for path in (source, downloaded)):
+        raise GwsError("transfer input must be an existing regular file")
+    if source.samefile(downloaded):
+        raise GwsError("transfer source and downloaded file must be distinct")
     results = []
     for path in (source, downloaded):
-        if path.is_symlink() or not path.is_file():
-            raise GwsError("transfer input must be an existing regular file")
         with path.open("rb") as stream:
             results.append(
                 _stream_digest(stream, MAX_ZIP, "transfer size limit exceeded")
