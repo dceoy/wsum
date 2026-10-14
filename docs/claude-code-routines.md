@@ -43,9 +43,11 @@ values or Drive binary download.
 If an authenticated context connector returns a file reference that requires
 local materialization, verify it can stage only the selected source bytes in a
 private, invocation-specific disposable directory outside the managed workspace.
-Enforce the 256 KiB plus optional 3-byte BOM raw limit and 128 KiB normalized
-UTF-8 text limit. Delete staged bytes immediately on success or failure and
-confirm cleanup before workspace mutation; do not log or persist source text.
+Require trusted size metadata within the 256 KiB plus optional 3-byte BOM raw
+limit, or a bounded read/copy that stops at that limit; stop if the connector
+cannot enforce a bound. Enforce the 128 KiB normalized UTF-8 text limit. Delete
+staged bytes immediately on success or failure and confirm cleanup before
+workspace mutation; do not log or persist source text.
 
 ## Minimal weekly Routine instruction (single entrypoint)
 
