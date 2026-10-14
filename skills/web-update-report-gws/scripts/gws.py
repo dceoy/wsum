@@ -235,9 +235,7 @@ def project_csv(
 ) -> int:
     """Validate local or Drive CSV bytes before atomically replacing targets."""
     if drive_size is not None and (
-        isinstance(drive_size, bool)
-        or drive_size <= 0
-        or drive_size > MAX_TARGET_CSV
+        isinstance(drive_size, bool) or drive_size <= 0 or drive_size > MAX_TARGET_CSV
     ):
         raise GwsError("invalid Drive CSV size metadata")
     if source.is_symlink() or not source.is_file():
