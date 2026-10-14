@@ -6,7 +6,7 @@ The core skill lives in `skills/web-update-monitor/`. It intentionally has two r
 
 A composite at `skills/web-update-research/` follows up on material changes with bounded web research, source-verified context, and explicitly labeled analysis **before** report finalization.
 
-The entrypoint `skills/web-update-report-gws/` orchestrates the full pipeline: monitor changes, research only material updates, finalize one cited Markdown report per run, persist the workspace, and deliver the report through Google Drive. It accepts only a CSV or Spreadsheet targets table and one output Drive folder.
+The entrypoint `skills/web-update-report-gws/` orchestrates the full pipeline: monitor changes, research only material updates, finalize one cited Markdown report per run, persist the workspace, and deliver the report through Google Drive. It requires a CSV or Spreadsheet targets table and one output Drive folder, and optionally accepts a common-context block in the invocation prompt.
 
 ## Agent Skills
 
@@ -17,6 +17,23 @@ The repository ships these canonical skills:
 - `skills/web-update-research/`: consume already material pending reviews, perform follow-up web research, and **return** evidence-grounded Markdown sections without state or delivery side effects.
 
 Install `web-update-monitor` alone for local monitoring. For a complete Google Workspace run, invoke **only** `web-update-report-gws` after installing all three skills (`web-update-monitor`, `web-update-research`, and `web-update-report-gws`); the orchestrator calls the other skills internally. Composites resolve dependencies by skill discovery, not relative paths. Obtain the packages from releases or the [Agent Skills packaging workflow](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain).
+
+### Run-wide common context
+
+Pass optional free-form `Common context:` instructions when invoking the Google Workspace entrypoint. They apply to **all enabled interests** across the monitor → research → report pipeline without adding fields to the targets CSV/Spreadsheet:
+
+```text
+/web-update-report-gws
+Targets: <CSV_OR_SPREADSHEET_URL>
+Output: <DRIVE_FOLDER_URL>
+Common context:
+  Goal: Surface changes that affect engineering decisions.
+  Focus topics: AI coding agents, Cloudflare, software supply-chain security.
+  Analysis: Explain implementation impact, confidence, and next actions.
+  Report: Japanese; distinguish observation, verification, and inference.
+```
+
+The orchestrator forwards the same context for agent-side materiality review and research, including resumed pending updates. Per-target `criteria` and `keywords` remain authoritative; the common context supplements significance judgments and report emphasis, does not filter fetching or suppress changes that meet explicit criteria, and is never saved to monitoring state. If omitted, behavior is unchanged. No additional CLI option or CSV column is required.
 
 ### Google Workspace composition
 
@@ -51,7 +68,7 @@ Markdown remains the canonical core and user-facing Google Drive report format. 
 
 Read `skills/web-update-report-gws/SKILL.md` for the full monitor → research → finalize → Drive pipeline, including connector orchestration and recovery semantics. The output folder holds an immutable `web-update-monitor-gws.binding.json` with the stable IDs of its `workspaces/` and `reports/` children; a missing or mismatched binding stops the monitor instead of silently resetting its baseline. Existing two-folder deployments require **explicit migration and binding** after verifying the original snapshots; the composite does not adopt or migrate unbound folders automatically.
 
-For **Claude Code Routines**, invoke `/web-update-report-gws` and specify only an **input targets table** (local CSV, Drive CSV or Google Spreadsheet) and one existing **Drive output folder** URL/ID; the composite resolves or creates `workspaces/` and `reports/` directly beneath it. It selects the first grid worksheet and entire used range automatically for Spreadsheet inputs; no A1 range is required. First check the applicable CSV/Sheets read tools, Drive folder listing/creation and binary ZIP create/download/verification, and public-network access. The composite's Python helper supports byte-preserving CSV validation (plus exact Drive size/MD5 checks), Sheet-to-CSV projection, immutable folder-binding validation, safe ZIP snapshot pack/verify/restore, generation naming, and delivery-ledger validation (`skills/web-update-report-gws/scripts/gws.py`). Google connector transfer and authorization remain the agent's responsibility. Run the [Routines E2E compatibility checklist](docs/claude-code-routines.md) before enabling a recurring schedule; this integration has not been verified against a live Routine.
+For **Claude Code Routines**, invoke `/web-update-report-gws` and specify the two required resources—an **input targets table** (local CSV, Drive CSV or Google Spreadsheet) and an existing **Drive output folder** URL/ID—plus optional **common context** in the prompt; the composite resolves or creates `workspaces/` and `reports/` directly beneath it. It selects the first grid worksheet and entire used range automatically for Spreadsheet inputs; no A1 range is required. First check the applicable CSV/Sheets read tools, Drive folder listing/creation and binary ZIP create/download/verification, and public-network access. The composite's Python helper supports byte-preserving CSV validation (plus exact Drive size/MD5 checks), Sheet-to-CSV projection, immutable folder-binding validation, safe ZIP snapshot pack/verify/restore, generation naming, and delivery-ledger validation (`skills/web-update-report-gws/scripts/gws.py`). Google connector transfer and authorization remain the agent's responsibility. Run the [Routines E2E compatibility checklist](docs/claude-code-routines.md) before enabling a recurring schedule; this integration has not been verified against a live Routine.
 
 ### Follow-up research
 
