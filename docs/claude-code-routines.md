@@ -65,7 +65,7 @@ Verify the agent's decisions and reports across these scenarios:
 1. No context: ordinary target-specific `criteria`/`keywords` behavior, with no extra input.
 2. Inline, Google Doc, and Drive Markdown context: same text yields equivalent decisions; context informs multiple interests and research without overriding explicit criteria. A modified Doc affects the next run or resumed pending review without rewriting saved evidence.
 3. Invalid sources: reject local `.md` paths, missing permissions, incomplete exports, unsupported types/URLs, invalid or empty UTF-8, oversized content, and simultaneous input modes before workspace mutation.
-4. Security: no extra fetching or invented findings from context-only topics; transient staged source files are bounded and cleaned up, with no context persisted in logs, snapshots, pending reviews, or reports.
+4. Security: no extra fetching or invented findings from context-only topics; transient staged source files are bounded and cleaned up, with no raw context text copied into logs, snapshots, pending reviews, or reports.
 
 ## 1. Verify binary transfer before monitoring
 
