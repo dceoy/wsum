@@ -250,8 +250,8 @@ or text conversion; download by its returned ID **directly to a local file**
 with the identical filename and invoke:
 
 ```bash
-python "$GWS_SKILL_DIR/scripts/gws.py" compare-transfer \\
-  --source "$SCRATCH/workspace-$GENERATION.zip" \\
+python "$GWS_SKILL_DIR/scripts/gws.py" compare-transfer \
+  --source "$SCRATCH/workspace-$GENERATION.zip" \
   --downloaded "$DOWNLOADED/workspace-$GENERATION.zip"
 ```
 
