@@ -523,7 +523,7 @@ def test_drive_csv_sha256_rejects_equal_length_corruption(tmp_path: Path) -> Non
     core = _stub_core(tmp_path)
     source = tmp_path / "downloaded.csv"
     destination = tmp_path / "workspace/targets.csv"
-    original = b"name,url\\nA,https://example.com\\n"
+    original = b"name,url\nA,https://example.com\n"
     source.write_bytes(original)
     expected_digest = hashlib.sha256(original).hexdigest()
     assert (
@@ -554,7 +554,7 @@ def test_drive_csv_sha256_rejects_invalid_metadata(tmp_path: Path) -> None:
     core = _stub_core(tmp_path)
     source = tmp_path / "downloaded.csv"
     destination = tmp_path / "targets.csv"
-    source.write_bytes(b"name,url\\nA,https://example.com\\n")
+    source.write_bytes(b"name,url\nA,https://example.com\n")
     for invalid in ("", "A" * 64, "not-a-digest", "a" * 65):
         with pytest.raises(gws.GwsError, match="invalid Drive CSV SHA-256"):
             gws.project_csv(
@@ -604,12 +604,19 @@ def test_drive_csv_cli_sha256_metadata(
 ) -> None:
     core = _stub_core(tmp_path)
     source = tmp_path / "source.csv"
-    source.write_bytes(b"name,url\\nA,https://example.com\\n")
+    source.write_bytes(b"name,url\nA,https://example.com\n")
     destination = tmp_path / "targets.csv"
     base = [
-        "gws.py", "project", "--drive-csv", str(source), "--drive-size",
-        str(source.stat().st_size), "--targets", str(destination),
-        "--core-skill-dir", str(core),
+        "gws.py",
+        "project",
+        "--drive-csv",
+        str(source),
+        "--drive-size",
+        str(source.stat().st_size),
+        "--targets",
+        str(destination),
+        "--core-skill-dir",
+        str(core),
     ]
     monkeypatch.setattr(sys, "argv", [*base, "--drive-sha256", "0" * 64])
     with pytest.raises(SystemExit) as exc:
@@ -618,14 +625,19 @@ def test_drive_csv_cli_sha256_metadata(
     assert "SHA-256 mismatch" in capsys.readouterr().err
     assert not destination.exists()
     monkeypatch.setattr(
-        sys, "argv", [*base, "--drive-sha256", hashlib.sha256(source.read_bytes()).hexdigest()]
+        sys,
+        "argv",
+        [*base, "--drive-sha256", hashlib.sha256(source.read_bytes()).hexdigest()],
     )
     gws.main()
     assert json.loads(capsys.readouterr().out) == {"target_groups": 1}
     monkeypatch.setattr(
         sys, "argv",
-        ["gws.py", "project", "--csv", str(source), "--drive-sha256", "0" * 64,
-         "--targets", str(destination), "--core-skill-dir", str(core)],
+        [
+            "gws.py", "project", "--csv", str(source),
+            "--drive-sha256", "0" * 64,
+            "--targets", str(destination), "--core-skill-dir", str(core),
+        ],
     )
     with pytest.raises(SystemExit):
         gws.main()
@@ -639,12 +651,14 @@ def test_compare_transfer_cli(
 ) -> None:
     source = tmp_path / "a.zip"
     downloaded = tmp_path / "b.zip"
-    source.write_bytes(b"\\0\\xffsnapshot")
+    source.write_bytes(b"\0\xffsnapshot")
     downloaded.write_bytes(source.read_bytes())
     monkeypatch.setattr(
         sys, "argv",
-        ["gws.py", "compare-transfer", "--source", str(source),
-         "--downloaded", str(downloaded)],
+        [
+            "gws.py", "compare-transfer", "--source", str(source),
+            "--downloaded", str(downloaded),
+        ],
     )
     gws.main()
     assert json.loads(capsys.readouterr().out) == gws.compare_transfer(
