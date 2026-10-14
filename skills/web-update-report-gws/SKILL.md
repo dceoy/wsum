@@ -2,7 +2,7 @@
 name: web-update-report-gws
 description: Orchestrate monitoring, research, and Drive reports using a CSV/Spreadsheet and Drive folder, with optional common context from a prompt, Google Doc, or Markdown file.
 license: MIT
-compatibility: Requires installed monitor/research skills, scratch storage, Google Sheets reads for Spreadsheet inputs, and Google Drive read/write and binary transfer. When a context source is supplied, full authenticated Docs/Drive reads are required.
+compatibility: Requires installed monitor/research skills, scratch storage, Google Sheets reads for Spreadsheet inputs, and Google Drive read/write with local-file-backed binary transfer (no model-mediated base64). When a context source is supplied, full authenticated Docs/Drive reads are required.
 ---
 
 # Google Workspace Web Update Report Orchestrator
@@ -10,6 +10,43 @@ compatibility: Requires installed monitor/research skills, scratch storage, Goog
 Use this **entrypoint and orchestrator** with **two required resource inputs**: one targets table (CSV or Google Spreadsheet) and one existing Google Drive output folder. An optional, run-wide **common context** may be supplied inline or loaded from a selected Google Doc or Drive-hosted Markdown file; it may also be omitted entirely. It discovers input table details, invokes `web-update-monitor` then `web-update-research` only for material updates, commits the resulting canonical reports, and manages its own `workspaces/` and `reports/` subfolders. Do not ask users to run either child skill separately.
 
 Keep Google integration outside both child skills. `web-update-monitor` owns fetching, normalized baselines, pending transactions, materiality rules, finalization, and the single canonical run report. `web-update-research` consumes a **material, validated pending review** and returns only a citation-backed Markdown section. This orchestrator owns the sequence, CSV/Sheet projection, all child invocations, Google Drive persistence, completion checks, and idempotent Markdown delivery. No second research state or report queue is introduced.
+
+## Mandatory transport preflight (before any input download or workspace mutation)
+
+**Fail closed unless the actual runtime exposes a byte-preserving, local-file-backed
+upload AND download route.** A connector that only accepts/returns a base64 string
+in the agent's tool-call text is **not compatible**, regardless of payload size.
+Never transcribe, regenerate, chunk, print, or paste base64, decoded binary, or
+rendered file text through the model; do not use shell `base64 -d` on
+model-written content as a fallback. Successfully decoding or parsing such
+content does not establish integrity (including for syntactically valid CSV).
+
+The transfer route may use a connector that reads/writes **local file paths**,
+a genuine file-reference handoff that materializes bytes directly to/from local
+files without model transcription, or an authenticated/mounted Drive directory
+providing equivalent byte-preserving file operations. Verify that the same route
+can upload and download by exact Drive ID and handle **at least 1 MiB** in each
+direction, as well as the expected actual snapshot size (up to the local
+archive limit). A `file_id` that only returns inline base64 text does **not**
+qualify. Verify the transport's actual interface, not the tool names or claims.
+
+Perform this capability check **first**, before retrieving the Drive CSV,
+loading file-backed context, restoring a snapshot, creating managed folders,
+or performing any operational Drive writes. Missing/uncertain support means
+stop immediately, identify the unsupported upload/download direction and
+recommend a file-backed connector or mounted Drive route. Do not attempt a
+smaller payload, switch to text extraction, or treat checksum/size validation
+as a substitute for trustworthy transport.
+
+After the capability check passes, perform the disposable 10 KiB / 100 KiB /
+1 MiB ZIP round trips in the Routines gate below. Stage upload sources and
+downloaded files directly on disk, and invoke `gws.py compare-transfer`
+for each sample to compare size and SHA-256 **without putting bytes in the
+model context**. Also run `gws.py verify` for a downloaded sample archive.
+Only after all tests pass may operational Drive reads and writes proceed.
+Revalidate capability and run the gate on each new runtime/connector setup.
+This does not assert that the currently installed Cowork Google Drive MCP
+offers a usable binary transport.
 
 ## Optional common context (run-wide)
 
@@ -75,6 +112,8 @@ This order is mandatory for **both restored pending** and newly detected updates
 
 Routines must check its **actual installed connector tools**, not infer capabilities from
 the Google connection name. This skill is not a standalone Google API client.
+The mandatory file-backed transport preflight above is step zero and must pass
+before any Drive CSV retrieval, binding restore, or operational mutation.
 
 Before the first monitor run:
 
@@ -86,21 +125,24 @@ Before the first monitor run:
 2. Discover the input type from the supplied file, URL, or ID.
    For Spreadsheet inputs, require Sheets metadata (tab order) and **range/cell
    value read** (preserving row/column coordinates); Drive text extraction is
-   not a substitute. For Drive CSV inputs, require exact-ID binary download
+   not a substitute. For Drive CSV inputs, require exact-ID **file-backed** binary download
    instead; for local CSV inputs no Google Sheets connector is needed. If `Context source:` is supplied, verify full authenticated Google Docs body/plain-text export, or full exact-ID Drive Markdown download, as applicable; do not start monitoring if the required read is unavailable.
 3. Require Drive exact-ID folder/file metadata, complete direct-child listing
    with stable IDs and MIME types, folder creation under a specific parent,
-   exact-ID binary create/download/delete (snapshots), and exact-ID Markdown
+   exact-ID **file-backed** binary create/download/delete (snapshots), and exact-ID Markdown
    create/read/update (reports). Also require creating and downloading the
    immutable parent-level binding JSON by exact file ID. For Drive CSV inputs,
    require file size metadata (`size`).
    Do not assume these tools are available merely because the Google connector
    is enabled.
 4. Check the host agent's web-search and page-opening capabilities for `web-update-research`. If unavailable, label independently researched context as unavailable in fact-only material reports; do not invent sources.
-5. Execute a throwaway connector round-trip before operational writes:
-   create local ZIP samples of increasing size, upload each to a disposable
-   Drive folder, download by returned ID, compare byte length and SHA-256,
-   and run `gws.py verify`. Check at least 10 KiB, 100 KiB, and 1 MiB.
+5. **Only after the transport preflight succeeds**, execute a throwaway
+   connector round-trip before operational writes: create local ZIP samples of
+   increasing size, upload each directly from its local path to a disposable
+   Drive folder, download by returned ID directly to a local file, run
+   `gws.py compare-transfer --source <ORIGINAL> --downloaded <RETURNED>`
+   for byte length and SHA-256, and run `gws.py verify` on the ZIP.
+   Check at least 10 KiB, 100 KiB, and 1 MiB of *compressed ZIP bytes*.
    If any sample fails, **stop**; do not publish a report or create the
    monitor's initial snapshot. Tool-call success is not proof of byte integrity.
 6. Configure **one non-overlapping Routine per workspace key**. Drive snapshot
@@ -176,9 +218,13 @@ installed core's `load_targets` and replaces the cached projection atomically
 **only on success**. The CSV paths preserve original bytes and the core's
 1 MiB limit; the Sheet path builds the canonical CSV projection. The Drive CSV
 path compares downloaded byte length with the original Drive file's `size`
-metadata before staging any configuration. This rejects valid-CSV row
-truncation, but cannot detect equal-length corruption. Never substitute
-`--csv` for `--drive-csv` to bypass the size check.
+metadata before staging any configuration. When a **trusted, exact-source
+SHA-256 checksum** is available, additionally pass `--drive-sha256 <64-lowercase-hex>`
+to reject equal-length corruption. Do not invent a checksum, compute it from
+the potentially corrupted download, or require an unavailable Drive MD5 field.
+Size alone rejects truncation but **does not protect against same-length
+substitution**. Never substitute `--csv` for `--drive-csv` to bypass checks;
+never stage CSV bytes by transcribing a connector base64 or text display.
 
 To persist any state-changing operation, save the complete current Drive
 workspace-folder listing as a JSON array of `{"name":"workspace-...zip","id":"Drive-file-ID"}`
@@ -199,10 +245,18 @@ python "$GWS_SKILL_DIR/scripts/gws.py" pack \
 ```
 
 Use the generation returned by the preceding command. The `pack` result
-contains local file byte length and SHA-256. Upload the ZIP **without text
-conversion**; download by its returned ID to a local path with the identical
-filename and compare against the `pack` result. Run `verify` on that
-download as well. Only then consider the snapshot committed, and delete old
+contains local file byte length and SHA-256. Upload the ZIP **directly from its local file** without model-mediated base64
+or text conversion; download by its returned ID **directly to a local file**
+with the identical filename and invoke:
+
+```bash
+python "$GWS_SKILL_DIR/scripts/gws.py" compare-transfer \\
+  --source "$SCRATCH/workspace-$GENERATION.zip" \\
+  --downloaded "$DOWNLOADED/workspace-$GENERATION.zip"
+```
+
+Require the reported size and SHA-256 to match the `pack` result. Run `verify`
+on that downloaded archive as well. Only then consider the snapshot committed, and delete old
 generations by exact file ID. Never treat a successful upload response alone
 as durable persistence. After every verified self-commit, replace the
 invocation-local expectation with the new filename and returned Drive ID
@@ -419,11 +473,15 @@ Resolve the supplied input on **every run**, before pending review or monitoring
 2. **Google Drive CSV URL or ID:** resolve one exact file ID, verify it is
    a binary CSV rather than a Google-native Sheet, and obtain its `size`
    metadata. Missing, invalid, or unsupported size access blocks monitoring.
-   Download the exact file bytes by ID; provide the metadata value to
+   Download the exact file bytes by ID **directly into a local file without
+   passing binary/base64 text through the agent**; provide the metadata value to
    `project --drive-csv --drive-size` so the helper rejects truncated CSVs
-   (including those ending at valid record boundaries). Re-read the file ID
-   and size after download and require the same size and file version if
-   exposed. Size checks cannot detect equal-length corruption. Do not use
+   (including those ending at valid record boundaries). If a trusted SHA-256
+   exists for that exact Drive revision, also pass `--drive-sha256`. Re-read
+   the file ID and size after download and require the same size and file
+   version if exposed. Without a trustworthy source digest, size checks cannot
+   detect equal-length corruption; file-backed transport is still mandatory.
+   Do not use
    Drive text extraction, Sheets export, or `--csv` as a bypass.
 3. **Google Spreadsheet URL or ID:** resolve the exact spreadsheet ID and
    retrieve sheet metadata and values through the Sheets connector. Unless
@@ -581,7 +639,8 @@ Do not convert the report to a Google Doc or create an additional presentation c
 
 - Parent binding missing with existing child folders, or binding checksum/schema/ID mismatch, or bound workspace snapshots missing: stop without creating replacement state. Do not bypass the binding during recovery.
 - Drive parent or child folder resolution failure (missing capabilities, inaccessible parent, incomplete listing, duplicate names, non-folder match, or uncertain create result): stop without initializing a workspace, fetching targets, publishing reports, or deleting Drive files.
-- Drive CSV size metadata, byte-length, or stable-version comparison failure: never project the partial CSV, resume pending reviews, or fetch targets.
+- Drive binary transfer capability absent or model-mediated base64 only: stop during preflight before downloading inputs or mutating Drive; no text fallback.
+- Drive CSV size metadata, byte-length, optional SHA-256, or stable-version comparison failure: never project the partial CSV, resume pending reviews, or fetch targets.
 - CSV/Spreadsheet source or projection failure: do not replace the restored/cached CSV or start new fetches.
 - Workspace ZIP or manifest validation failure: do not start from an empty baseline and do not silently fall back to an older snapshot.
 - Pending review exists: first reconcile it against the current authoritative targets projection, discard it if removed or disabled, otherwise resume it through the core API without refetching that target.
