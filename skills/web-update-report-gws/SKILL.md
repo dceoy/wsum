@@ -142,7 +142,7 @@ Before the first monitor run:
    Drive folder, download by returned ID directly to a local file, run
    `gws.py compare-transfer --source <ORIGINAL> --downloaded <RETURNED>`
    for byte length and SHA-256, and run `gws.py verify` on the ZIP.
-   Check at least 10 KiB, 100 KiB, and 1 MiB of *compressed ZIP bytes*.
+   Check at least 10 KiB, 100 KiB, and 1 MiB of _compressed ZIP bytes_.
    If any sample fails, **stop**; do not publish a report or create the
    monitor's initial snapshot. Tool-call success is not proof of byte integrity.
 6. Configure **one non-overlapping Routine per workspace key**. Drive snapshot
