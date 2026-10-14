@@ -93,7 +93,7 @@ Before the first monitor run:
    exact-ID binary create/download/delete (snapshots), and exact-ID Markdown
    create/read/update (reports). Also require creating and downloading the
    immutable parent-level binding JSON by exact file ID. For Drive CSV inputs,
-   require file size and MD5 checksum metadata (`size`, `md5Checksum`).
+   require file size metadata (`size`).
    Do not assume these tools are available merely because the Google connector
    is enabled.
 4. Check the host agent's web-search and page-opening capabilities for `web-update-research`. If unavailable, label independently researched context as unavailable in fact-only material reports; do not invent sources.
@@ -166,7 +166,7 @@ python "$GWS_SKILL_DIR/scripts/gws.py" project \
 # Google Drive CSV, downloaded by its exact file ID
 python "$GWS_SKILL_DIR/scripts/gws.py" project \
   --drive-csv "$SOURCE_CSV" \
-  --drive-size "$DRIVE_CSV_SIZE" --drive-md5 "$DRIVE_CSV_MD5" \
+  --drive-size "$DRIVE_CSV_SIZE" \
   --targets "$WORKSPACE/internal/gws/targets.csv" \
   --core-skill-dir "$WEB_UPDATE_MONITOR_SKILL_DIR"
 ```
@@ -175,10 +175,10 @@ Use exactly one source option. The helper validates the staged CSV with the
 installed core's `load_targets` and replaces the cached projection atomically
 **only on success**. The CSV paths preserve original bytes and the core's
 1 MiB limit; the Sheet path builds the canonical CSV projection. The Drive CSV
-path additionally compares byte length and MD5 of the **same downloaded bytes**
-against the original Drive file's metadata before staging any configuration.
-These checks detect valid-CSV row truncation as well as equal-length corruption.
-Never substitute `--csv` for `--drive-csv` to bypass integrity checking.
+path compares downloaded byte length with the original Drive file's `size`
+metadata before staging any configuration. This rejects valid-CSV row
+truncation, but cannot detect equal-length corruption. Never substitute
+`--csv` for `--drive-csv` to bypass the size check.
 
 To persist any state-changing operation, save the complete current Drive
 workspace-folder listing as a JSON array of `{"name":"workspace-...zip","id":"Drive-file-ID"}`
@@ -417,15 +417,14 @@ Resolve the supplied input on **every run**, before pending review or monitoring
 1. **Local CSV path:** require an existing regular `.csv` file in the
    Routine's accessible filesystem; read it as bytes.
 2. **Google Drive CSV URL or ID:** resolve one exact file ID, verify it is
-   a binary CSV rather than a Google-native Sheet, and obtain its `size` and
-   `md5Checksum` metadata (a full 32-hex MD5). These fields are **required**:
-   missing, invalid, or unsupported checksum/size access blocks monitoring.
-   Download the exact file bytes by ID; provide both metadata values to
-   `project --drive-csv --drive-size --drive-md5` so the helper rejects a
-   truncated CSV (even if it ends at a valid record boundary) or same-size
-   corruption. Re-read file ID and metadata after download and require the
-   same size, checksum, and file version if exposed. Do not use Drive text
-   extraction, Sheets export, or `--csv` as a bypass.
+   a binary CSV rather than a Google-native Sheet, and obtain its `size`
+   metadata. Missing, invalid, or unsupported size access blocks monitoring.
+   Download the exact file bytes by ID; provide the metadata value to
+   `project --drive-csv --drive-size` so the helper rejects truncated CSVs
+   (including those ending at valid record boundaries). Re-read the file ID
+   and size after download and require the same size and file version if
+   exposed. Size checks cannot detect equal-length corruption. Do not use
+   Drive text extraction, Sheets export, or `--csv` as a bypass.
 3. **Google Spreadsheet URL or ID:** resolve the exact spreadsheet ID and
    retrieve sheet metadata and values through the Sheets connector. Unless
    the user optionally selected a tab/range, choose the **first grid worksheet
@@ -582,7 +581,7 @@ Do not convert the report to a Google Doc or create an additional presentation c
 
 - Parent binding missing with existing child folders, or binding checksum/schema/ID mismatch, or bound workspace snapshots missing: stop without creating replacement state. Do not bypass the binding during recovery.
 - Drive parent or child folder resolution failure (missing capabilities, inaccessible parent, incomplete listing, duplicate names, non-folder match, or uncertain create result): stop without initializing a workspace, fetching targets, publishing reports, or deleting Drive files.
-- Drive CSV metadata, byte-length, MD5, or stable-version comparison failure: never project the partial CSV, resume pending reviews, or fetch targets.
+- Drive CSV size metadata, byte-length, or stable-version comparison failure: never project the partial CSV, resume pending reviews, or fetch targets.
 - CSV/Spreadsheet source or projection failure: do not replace the restored/cached CSV or start new fetches.
 - Workspace ZIP or manifest validation failure: do not start from an empty baseline and do not silently fall back to an older snapshot.
 - Pending review exists: first reconcile it against the current authoritative targets projection, discard it if removed or disabled, otherwise resume it through the core API without refetching that target.

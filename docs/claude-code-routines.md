@@ -12,7 +12,7 @@ the checks below.
 2. Supply the **two required resources**: (a) an input targets table (local CSV path, Drive CSV URL/ID,
    or Google Spreadsheet URL/ID) and (b) one existing Drive **output folder**
    URL/ID. You may omit common context entirely, or optionally include **either** `Common context:` inline or `Context source:` selecting a Google Doc or Drive Markdown file. For a Spreadsheet, enable the Sheets connector; for Drive-hosted
-   CSV, require binary download plus `size` and `md5Checksum` metadata.
+   CSV, require binary download plus `size` metadata.
    The output folder must permit child listing, `workspaces/` and `reports/`
    creation, and an immutable binding JSON at the parent level.
 3. Configure a Python 3.11+ environment with `pypdf` installed (e.g. `uv sync`
@@ -29,7 +29,7 @@ the checks below.
 | Resource                        | Required operations                                                                        |
 | ------------------------------- | ------------------------------------------------------------------------------------------ |
 | Sheets (Spreadsheet input only) | Read spreadsheet metadata (ordered tabs), and range values preserving row/column positions |
-| Input Drive CSV (when used)     | Read exact-ID file size, MD5 checksum and version; download complete CSV bytes by ID       |
+| Input Drive CSV (when used)     | Read exact-ID file size and version; download complete CSV bytes by ID                     |
 | Drive output                    | Read folder by ID; list children with IDs/MIME; create folders and immutable binding file  |
 | Drive workspaces                | List all files with IDs; create binary ZIP; download binary by ID; delete by ID            |
 | Drive reports                   | Search exact name; create Markdown; download by ID; update existing file by ID             |
@@ -101,8 +101,8 @@ is insufficient. Delete all throwaway files when done.
   selected via metadata and its entire used range can be read, preserving
   headers, empty cells, duplicate URLs, multiline text and disabled rows.
   For a local CSV, validate its exact bytes with the core loader. For a Drive
-  CSV, require `size` and `md5Checksum`, download by exact ID, and validate
-  both fields against the downloaded bytes **before** projecting the CSV.
+  CSV, require `size`, download by exact ID, and compare the downloaded
+  byte length with that metadata **before** projecting the CSV.
 - List the exact output folder's complete direct children. For a new monitor
   require **no** existing `workspaces`, `reports` or binding file. Create both
   child folders by parent ID and re-list to verify their IDs. An existing
@@ -163,13 +163,14 @@ is insufficient. Delete all throwaway files when done.
    CSV, unavailable input, wrong spreadsheet tab, and invalid headers without
    changing the cached projection or resuming pending reviews.
 10. Download a syntactically valid **row-truncated Drive CSV** and require the
-    expected-size/MD5 verification to reject it before reconciling pending
-    state. Also reject equal-size altered CSV and missing checksum metadata.
+    expected-size verification to reject it before reconciling pending
+    state. Also reject missing or invalid size metadata. Equal-size altered
+    CSV cannot be detected by the size check alone.
 
 ## Failure policy
 
 Fail closed on missing connector capabilities, missing/mismatched folder bindings,
-ambiguous parent/child IDs, damaged binaries, missing or mismatched CSV checksum,
+ambiguous parent/child IDs, damaged binaries, missing or mismatched CSV size,
 validation errors, stale input projection, or a conflicting writer. Do not store
 Google tokens, cookies, or API secrets in workspace ZIPs.
 Keep connector and monitoring errors distinct.
