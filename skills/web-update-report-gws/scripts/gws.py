@@ -232,12 +232,17 @@ def project_csv(
     core_skill: Path,
     *,
     drive_size: int | None = None,
+    drive_sha256: str | None = None,
 ) -> int:
     """Validate local or Drive CSV bytes before atomically replacing targets."""
     if drive_size is not None and (
         isinstance(drive_size, bool) or drive_size <= 0 or drive_size > MAX_TARGET_CSV
     ):
         raise GwsError("invalid Drive CSV size metadata")
+    if drive_sha256 is not None and (
+        not isinstance(drive_sha256, str) or not SHA_RE.fullmatch(drive_sha256)
+    ):
+        raise GwsError("invalid Drive CSV SHA-256 metadata")
     if source.is_symlink() or not source.is_file():
         raise GwsError("CSV input must be an existing regular file")
     with source.open("rb") as stream:
@@ -246,6 +251,8 @@ def project_csv(
         raise GwsError("CSV input exceeds 1 MiB")
     if drive_size is not None and len(content) != drive_size:
         raise GwsError("Drive CSV download size mismatch")
+    if drive_sha256 is not None and _digest(content) != drive_sha256:
+        raise GwsError("Drive CSV download SHA-256 mismatch")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         dir=destination.parent, prefix=".tmp-", delete=False
@@ -260,6 +267,20 @@ def project_csv(
         return len(targets)
     finally:
         temp.unlink(missing_ok=True)
+
+
+def compare_transfer(source: Path, downloaded: Path) -> dict[str, typing.Any]:
+    """Compare file-backed round-trip bytes without passing payloads to the model."""
+    results = []
+    for path in (source, downloaded):
+        if path.is_symlink() or not path.is_file():
+            raise GwsError("transfer input must be an existing regular file")
+        with path.open("rb") as stream:
+            results.append(_stream_digest(stream, MAX_ZIP, "transfer size limit exceeded"))
+    if results[0] != results[1]:
+        raise GwsError("Drive transfer size or SHA-256 mismatch")
+    size, digest = results[0]
+    return {"size": size, "sha256": digest}
 
 
 def folder_binding(
@@ -620,8 +641,12 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--csv", type=Path)
     source.add_argument("--drive-csv", type=Path)
     p.add_argument("--drive-size", type=int)
+    p.add_argument("--drive-sha256")
     p.add_argument("--targets", type=Path, required=True)
     p.add_argument("--core-skill-dir", type=Path, required=True)
+    p = commands.add_parser("compare-transfer")
+    p.add_argument("--source", type=Path, required=True)
+    p.add_argument("--downloaded", type=Path, required=True)
     p = commands.add_parser("folder-binding")
     p.add_argument("--file", type=Path, required=True)
     p.add_argument("--parent-id", required=True)
@@ -659,6 +684,8 @@ def main() -> None:
                 raise GwsError("Drive CSV metadata requires --drive-csv")
             if args.drive_csv is not None and args.drive_size is None:
                 raise GwsError("Drive CSV requires --drive-size")
+            if args.drive_csv is None and args.drive_sha256 is not None:
+                raise GwsError("Drive CSV SHA-256 metadata requires --drive-csv")
             result = {
                 "target_groups": (
                     project(args.sheet_json, args.targets, args.core_skill_dir)
@@ -668,9 +695,12 @@ def main() -> None:
                         args.targets,
                         args.core_skill_dir,
                         drive_size=args.drive_size,
+                        drive_sha256=args.drive_sha256,
                     )
                 )
             }
+        elif args.command == "compare-transfer":
+            result = compare_transfer(args.source, args.downloaded)
         elif args.command == "folder-binding":
             result = binding_file(
                 args.file,
