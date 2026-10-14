@@ -6,7 +6,7 @@ The core skill lives in `skills/web-update-monitor/`. It intentionally has two r
 
 A composite at `skills/web-update-research/` follows up on material changes with bounded web research, source-verified context, and explicitly labeled analysis **before** report finalization.
 
-The entrypoint `skills/web-update-report-gws/` orchestrates the full pipeline: monitor changes, research only material updates, finalize one cited Markdown report per run, persist the workspace, and deliver the report through Google Drive. It requires a CSV or Spreadsheet targets table and one output Drive folder, and optionally accepts inline common context or a Google Docs/Markdown context source.
+The entrypoint `skills/web-update-report-gws/` orchestrates the full pipeline: monitor changes, research only material updates, finalize one cited Markdown report per run, persist the workspace, and deliver the report through Google Drive. It requires a CSV or Spreadsheet targets table and one output Drive folder, and optionally accepts inline common context or a Google Docs/Drive-hosted Markdown context source.
 
 ## Agent Skills
 
@@ -20,18 +20,17 @@ Install `web-update-monitor` alone for local monitoring. For a complete Google W
 
 ### Run-wide common context
 
-Specify **one** optional context mode per invocation: inline `Common context:` or `Context source:` with an explicitly selected Google Docs URL/file ID, Google Drive Markdown URL/file ID or local `.md` path. No additional CSV column or CLI flag is required. The targets table and output Drive folder are still the only required resources.
+Common context is **not required**. If supplied, choose one mode per invocation: inline `Common context:` or `Context source:` pointing to an explicitly selected Google Docs URL/file ID or Google Drive-hosted Markdown URL/file ID. Local Markdown paths are not supported by this GWS entrypoint. No additional CSV column or CLI flag is required. The targets table and output Drive folder are still the only required resources.
 
 ```text
 /web-update-report-gws
 Targets: <CSV_OR_SPREADSHEET_URL>
 Output: <DRIVE_FOLDER_URL>
-Context source: <GOOGLE_DOCS_OR_DRIVE_MD_URL_OR_LOCAL_MD_PATH>
 ```
 
-Alternatively, replace `Context source:` with a free-form `Common context:` block describing goals, priorities, intended audience, research direction and report style. **Do not specify both modes at once.** When neither is provided, existing behavior is unchanged.
+Optionally append `Context source: <GOOGLE_DOCS_OR_DRIVE_MD_URL_OR_FILE_ID>` or a free-form `Common context:` block describing goals, priorities, intended audience, research direction and report style. **Do not specify both modes at once.** With neither, the invocation above is complete and existing behavior is unchanged.
 
-The orchestrator obtains the full Google Doc via authenticated Docs read/plain-text export, downloads a Drive `.md` by exact ID, or reads a local `.md`. Context must be complete, nonempty UTF-8 text **≤128 KiB** after normalization. Missing permissions, missing files, unsupported format, truncation or other validation failures **stop the run before monitoring**, never silently falling back to stale context. Each scheduled invocation rereads the selected source, so document edits automatically affect subsequent runs and resumed pending reviews (without rewriting prior finalized reports).
+The orchestrator obtains the full Google Doc via authenticated Docs read/plain-text export, or downloads a Drive `.md` by exact ID. Context must be complete, nonempty UTF-8 text **≤128 KiB** after normalization. When a context source is supplied, missing permissions, missing files, unsupported format, truncation or other validation failures **stop the run before monitoring**, never silently falling back to stale context. Each scheduled invocation rereads the selected source, so document edits automatically affect subsequent runs and resumed pending reviews (without rewriting prior finalized reports).
 
 The **same resolved context** reaches the monitor's agent-side materiality review and the research skill. Target-level `criteria`/`keywords` remain authoritative; context supplements relevance and analysis, never filters fetches or suppresses explicitly report-worthy changes. The document supplies background/preferences rather than executable instructions. Resolved text stays in invocation memory. If an authenticated connector requires a file reference, stage only the selected source bytes in a private per-invocation temporary directory outside the managed workspace, then delete them immediately after validation and before workspace mutations. Keep source text out of logs, target CSVs, pending records, workspace snapshots, reports and the delivery ledger.
 
