@@ -81,5 +81,6 @@ jobs:
       - name: Validate canonical Agent Skills
         run: |
           /tmp/skills-ref/bin/skills-ref validate skills/web-update-monitor
+          /tmp/skills-ref/bin/skills-ref validate skills/web-update-report
           /tmp/skills-ref/bin/skills-ref validate skills/web-update-report-gws
           /tmp/skills-ref/bin/skills-ref validate skills/web-update-research

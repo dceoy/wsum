@@ -1,15 +1,15 @@
 ---
 name: web-update-report-gws
-description: Orchestrate monitoring, research, and Drive reports using a CSV/Spreadsheet and Drive folder, with optional common context from a prompt, Google Doc, or Markdown file.
+description: Wrap web-update-report with CSV/Spreadsheet input projection, verified Google Drive workspace persistence and report delivery, and optional inline or Google Docs/Markdown common context.
 license: MIT
-compatibility: Requires installed monitor/research skills, scratch storage, Google Sheets reads for Spreadsheet inputs, and Google Drive read/write for reports and workspace text files. When a context source is supplied, full authenticated Docs/Drive reads are required.
+compatibility: Requires installed web-update-report, web-update-monitor, and web-update-research skills, scratch storage, Google Sheets reads for Spreadsheet inputs, and Google Drive read/write for reports and workspace text files. When a context source is supplied, full authenticated Docs/Drive reads are required.
 ---
 
-# Google Workspace Web Update Report Orchestrator
+# Google Workspace Web Update Report Wrapper
 
-Use this **entrypoint and orchestrator** with **two required resource inputs**: one targets table (CSV or Google Spreadsheet) and one existing Google Drive output folder. An optional, run-wide **common context** may be supplied inline or loaded from a selected Google Doc or Drive-hosted Markdown file; it may also be omitted entirely. It discovers input table details, invokes `web-update-monitor` then `web-update-research` only for material updates, commits the resulting canonical reports, and manages its own `workspaces/` and `reports/` subfolders. Do not ask users to run either child skill separately.
+Use this Google Workspace entrypoint with two required resources: one targets table (local CSV, Drive CSV, or Google Spreadsheet) and one existing Google Drive output folder. Optionally accept inline common context or an explicit Google Doc/Drive Markdown context source. This wrapper restores the workspace, projects current input, invokes `web-update-report` for the complete local reporting workflow, persists every core transition, and delivers completed canonical Markdown reports. Do not ask users to invoke child skills separately.
 
-Keep Google integration outside both child skills. `web-update-monitor` owns fetching, normalized baselines, pending transactions, materiality rules, finalization, and the single canonical run report. `web-update-research` consumes a **material, validated pending review** and returns only a citation-backed Markdown section. This orchestrator owns the sequence, CSV/Sheet projection, all child invocations, Google Drive persistence, completion checks, and idempotent Markdown delivery. No second research state or report queue is introduced.
+`web-update-report` owns monitor → materiality → research → finalize through `web-update-monitor` and `web-update-research`. This wrapper owns only Google input/context resolution, workspace transport, synchronous persistence handoffs, completion checks, and idempotent delivery. Keep Google integration outside all three local skills and introduce no second semantic journal, research state, or report queue.
 
 ## Google Drive connector Base64 contract (Cowork-compatible)
 
@@ -81,7 +81,7 @@ With neither, keep the existing target-driven behavior. Reject both modes togeth
 
 ### Apply supplied context
 
-Pass the **same complete text** to `web-update-monitor`'s agent-side materiality review for every enabled interest (including resumed pending reviews) and to `web-update-research` for material updates. It guides relevance and reporting but never overrides the current `criteria`/`keywords`, adds or disables targets, changes fetch/traversal, suppresses explicitly material changes, or alters transaction state. When context is absent, call both skills as before. Do not re-finalize previous reports.
+Pass the **same complete text** as resolved inline common context to `web-update-report`, which forwards it to every monitor materiality review (including resumed reviews) and to research for material updates. Do not forward the Google source reference or scratch path. It guides relevance and reporting but never overrides the current `criteria`/`keywords`, adds or disables targets, changes fetch/traversal, suppresses explicitly material changes, or alters transaction state. When context is absent, invoke the local skill without context. Do not re-finalize previous reports.
 
 ## Architecture
 
@@ -92,15 +92,19 @@ flowchart LR
     DP --> DR["reports/"]
     DS <-->|restore / persist| WS["workspace snapshot"]
     WS --> WORKSPACE["output/ + internal/"]
-    CSV --> ORCH["web-update-report-gws orchestrator"]
-    WORKSPACE --> ORCH
+    CSV --> GWS["web-update-report-gws wrapper"]
+    GWS --> ORCH["web-update-report: local orchestration"]
+    WORKSPACE --> GWS
+    ORCH -->|after every core call| GWS
+    GWS -->|verified snapshot / resume| ORCH
     ORCH --> CORE["web-update-monitor: check / pending / materiality"]
     CORE -->|material review only| RESEARCH["web-update-research: search / synthesis"]
     RESEARCH -->|one Markdown section| ORCH
     ORCH -->|finalize once per URL| CORE
     CORE --> WORKSPACE
     CORE --> REPORT["output/report/<run-id>.md"]
-    REPORT -->|run complete| GMD["Drive Markdown file"]
+    REPORT -->|run complete| GWS
+    GWS --> GMD["Drive Markdown file"]
     GMD -->|verify| DELIVERY["internal/gws/delivery.json"]
     GMD --> DR
 ```
@@ -111,21 +115,19 @@ The Drive workspaces folder retains three verified manifests and their text payl
 
 ## Required orchestration (single entrypoint)
 
-Call `web-update-report-gws` once per run; **it owns every child-skill invocation**. Resolve both installed child skills before starting. Follow this exact, resumable order:
+Call `web-update-report-gws` once per run. Resolve the installed `web-update-report`, `web-update-monitor`, and `web-update-research` skills before starting; read the local orchestrator's instructions. Follow this resumable sequence:
 
-1. **Resolve and validate optional inline or file-backed common context** using the contract above before any workspace mutation. Then **restore and validate** the immutable Drive folder binding, newest verified workspace text snapshot, GWS delivery ledger, and currently selected CSV or Spreadsheet. Project the table to `internal/gws/targets.csv`; never use an old projection when current input fails.
-2. **Resume first**: enumerate and reconcile saved pending reviews using the monitor's public `pending`/`discard` interface. Never read or mutate `internal/state/` directly, and persist after every state change. Then run `web-update-monitor`'s `check --compact` for new updates. A pending target is not refetched.
-3. **Handle check results**: process every target outcome. For `agent_fetch_required` (static HTTP 403), use the core's exact **Recover HTTP 403 with main-agent Web fetch** procedure: fetch the returned final URL with the main agent, save only the fetched source content, and invoke monitor `ingest` with the original `run_id`/`target_id`, returned `link_depth`/`max_links`, and source URL (plus complete navigation links when available). Then persist the resulting workspace state and process an `ingest` `review` via `pending`. Never treat a 403 from Routine egress policy as a website 403 or bypass it. If agent fetch fails, report the target failure and leave its baseline unchanged. Handle `review`, `baseline_created`, `unchanged`, `skipped`, `error`, and `snapshot_conflict` per the core; do not silently omit any result.
-4. **Determine materiality**: for each valid review handle call `pending --target-id` with the current projected CSV, examine parent diff and linked evidence for all enabled interests **in light of the invocation's common context, when supplied**, and make exactly one URL-scoped materiality decision. When supplied, pass the **resolved full context text** explicitly to the monitor's agent-side semantic review; the enabled interests' criteria remain authoritative and context cannot veto changes already meeting them. The monitoring rules remain authoritative. If non-material, call monitor `finalize` with `material: false` and no report. Honor `manual_review_required` for incomplete non-material evidence.
-5. **Research material updates only**: pass the exact current pending review (including `target_id`, `revision`, `run_id`, URL, interests, diff, and link evidence/completeness flags), the materiality decision, the **same complete invocation common context (if any)**, and the output-report language/instructions to `web-update-research`. It performs bounded web search and **returns one Markdown level-two section**, keeping observed changes, external verification, and inference separate. **It must not call monitor, finalize, write files, or deliver to Drive.**
-6. **Commit once**: validate that the returned section references the monitored URL and affected interests, distinguishes fact from inference, contains source links or explicit verification limits, and fits the core report limits. Then the orchestrator alone calls monitor `finalize` with the unchanged `target_id`, `revision`, `material: true`, and `report` section. On an apparently transient external search/page-read error, make at most one immediate retry before using a properly qualified **fact-only** section; when search capability is unavailable or unavailable due to policy, do not retry. Never drop a material observation or modify an already delivered report. Respect `snapshot_conflict` and recovery rules. Persist the complete workspace text snapshot after the transition.
-7. **Publish completed runs only**: no Drive report is sent while any pending review from that `run_id` remains. Deliver the canonical `output/report/<run-id>.md` exactly as written by the monitor; read back and verify its hash before recording `internal/gws/delivery.json`. Never enrich, edit, or overwrite a previously delivered canonical report merely because further research becomes available.
+1. Resolve and validate optional common context before any workspace mutation. Restore and validate the immutable Drive folder binding, newest verified text snapshot, and delivery ledger; initialize only for a genuinely fresh output folder. Acquire and validate the current selected CSV/Spreadsheet, projecting it to `internal/gws/targets.csv`. Persist initialization/projection before invoking local monitoring; never use an old projection when current input fails.
+2. **Invoke `web-update-report`**, supplying the restored `WORKSPACE`, validated `TARGETS_CSV`, complete resolved inline context if present, output language/instructions, and the **required synchronous persistence handoff** below. It reconciles/resumes pending reviews, checks targets, recovers website HTTP 403 through monitor ingest, judges materiality, researches material updates, and finalizes once per URL. Follow that skill rather than running a parallel monitoring loop here.
+3. **Persist during the invocation.** After every core `pending` (list/detail), `check`, `ingest`, `discard`, and `finalize`, receive control and run **Persist the complete cross-run workspace** below. Acknowledge success and return control only after the new snapshot verifies and the expected active identity is updated. Even pending inspection can recover writes; checkpoint error returns too. If persistence fails, stop local orchestration and delivery. Do not wait until the local skill returns to snapshot its changes.
+4. **Verify completion independently.** After the local workflow returns, refresh public pending state with the current targets projection and persist this command's possible recovery writes through the same handoff. Defer any report whose run ID remains pending; any `blocked` recovery entry with unknown run ID defers all delivery. Local completion does not establish Drive durability.
+5. **Publish completed runs only.** Enumerate canonical `output/report/<run-id>.md` files, including undelivered historical runs, and follow the exact-name lookup, read-back verification, and delivery ledger procedure below. Persist after recording delivery. Do not enrich, edit, or overwrite a previously delivered canonical report because later research becomes available.
 
-This order is mandatory for **both restored pending** and newly detected updates, including reviews created by `ingest` after `agent_fetch_required`. Materiality and finalization stay with the orchestrator via the core API; the research step is a side-effect-free drafting delegation. Do not call `web-update-research` for baseline, unchanged, skipped, failed, discarded, or non-material targets. A single run may contain multiple material URL sections, but generates **one** aggregated canonical Markdown report. The only required externally supplied resource inputs remain the targets table and the Drive output folder; common context may optionally be inline or supplied by an explicit source reference.
+The handoff is an agent-level procedure, not a new helper option or background job. This wrapper executes all Google operations; the local skill pauses until it receives a verified success or failure. One snapshot after the whole local invocation would lose the existing per-transition durability guarantee and is insufficient.
 
 ## Claude Code Routines
 
-The entrypoint uses the installed monitor/research skills, Python >=3.11 with
+The entrypoint uses the installed local report, monitor, and research skills, Python >=3.11 with
 `pypdf`, scratch storage, the selected Google Drive resources and (for
 Spreadsheet targets) Sheets cell-value reads. Resolve tools as needed rather
 than enumerating them in a mandatory preflight.
@@ -274,7 +276,7 @@ The **only required resource inputs** (prompt or Routine configuration) are:
 - **Output folder:** one existing Google Drive folder URL/ID, used as the parent of managed `workspaces/` and `reports/` folders.
 
 Optionally supply **either** inline `Common context:` **or** `Context source:` with one Google Doc/Drive Markdown URL or ID; local Markdown paths are not supported. When supplied, the orchestrator resolves and validates the text once before mutations and propagates it to monitoring judgment and research; it is not part of the targets table or persistent state. No worksheet name, range, workspace directory, state file, or report folder
-needs to be supplied. The agent discovers both installed skills and creates
+needs to be supplied. The agent discovers all three installed dependencies and creates
 a fresh local scratch workspace automatically on each invocation. An optional
 worksheet/range override can select a non-default tab.
 
@@ -425,11 +427,11 @@ detect stale sessions; they are not a lock or atomic compare-and-swap. Concurren
 writers are unsupported. Do not promise prevention of a race after the final
 listing check.
 
-## Resolve the core skill dependency
+## Resolve installed dependencies
 
-Resolve the installed `web-update-monitor` and `web-update-research` skills through runtime discovery. This skill is the orchestrator: it calls the monitor's API and delegates only material report drafting to `web-update-research`, as specified in **Required orchestration**. Read both installed skills' `SKILL.md` files. Record the resolved absolute skill root as `WEB_UPDATE_MONITOR_SKILL_DIR`.
+Discover `web-update-report`, `web-update-monitor`, and `web-update-research` independently. Read the installed local orchestrator and its dependencies. Record the monitor root as `WEB_UPDATE_MONITOR_SKILL_DIR` for CSV validation/projection and public pending completion checks. Invoke the local orchestrator with the handoff contract in **Required orchestration**; it owns all monitoring/research/finalization decisions.
 
-Do not assume the core package is a sibling of this composite package, and do not resolve `scripts/workspace.py` relative to this composite skill. Every core CLI invocation below must use the resolved core skill root.
+Do not assume installed packages are siblings or resolve core scripts relative to this wrapper. Every core command uses the resolved monitor root.
 
 ## Resolve the targets table (CSV or Google Spreadsheet)
 
@@ -495,71 +497,28 @@ copied byte-for-byte, including quoting and newlines, and validated by the core;
 unlike a Spreadsheet it does not ignore unknown columns. If fetching or validating
 either type fails, stop before resuming pending reviews or fetching new content.
 
-## Reconcile and resume before new work
+## Invoke the local reporting workflow
 
-After the current targets table has been projected successfully, use the already restored `output/` and `internal/` trees directly. The canonical `output/report/<run-id>.md` files are already durable because the complete `output/` tree is included in every committed workspace snapshot. Do not create a second composite-owned report queue or staging copy; `internal/gws/delivery.json` is the only composite-owned delivery state.
+After restore, ledger validation, current targets projection, and verified persistence, invoke the installed `web-update-report` with:
 
-List pending handles through the core API, passing the current projection so review metadata is refreshed from the current targets table:
+- `Workspace:` the restored local workspace.
+- `Targets:` `$WORKSPACE/internal/gws/targets.csv`, the current validated projection.
+- `Common context:` the complete resolved text, if supplied; never the Google source ID or deleted staging path.
+- Requested report language and run-level traversal limits, if supplied.
+- The required synchronous persistence handoff from **Required orchestration**.
+
+The local orchestrator owns pending reconciliation, current enabled-interest replacement, HTTP 403 fetch/ingest recovery, materiality, bounded research and fact-only fallback, finalization, and conflict/manual-review handling. Persist its core calls before allowing it to continue. The local skill's standalone mode must not be used to bypass this handoff.
+
+Use restored `output/` and `internal/` directly. Keep canonical reports only at `output/report/<run-id>.md`, and `internal/gws/delivery.json` as the only delivery state. Do not stage a second report queue. Missing/invalid current projection stops the workflow before pending reconciliation, fetching, or finalization, even if a cached CSV remains.
+
+To independently verify completion before delivery, use:
 
 ```bash
 python "$WEB_UPDATE_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSPACE" \
   --targets "$TARGETS_CSV" pending
 ```
 
-For each handle, fetch only that target's full review:
-
-```bash
-python "$WEB_UPDATE_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSPACE" \
-  --targets "$TARGETS_CSV" pending \
-  --target-id "<target-id>"
-```
-
-Reconcile against **all current rows for the exact trimmed URL**, not one matching row:
-
-- if the URL is absent from valid current projection, discard through core `discard`; a changed URL becomes a new target on the later check
-- if all interests for that URL are disabled, discard through core `discard`
-- if any interest is enabled, use the full review's complete current enabled `interests`, preserving each name's relationship to its criteria, keywords, publisher, category, and priority
-- replace the complete collection; never merge back stored, removed, or disabled interests or use saved metadata to override current input metadata
-- retain candidate bytes/hash, expected hash, bounded diff/link evidence, revision, and original `run_id`; metadata-only edits do not rewrite pending transactions or refetch pending targets
-- full reviews for valid removed/all-disabled URLs contain `interests=[]` even when a recovery handle remains; discard before semantic judgment
-- after each discard, commit the complete workspace as a new timestamped Drive workspace snapshot before continuing
-
-Follow **Required orchestration** above: this GWS skill judges the parent diff and linked evidence against every currently enabled interest, calls `web-update-research` **only after materiality is confirmed** to draft the section, and calls monitor `finalize` **itself**, exactly once per URL, with the existing `target_id,revision,material,report` contract and `--targets "$TARGETS_CSV"`. If research is unavailable, use a clearly qualified fact-only section. A change material to any enabled interest is material to the URL. Keywords never filter fetching, traversal, or materiality by exact match; priority never changes fetching, cadence, limits, or materiality. Preserve `manual_review_required` for a non-material decision with truncated/incomplete evidence. Never read `internal/state/pending/` directly or recreate review revisions in this composite.
-
-Missing/invalid projection is distinct from valid absence. Core `pending` may provide saved context for recovery inspection, but this automated workflow must obtain and completely validate the current targets table before any semantic judgment or finalization. A projection failure stops fetching and finalization, even if an older CSV is still present.
-
-After every finalize:
-
-- material: keep the complete canonical report only at `output/report/<run-id>.md`; do not copy or stage it elsewhere
-- non-material: create no report-delivery artifact
-- `manual_review_required`: leave the core transaction pending
-- `snapshot_conflict`: discard that stale core transaction with the core `discard` command so a later check can refetch it
-
-Commit the complete workspace as a new timestamped Drive workspace snapshot after each state-changing operation before relying on the local session. Once that snapshot verifies, any canonical report not yet recorded in the delivery ledger can be rediscovered and delivered after a later restart without a duplicate report queue.
-
-## Run the core monitor efficiently
-
-Use the compact core interface:
-
-```bash
-python "$WEB_UPDATE_MONITOR_SKILL_DIR/scripts/workspace.py" --workspace "$WORKSPACE" \
-  --targets "$TARGETS_CSV" check --compact
-```
-
-The core returns compact review handles instead of embedding every diff in the batch response. If a target already has a pending review, that target is not refetched; its existing handle is returned while unrelated targets continue to be checked. Link traversal defaults to `--link-depth 1 --max-links 100`; append either option to the core `check` invocation when the workflow needs a different run-level limit. Depth 0 disables linked-document fetching, and `--max-links` accepts 1 through 100.
-
-For each `agent_fetch_required` result, follow the core's **Recover HTTP 403 with main-agent Web fetch** section before materiality review. Use the exact final response URL, returned `run_id`, `target_id`, `link_depth`, and `max_links`, and feed the fetched content back through monitor `ingest`. Supply the complete `--links` manifest for extracted HTML text where available; incomplete navigation evidence must not be mistaken for a complete non-material review. Delete temporary source and link-manifest files once ingested, persist the workspace text snapshot after a state change, then retrieve the `review` with `pending --target-id`. An `ingest` baseline does not require research. Report and skip targets whose agent fetch fails; preserve their prior baselines. Do not use generic search-result snippets as source content.
-
-For each `review` handle, this GWS orchestrator calls `pending --target-id`, judges the parent and linked evidence against all current enabled interests, delegates **only material** report drafting to `web-update-research`, then calls monitor `finalize` itself once per URL. Do not research non-material updates. Preserve linked-document context with the rest of `internal/state/`; it requires no additional connector state or Spreadsheet columns.
-
-This keeps the connector/composite boundary small:
-
-- CSV is the only structured monitoring configuration input; optional common context is either inline trusted prompt text or full resolved text from an explicitly selected file
-- compact JSON handles cross the orchestration boundary
-- one bounded parent diff plus linked-document evidence is loaded only when actually reviewed
-- `internal/state/` remains the only core transaction/state representation, while the Drive snapshot persists the complete `output/` and `internal/` workspace roots
-- Markdown report files remain the canonical core output
-- the user-facing Drive report is the canonical Markdown content delivered without format conversion
+Persist after this invocation before delivery because it can recover interrupted writes. Read `reviews` and any `blocked` errors from the result; unresolved/blocked state is not successful completion.
 
 ## Track delivery without duplicating reports
 
@@ -580,7 +539,7 @@ Require `internal/gws/delivery.json` in every restored current-format workspace.
 
 ## Publish completed runs as Markdown files in Google Drive
 
-Do not publish a run while `pending` still lists any review with the same `run_id`. Complete material research (or explicitly report its unavailability) before finalization and publication; never mutate a delivered report. A later material finalize from that run may change the canonical Markdown report.
+Do not publish a run while `pending` still lists any review with the same `run_id`. Any `blocked` recovery entries defer all publication because their run IDs may be unknown. Complete material research (or explicitly report its unavailability) before finalization and publication; never mutate a delivered report. A later material finalize from that run may change the canonical Markdown report.
 
 After restore, ledger validation, and pending reconciliation, enumerate canonical regular files directly under `output/report/`. For each filename matching the core run-ID form `YYYYMMDDTHHMMSSZ-xxxxxxxx.md` (eight lowercase hexadecimal suffix characters), reject malformed names and compute the SHA-256 of the canonical bytes:
 

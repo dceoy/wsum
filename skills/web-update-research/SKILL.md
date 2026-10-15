@@ -2,18 +2,18 @@
 name: web-update-research
 description: Given a material update review selected by web-update-monitor, search for independent corroboration and return a sourced Markdown report section separating observed changes from verified context and inference.
 license: MIT
-compatibility: Research needs the host agent's web search and page-opening capability; use a fact-only fallback without them. Invoked by web-update-report-gws, or directly with an already material update review.
+compatibility: Research needs the host agent's web search and page-opening capability; use a fact-only fallback without them. Invoked by web-update-report (also within web-update-report-gws), or directly with an already material update review.
 ---
 
 # Web Update Research
 
-Use this skill **only after** a monitored change has already been judged material. It is a **research and drafting component**, not a second monitor or orchestrator. In Google Workspace workflows, `web-update-report-gws` invokes `web-update-monitor` to determine materiality, delegates material drafting here, and owns `finalize`, workspace persistence and Drive delivery. Do **not** invoke either child skill separately from a scheduled GWS Routine.
+Use this skill **only after** a monitored change has already been judged material. It is a **research and drafting component**, not a second monitor or orchestrator. `web-update-report` invokes `web-update-monitor` to determine materiality, delegates material drafting here, and owns `finalize`. In Google Workspace workflows, `web-update-report-gws` wraps that local orchestrator with workspace persistence and Drive delivery. Do **not** invoke either child skill separately from a scheduled GWS Routine.
 
 ## Input contract
 
-The calling orchestrator provides the **complete current validated pending review**, obtained with `web-update-monitor pending --target-id` using the selected CSV, including `target_id`, opaque `revision`, `run_id`, source URL, the current enabled `interests` with `criteria` and `keywords`, bounded diff, linked-document evidence, and truncation/error flags. It also supplies an explicit `material: true` decision, the optional **complete resolved common-context text** forwarded by the trusted caller (either inline or loaded from a user-selected Google Doc/Markdown file), and any output-language or report instructions. Never merge in removed/disabled interests from old metadata.
+The calling orchestrator provides the **complete current validated pending review**, obtained with `web-update-monitor pending --target-id` using the selected CSV, including `target_id`, opaque `revision`, `run_id`, source URL, the current enabled `interests` with `criteria` and `keywords`, bounded diff, linked-document evidence, and truncation/error flags. It also supplies an explicit `material: true` decision, the optional **complete resolved common-context text** forwarded by the trusted caller (either inline or loaded from a user-selected local Markdown file or Google Doc/Drive Markdown source), and any output-language or report instructions. Never merge in removed/disabled interests from old metadata.
 
-**No pending review or no confirmed material decision means no research.** Do not run `check` or `pending`, re-fetch monitored targets, decide materiality, call `finalize`, or modify a workspace. All those operations belong to `web-update-report-gws` (or an explicit non-GWS caller using `web-update-monitor`).
+**No pending review or no confirmed material decision means no research.** Do not run `check` or `pending`, re-fetch monitored targets, decide materiality, call `finalize`, or modify a workspace. All those operations belong to `web-update-report` (or an explicit caller using `web-update-monitor`).
 
 ## Optional common context
 
