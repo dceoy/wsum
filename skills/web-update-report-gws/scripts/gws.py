@@ -10,6 +10,7 @@ import csv
 import hashlib
 import importlib.util
 import json
+import operator
 import os
 import re
 import shutil
@@ -17,7 +18,6 @@ import stat
 import sys
 import tempfile
 import typing
-import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -31,14 +31,14 @@ FIELDS = (
     "priority",
     "enabled",
 )
-SNAPSHOT_RE = re.compile(r"^workspace-(\d{8}T\d{6}Z)\.zip$")
+SNAPSHOT_RE = re.compile(r"^workspace-(\d{8}T\d{6}Z)\.json$")
 RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
-MAX_ZIP = 128 * 1024 * 1024
 MAX_FILES = 2000
 MAX_ENTRY = 64 * 1024 * 1024
 MAX_TOTAL = 256 * 1024 * 1024
-CHUNK_SIZE = 1024 * 1024
+CONTROL_LIMIT = 32
+MAX_MANIFEST = 2 * 1024 * 1024
 MAX_TARGET_CSV = 1024 * 1024
 MAX_BINDING_BYTES = 4096
 MAX_DRIVE_ID_LENGTH = 256
@@ -46,24 +46,11 @@ FOLDER_BINDING_ID_COUNT = 3
 
 
 class GwsError(ValueError):
-    """Reject invalid connector data or untrusted workspace archives."""
+    """Reject invalid connector data or untrusted workspace text."""
 
 
 def _digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
-
-
-def _stream_digest(
-    source: typing.IO[bytes], max_size: int, limit_message: str
-) -> tuple[int, str]:
-    digest = hashlib.sha256()
-    size = 0
-    while chunk := source.read(CHUNK_SIZE):
-        size += len(chunk)
-        if size > max_size:
-            raise GwsError(limit_message)
-        digest.update(chunk)
-    return size, digest.hexdigest()
 
 
 def _write_atomic(path: Path, content: bytes) -> None:
@@ -337,105 +324,23 @@ def _workspace_files(workspace: Path) -> list[tuple[str, Path]]:
     return files
 
 
-def _snapshot_manifest(
-    workspace: Path,
-) -> tuple[list[dict[str, typing.Any]], list[tuple[str, Path, int, str]]]:
-    manifest_files: list[dict[str, typing.Any]] = []
-    contents: list[tuple[str, Path, int, str]] = []
-    total = 0
-    for name, path in _workspace_files(workspace):
-        reported_size = path.stat().st_size
-        if reported_size > MAX_ENTRY or total + reported_size > MAX_TOTAL:
-            raise GwsError("workspace size limit exceeded")
-        with path.open("rb") as source:
-            size, digest = _stream_digest(
-                source,
-                min(MAX_ENTRY, MAX_TOTAL - total),
-                "workspace size limit exceeded",
-            )
-        if size != reported_size:
-            raise GwsError(f"workspace file changed during snapshot: {name}")
-        total += size
-        manifest_files.append({
-            "path": name,
-            "size": size,
-            "sha256": digest,
-        })
-        contents.append((name, path, size, digest))
-    return manifest_files, contents
+def _json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
 
 
-def _write_snapshot_member(
-    handle: zipfile.ZipFile,
-    entry: tuple[str, Path, int, str],
-    written_total: int,
-) -> int:
-    name, path, expected_size, expected_digest = entry
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as source, handle.open(name, "w") as target:
-        while chunk := source.read(CHUNK_SIZE):
-            size += len(chunk)
-            if size > MAX_ENTRY or written_total + size > MAX_TOTAL:
-                raise GwsError("workspace size limit exceeded")
-            digest.update(chunk)
-            target.write(chunk)
-    if size != expected_size or digest.hexdigest() != expected_digest:
-        raise GwsError(f"workspace file changed during snapshot: {name}")
-    return size
-
-
-def _write_snapshot_members(
-    handle: zipfile.ZipFile, contents: list[tuple[str, Path, int, str]]
-) -> None:
-    written_total = 0
-    for entry in contents:
-        written_total += _write_snapshot_member(handle, entry, written_total)
-
-
-def pack(workspace: Path, archive: Path, generation: str) -> dict[str, typing.Any]:
-    _timestamp(generation)
-    if archive.name != f"workspace-{generation}.zip":
-        raise GwsError("archive filename and generation mismatch")
-    if archive.exists():
-        raise GwsError("refusing to overwrite existing snapshot")
-    manifest_files, contents = _snapshot_manifest(workspace)
-    manifest = {"version": 1, "generation": generation, "files": manifest_files}
-    archive.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        dir=archive.parent, prefix=".tmp-", delete=False
-    ) as stream:
-        temp = Path(stream.name)
-    try:
-        with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED) as handle:
-            handle.writestr(
-                "manifest.json",
-                json.dumps(manifest, separators=(",", ":"), ensure_ascii=False),
-            )
-            _write_snapshot_members(handle, contents)
-        if temp.stat().st_size > MAX_ZIP:
-            raise GwsError("snapshot compressed size limit exceeded")
-        verify(temp, expected_name=archive.name)
-        if archive.exists():
-            raise GwsError("refusing to overwrite existing snapshot")
-        os.link(
-            temp, archive
-        )  # exclusive creation; never replace a committed generation
-    finally:
-        temp.unlink(missing_ok=True)
-    return {
-        "filename": archive.name,
-        "size": archive.stat().st_size,
-        "sha256": _digest_file(archive, MAX_ZIP),
-    }
-
-
-def _digest_file(path: Path, max_size: int) -> str:
-    with path.open("rb") as source:
-        _, digest = _stream_digest(
-            source, max_size, "snapshot compressed size limit exceeded"
-        )
-    return digest
+def _text_bytes(path: Path, limit: int = MAX_ENTRY) -> bytes:
+    if path.is_symlink() or not path.is_file():
+        raise GwsError("text input must be a regular file")
+    with path.open("rb") as stream:
+        content = stream.read(limit + 1)
+    if len(content) > limit:
+        raise GwsError("text size limit exceeded")
+    text = content.decode("utf-8")
+    if any(ord(char) < CONTROL_LIMIT and char not in "\t\r\n" for char in text):
+        raise GwsError("unsupported binary/control content")
+    return content
 
 
 def _safe_path(name: str) -> bool:
@@ -445,96 +350,181 @@ def _safe_path(name: str) -> bool:
         and parts[0] in {"internal", "output"}
         and all(part not in {"", ".", ".."} for part in parts)
         and "\\" not in name
-        and not name.startswith("/")
-        and "\x00" not in name
+        and not any(ord(char) < CONTROL_LIMIT for char in name)
     )
 
 
-def verify(archive: Path, *, expected_name: str | None = None) -> dict[str, typing.Any]:
-    """Validate the complete ZIP before installing any workspace content."""
-    match = SNAPSHOT_RE.fullmatch(expected_name or archive.name)
-    if not match:
-        raise GwsError("invalid snapshot filename")
-    _timestamp(match.group(1))
-    if archive.stat().st_size > MAX_ZIP:
-        raise GwsError("snapshot compressed size limit exceeded")
-    with zipfile.ZipFile(archive) as handle:
-        entries = handle.infolist()
-        if not entries or len(entries) > MAX_FILES + 1:
-            raise GwsError("invalid snapshot file count")
-        names: set[str] = set()
-        total = 0
-        for entry in entries:
-            name = entry.filename
-            if name in names or (name != "manifest.json" and not _safe_path(name)):
-                raise GwsError(f"unsafe or duplicate archive path: {name}")
-            names.add(name)
-            mode = (entry.external_attr >> 16) & 0xFFFF
-            if (
-                entry.flag_bits & 1
-                or entry.is_dir()
-                or (stat.S_IFMT(mode) not in {0, stat.S_IFREG})
-            ):
-                raise GwsError(f"non-regular or encrypted ZIP entry: {name}")
-            if entry.file_size > MAX_ENTRY:
-                raise GwsError("archive entry exceeds size limit")
-            total += entry.file_size
-            if total > MAX_TOTAL:
-                raise GwsError("archive exceeds expanded size limit")
-        if "manifest.json" not in names:
-            raise GwsError("missing manifest")
-        manifest: typing.Any = json.loads(handle.read("manifest.json"))
-        if not isinstance(manifest, dict):
-            raise GwsError("invalid manifest header")
-        manifest = typing.cast("dict[str, typing.Any]", manifest)
+def _file_id(value: object) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z0-9_-]{1,256}", value))
+
+
+def _unique_object(pairs: list[tuple[str, typing.Any]]) -> dict[str, typing.Any]:
+    result: dict[str, typing.Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise GwsError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _manifest(path: Path, *, draft: bool = False) -> dict[str, typing.Any]:
+    value: typing.Any = json.loads(
+        _text_bytes(path, MAX_MANIFEST), object_pairs_hook=_unique_object
+    )
+    if (
+        not isinstance(value, dict)
+        or set(typing.cast("dict[str, typing.Any]", value))
+        != {"format", "generation", "files"}
+        or value["format"] != "wsum-text-1"
+        or not isinstance(value["generation"], str)
+        or not isinstance(value["files"], list)
+        or len(typing.cast("list[typing.Any]", value["files"])) > MAX_FILES
+    ):
+        raise GwsError("invalid text manifest header")
+    value = typing.cast("dict[str, typing.Any]", value)
+    _timestamp(value["generation"])
+    names: set[str] = set()
+    total = 0
+    for raw_item in value["files"]:
+        if not isinstance(raw_item, dict):
+            raise GwsError("invalid manifest file record")
+        item = typing.cast("dict[str, typing.Any]", raw_item)
         if (
-            set(manifest) != {"version", "generation", "files"}
-            or manifest["version"] != 1
-            or manifest["generation"] != match.group(1)
-            or not isinstance(manifest["files"], list)
+            set(item) != ({"path", "size", "sha256"} | (set() if draft else {"id"}))
+            or not isinstance(item["path"], str)
+            or not _safe_path(item["path"])
+            or item["path"] in names
+            or type(item["size"]) is not int
+            or not 0 <= item["size"] <= MAX_ENTRY
+            or not isinstance(item["sha256"], str)
+            or not SHA_RE.fullmatch(item["sha256"])
+            or (not draft and not _file_id(item["id"]))
         ):
-            raise GwsError("invalid manifest header")
-        recorded: set[str] = set()
-        manifest_files = typing.cast("list[typing.Any]", manifest["files"])
-        for raw_item in manifest_files:
-            if not isinstance(raw_item, dict):
-                raise GwsError("invalid manifest file record")
-            item = typing.cast("dict[str, typing.Any]", raw_item)
-            if (
-                set(item) != {"path", "size", "sha256"}
-                or not isinstance(item["path"], str)
-                or not _safe_path(item["path"])
-                or item["path"] in recorded
-                or not isinstance(item["size"], int)
-                or isinstance(item["size"], bool)
-                or item["size"] < 0
-                or not isinstance(item["sha256"], str)
-                or not SHA_RE.fullmatch(item["sha256"])
-            ):
-                raise GwsError("invalid manifest file record")
-            recorded.add(item["path"])
-            info = handle.getinfo(item["path"]) if item["path"] in names else None
-            if info is None or info.file_size != item["size"]:
-                raise GwsError("manifest size or entry mismatch")
-            with handle.open(info) as source:
-                size, digest = _stream_digest(
-                    source, MAX_ENTRY, "archive entry exceeds size limit"
-                )
-            if size != item["size"] or digest != item["sha256"]:
-                raise GwsError(f"archive digest mismatch: {item['path']}")
-        if recorded != names - {"manifest.json"}:
-            raise GwsError("manifest and workspace entries do not match")
+            raise GwsError("invalid, unsafe or duplicate manifest file record")
+        names.add(item["path"])
+        total += item["size"]
+    if total > MAX_TOTAL or any(
+        ancestor in names
+        for name in names
+        for ancestor in (
+            "/".join(name.split("/")[:i]) for i in range(1, len(name.split("/")))
+        )
+    ):
+        raise GwsError("manifest size limit or conflicting paths")
+    return value
+
+
+def _check_payload(item: dict[str, typing.Any], path: Path) -> bytes:
+    content = _text_bytes(path)
+    if len(content) != item["size"] or _digest(content) != item["sha256"]:
+        raise GwsError(f"text size or SHA-256 mismatch: {item['path']}")
+    return content
+
+
+def pack(workspace: Path, snapshot: Path, generation: str) -> dict[str, typing.Any]:
+    """Stage exact UTF-8 payloads and a deterministic draft; no Drive IDs yet."""
+    _timestamp(generation)
+    if snapshot.exists() or snapshot.is_symlink():
+        raise GwsError("refusing to overwrite existing snapshot")
+    files: list[dict[str, typing.Any]] = []
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=".tmp-pack-", dir=snapshot.parent))
+    try:
+        (stage / "payloads").mkdir()
+        total = 0
+        for name, path in _workspace_files(workspace):
+            if not _safe_path(name):
+                raise GwsError("unsafe workspace path")
+            content = _text_bytes(path)
+            total += len(content)
+            if total > MAX_TOTAL:
+                raise GwsError("workspace size limit exceeded")
+            digest = _digest(content)
+            (stage / "payloads" / f"{digest}.txt").write_bytes(content)
+            files.append({"path": name, "size": len(content), "sha256": digest})
+        manifest = {"format": "wsum-text-1", "generation": generation, "files": files}
+        (stage / "draft.json").write_bytes(_json_bytes(manifest))
+        _manifest(stage / "draft.json", draft=True)
+        stage.rename(snapshot)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+    return manifest
+
+
+def prepare(snapshot: Path, receipts: Path, destination: Path) -> dict[str, typing.Any]:
+    """Verify exact-ID payload read-backs before emitting the final manifest.
+
+    Receipts map each staged SHA-256 to {id, file}, where file is a local
+    exact-ID read-back. These are transport evidence supplied by the agent.
+    """
+    manifest = _manifest(snapshot / "draft.json", draft=True)
+    uploads: typing.Any = json.loads(receipts.read_bytes())
+    if not isinstance(uploads, dict):
+        raise GwsError("invalid receipts")
+    uploads = typing.cast("dict[str, typing.Any]", uploads)
+    if set(uploads) != {item["sha256"] for item in manifest["files"]}:
+        raise GwsError("incomplete payload receipts")
+    ids: set[str] = set()
+    for item in manifest["files"]:
+        raw_receipt = uploads[item["sha256"]]
+        if not isinstance(raw_receipt, dict):
+            raise GwsError("invalid payload receipt")
+        receipt = typing.cast("dict[str, typing.Any]", raw_receipt)
+        if (
+            set(receipt) != {"id", "file"}
+            or not _file_id(receipt["id"])
+            or not isinstance(receipt["file"], str)
+        ):
+            raise GwsError("invalid payload receipt")
+        _check_payload(item, snapshot / "payloads" / f"{item['sha256']}.txt")
+        _check_payload(item, Path(receipt["file"]))
+        item["id"] = receipt["id"]
+        ids.add(receipt["id"])
+    if len(ids) != len(uploads):
+        raise GwsError("distinct payloads require distinct Drive IDs")
+    if destination.exists() or destination.is_symlink():
+        raise GwsError("refusing to overwrite manifest")
+    content = _json_bytes(manifest)
+    if len(content) > MAX_MANIFEST:
+        raise GwsError("manifest size limit exceeded")
+    with destination.open("xb") as stream:
+        stream.write(content)
+    return {"size": len(content), "sha256": _digest(content)}
+
+
+def _verified_payloads(
+    manifest: Path, readbacks: Path
+) -> tuple[dict[str, typing.Any], dict[str, bytes]]:
+    value = _manifest(manifest)
+    paths: typing.Any = json.loads(readbacks.read_bytes())
+    if not isinstance(paths, dict):
+        raise GwsError("readbacks must map exact Drive IDs to local files")
+    paths = typing.cast("dict[str, typing.Any]", paths)
+    contents: dict[str, bytes] = {}
+    for item in value["files"]:
+        if not isinstance(paths.get(item["id"]), str):
+            raise GwsError("missing exact-ID payload read-back")
+        contents[item["path"]] = _check_payload(item, Path(paths[item["id"]]))
+    return value, contents
+
+
+def verify(manifest: Path, readbacks: Path) -> dict[str, typing.Any]:
+    """Validate every referenced payload; previews cannot establish provenance."""
+    value, _ = _verified_payloads(manifest, readbacks)
     return {
-        "generation": match.group(1),
-        "file_count": len(recorded),
-        "size": archive.stat().st_size,
-        "sha256": _digest_file(archive, MAX_ZIP),
+        "generation": value["generation"],
+        "file_count": len(value["files"]),
+        "size": manifest.stat().st_size,
+        "sha256": _digest(manifest.read_bytes()),
     }
 
 
-def restore(archive: Path, destination: Path) -> dict[str, typing.Any]:
-    """Restore to a new workspace only, after complete verification."""
-    result = verify(archive)
+def restore(
+    manifest: Path, readbacks: Path, destination: Path
+) -> dict[str, typing.Any]:
+    """Install verified bytes into a new workspace, leaving failures uninstalled."""
+    value, contents = _verified_payloads(manifest, readbacks)
     if destination.exists() or destination.is_symlink():
         raise GwsError("restore destination must not exist")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -542,21 +532,54 @@ def restore(archive: Path, destination: Path) -> dict[str, typing.Any]:
     try:
         for root in ("output", "internal"):
             (stage / root).mkdir()
-        with zipfile.ZipFile(archive) as handle:
-            for info in handle.infolist():
-                if info.filename == "manifest.json":
-                    continue
-                path = stage.joinpath(*info.filename.split("/"))
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with handle.open(info) as source, path.open("xb") as target:
-                    shutil.copyfileobj(source, target)
-        if destination.exists():
+        for name, content in contents.items():
+            path = stage / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        if destination.exists() or destination.is_symlink():
             raise GwsError("restore destination already exists")
         stage.rename(destination)
     finally:
         if stage.exists():
             shutil.rmtree(stage)
-    return result
+    return {"generation": value["generation"], "file_count": len(contents)}
+
+
+def retention(generations: Path) -> dict[str, list[str]]:
+    """Plan deletion only after verifying all generations in a complete listing.
+
+    Each record has name/id (manifest identity), manifest (local exact-ID
+    read-back), and readbacks (local JSON mapping payload IDs to read-backs).
+    The caller must revalidate the listing before deleting exact IDs.
+    """
+    records: typing.Any = json.loads(generations.read_bytes())
+    if not isinstance(records, list):
+        raise GwsError("generations must be an array")
+    records = typing.cast("list[dict[str, typing.Any]]", records)
+    identities = [
+        _snapshot_record({"name": row["name"], "id": row["id"]}) for row in records
+    ]
+    if len({row["id"] for row in identities}) != len(identities):
+        raise GwsError("duplicate manifest IDs")
+    next_generation(identities, datetime.now(UTC), _active(identities))
+    payloads: dict[str, set[str]] = {}
+    for row in records:
+        value, _ = _verified_payloads(Path(row["manifest"]), Path(row["readbacks"]))
+        if row["name"] != f"workspace-{value['generation']}.json":
+            raise GwsError("manifest filename and generation mismatch")
+        payloads[row["id"]] = {item["id"] for item in value["files"]}
+    ordered = sorted(identities, key=operator.itemgetter("name"), reverse=True)
+    retained = {row["id"] for row in ordered[:3]}
+    discarded = {row["id"] for row in ordered[3:]}
+    protected = retained | set[str]().union(*(payloads[item] for item in retained))
+    removed = discarded | set[str]().union(*(payloads[item] for item in discarded))
+    if discarded & protected:
+        raise GwsError("manifest and payload IDs overlap")
+    return {"retain": sorted(retained), "delete": sorted(removed - protected)}
+
+
+def _active(records: list[dict[str, str]]) -> dict[str, str] | None:
+    return max(records, key=operator.itemgetter("name")) if records else None
 
 
 def _read_ledger(path: Path, reports_dir: Path) -> dict[str, typing.Any]:
@@ -633,13 +656,20 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--expected-snapshot-json", type=Path, required=True)
     p = commands.add_parser("pack")
     p.add_argument("--workspace", type=Path, required=True)
-    p.add_argument("--archive", type=Path, required=True)
+    p.add_argument("--snapshot", type=Path, required=True)
     p.add_argument("--generation", required=True)
-    p = commands.add_parser("verify")
-    p.add_argument("--archive", type=Path, required=True)
-    p = commands.add_parser("restore")
-    p.add_argument("--archive", type=Path, required=True)
-    p.add_argument("--workspace", type=Path, required=True)
+    p = commands.add_parser("prepare")
+    p.add_argument("--snapshot", type=Path, required=True)
+    p.add_argument("--receipts", type=Path, required=True)
+    p.add_argument("--manifest", type=Path, required=True)
+    for command in ("verify", "restore"):
+        p = commands.add_parser(command)
+        p.add_argument("--manifest", type=Path, required=True)
+        p.add_argument("--readbacks", type=Path, required=True)
+        if command == "restore":
+            p.add_argument("--workspace", type=Path, required=True)
+    p = commands.add_parser("retention")
+    p.add_argument("--generations", type=Path, required=True)
     p = commands.add_parser("ledger-validate")
     p.add_argument("--ledger", type=Path, required=True)
     p.add_argument("--reports-dir", type=Path, required=True)
@@ -687,14 +717,18 @@ def main() -> None:
             )
             result = {
                 "generation": generation,
-                "filename": f"workspace-{generation}.zip",
+                "filename": f"workspace-{generation}.json",
             }
         elif args.command == "pack":
-            result = pack(args.workspace, args.archive, args.generation)
+            result = pack(args.workspace, args.snapshot, args.generation)
+        elif args.command == "prepare":
+            result = prepare(args.snapshot, args.receipts, args.manifest)
         elif args.command == "verify":
-            result = verify(args.archive)
+            result = verify(args.manifest, args.readbacks)
         elif args.command == "restore":
-            result = restore(args.archive, args.workspace)
+            result = restore(args.manifest, args.readbacks, args.workspace)
+        elif args.command == "retention":
+            result = retention(args.generations)
         elif args.command == "ledger-validate":
             value = _read_ledger(args.ledger, args.reports_dir)
             result = {"valid": True, "report_count": len(value["reports"])}
@@ -704,7 +738,6 @@ def main() -> None:
     except (
         OSError,
         ValueError,
-        zipfile.BadZipFile,
         KeyError,
         TypeError,
         ImportError,

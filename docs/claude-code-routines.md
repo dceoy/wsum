@@ -33,55 +33,66 @@ Context source: <OPTIONAL_DOC_OR_DRIVE_MD_URL>
 The optional last line may be omitted. The skill selects the first grid tab
 and full used range for Sheets input. No manual A1 range is needed.
 
-## Use the tools as needed
+## Text persistence operations
 
-Do **not** perform a separate connector inventory, preflight capability
-audit, or synthetic 10 KiB/100 KiB/1 MiB ZIP round-trip before the run.
-Resolve tools and operate on the requested resources directly:
+Use the existing authorized Google connector and local Python only. No extra
+Drive API/CLI, credentials, Apps Script, service or infrastructure is needed.
+Tool names vary: follow the agent-facing create/read/list/delete contract in
+[the skill](../skills/web-update-report-gws/SKILL.md#google-drive-text-contract).
+Use complete exact-ID original text, materialized losslessly as UTF-8. Previews,
+truncation, Docs conversion and manual Base64 transcription cannot verify storage.
 
-1. Resolve optional context and the output folder binding. Restore the
-   newest verified `workspaces/workspace-*.zip` snapshot, or initialize only
-   if the output folder has no existing managed state.
-2. Load and validate the **current** targets after restore, before resuming
-   pending reviews. Use the core CSV validator or Sheets cell values. For a
-   Drive CSV, compare downloaded byte length with Drive `size` metadata.
-   Size alone cannot detect same-length corruption.
-3. Resume pending reviews, monitor targets, research material changes,
-   finalize once, and persist the complete workspace ZIP after changes.
-4. On each ZIP upload, read the new file back by **exact Drive ID**. Compare
-   size and SHA-256 to `gws.py pack` and run `gws.py verify`. Retain at
-   most three **verified** generations.
-5. Deliver completed canonical Markdown reports with exact-ID read-back.
-   Record delivery only after verifying report bytes.
+1. Resolve optional context, the parent and its immutable
+   `wsum-text.binding.json`. Start initial setup with a fresh dedicated folder;
+   verify both child IDs. Never recreate missing managed resources.
+2. Read the newest `workspace-*.json` manifest and every payload by exact ID.
+   Validate filename/generation, safe paths, sizes and SHA-256, then restore to
+   a new local directory. Validate the required delivery ledger.
+3. Project current targets before resuming pending reviews. For Drive CSV,
+   compare original byte length with `size` metadata; size alone cannot detect
+   equal-length corruption. Sheets inputs require range values, not previews.
+4. Resume pending reviews, monitor, research material changes and finalize via
+   the core API. Persist after every state change. `pack` stages exact UTF-8
+   payloads; unsupported binary/control content fails explicitly.
+5. Create text payloads and read back every returned ID. `prepare` checks their
+   sizes/hashes before producing the final manifest. Re-list and check the
+   expected active identity **immediately before** creating the manifest last.
+6. Read back the manifest by exact ID and compare size/SHA-256 with `prepare`;
+   run `verify` for all payloads. Re-list to confirm the self-commit is newest
+   and unique before updating expected identity or reporting durability.
+7. Retain three verified generations using `retention`. Revalidate the listing,
+   delete obsolete manifests first, confirm their absence, then delete only
+   payloads unreferenced by remaining manifests. Stop cleanup on uncertainty;
+   leave unknown/orphan files alone.
+8. Deliver completed canonical Markdown only after pending reviews clear.
+   Verify exact-ID report bytes, then record the ledger and persist it. If
+   ledger persistence fails, restore committed state and reuse/verify the same
+   exact report filename on retry. Never report that failed ledger as durable.
 
-The standard Drive MCP can return binary data as a **base64 string**.
-Do not manually copy, split, regenerate, or reconstruct base64 in agent
-messages, and do not reconstruct binary CSV/ZIP files from rendered Drive
-previews. Those paths can silently alter valid-looking data. Prefer native
-file/artifact transfer when the runtime provides it. If an actual binary
-transfer cannot preserve the required bytes, report that operation as
-unsupported and stop without claiming a persisted state.
+Only one writer may run per workspace. Listing guards detect stale sessions
+but provide no atomic lock. Ambiguous creates require exact-name reconciliation
+with exact-ID byte checks; never blindly retry or delete a previous generation.
 
 ## Failure handling
 
-A failed download or corrupted newest ZIP is **not** an empty first-run
-workspace. Do not discard an existing baseline or skip binding checks.
-Do not publish a report before its pending reviews are finalized, or
-mark an upload delivered before its read-back verifies. Never bypass an
-environment-denied HTTP 403 with a main-agent fetch.
+Missing bound resources, incomplete reads/listings, corrupt newest manifests,
+unsafe paths, missing payloads, hash mismatch, stale expected identity or an
+unavailable required text operation stop execution. A failure is not an empty
+first run, and no older generation is silently selected. Cleanup failures can
+leave extra files without invalidating an already verified commit.
+Do not bypass environment-denied HTTP 403 with main-agent fetch. Keep resolved
+context, credentials and tokens out of persisted state.
 
-The skill handles Google Docs/Markdown context separately: require
-complete authorized reads, valid UTF-8 and the documented size bounds.
-Do not put resolved context, credentials, or tokens into persisted state.
+## Offline verification and live follow-up
 
-## Recommended acceptance checks
+`tests/test_gws.py` uses a small fake Drive text store for deterministic packing,
+exact hash checks, fresh-workspace restore, repeated commits, three-generation
+retention and injected failures. No Google credentials are used.
 
-For a new deployment, optionally test one manual first run and one
-**fresh-session** restore. Confirm that the same baseline resumes without
-duplicated reports, material changes produce verified citations, incomplete
-pending reviews block delivery, and failed transfers leave the previous
-verified snapshot untouched.
-
-These acceptance checks are recommendations, **not a mandatory Routines
-gate**. The runbook does not claim that the default Google Drive MCP can
-transport ZIP bytes reliably in a given Routines environment.
+**Live connector compatibility has not been tested.** Implementation, PR review
+and merge do not require live access. In an authorized Claude Code web/Routines
+environment, verify actual text create/read-back with Unicode, CRLF, BOM and no
+final newline, manifest-last commit, report delivery and fresh-session restore.
+If any required operation is unavailable or transforms bytes, document it and
+fail closed without claiming compatibility. Exercise a partial upload, corrupt
+read-back and stale session; previous committed generations must remain usable.
