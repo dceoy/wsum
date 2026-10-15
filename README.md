@@ -6,19 +6,30 @@ The core skill lives in `skills/web-update-monitor/`. It intentionally has two r
 
 A composite at `skills/web-update-research/` follows up on material changes with bounded web research, source-verified context, and explicitly labeled analysis **before** report finalization.
 
-The entrypoint `skills/web-update-report-gws/` orchestrates the full pipeline: monitor changes, research only material updates, finalize one cited Markdown report per run, persist the workspace, and deliver the report through Google Drive. It requires a CSV or Spreadsheet targets table and one output Drive folder, and optionally accepts inline common context or a Google Docs/Drive-hosted Markdown context source.
+The local entrypoint `skills/web-update-report/` monitors changes, researches only material updates, and finalizes one cited Markdown report per run in a persistent local workspace. The Google Workspace wrapper `skills/web-update-report-gws/` invokes it, persists each transition, and delivers completed reports through Google Drive. It requires a CSV or Spreadsheet targets table and one output Drive folder, and optionally accepts inline common context or a Google Docs/Drive-hosted Markdown context source.
 
 ## Agent Skills
 
 The repository ships these canonical skills:
 
 - `skills/web-update-monitor/`: the local-first core monitor with its `SKILL.md`, bundled scripts, requirements, and example CSV.
-- `skills/web-update-report-gws/`: the single Google Workspace **orchestrator**; restores/projects input, calls monitor then research for material changes, finalizes through the monitor, snapshots the workspace, and publishes verified Markdown reports.
+- `skills/web-update-report/`: the local orchestrator; resumes pending reviews, monitors, researches material changes, and finalizes canonical Markdown reports without Google tools.
+- `skills/web-update-report-gws/`: the Google Workspace wrapper; restores/projects input, invokes the local orchestrator with persistence after each core operation, and publishes verified Markdown reports.
 - `skills/web-update-research/`: consume already material pending reviews, perform follow-up web research, and **return** evidence-grounded Markdown sections without state or delivery side effects.
 
-Install `web-update-monitor` alone for local monitoring. For a complete Google Workspace run, invoke **only** `web-update-report-gws` after installing all three skills (`web-update-monitor`, `web-update-research`, and `web-update-report-gws`); the orchestrator calls the other skills internally. Composites resolve dependencies by skill discovery, not relative paths. Obtain the packages from releases or the [Agent Skills packaging workflow](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain).
+Install `web-update-monitor` alone for local monitoring. For complete local reporting, install `web-update-report`, `web-update-monitor`, and `web-update-research`, and invoke only `web-update-report`. For Google Workspace reporting, also install `web-update-report-gws` (four skills total) and invoke only that wrapper. Both entrypoints call their dependencies internally. Composites resolve dependencies by skill discovery, not relative paths. Obtain the packages from releases or the [Agent Skills packaging workflow](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain).
 
-### Optional run-wide common context
+### Local reporting
+
+```text
+/web-update-report
+Targets: /path/to/targets.csv
+Workspace: /path/to/workspace
+```
+
+Optionally add inline `Common context:` or `Context source: /path/to/context.md`, but not both. After validating context and the current CSV, the local skill creates a missing workspace root or reuses an existing non-symlink directory, resumes pending work, and writes canonical reports under `output/report/`. Existing workspace contents are preserved; invalid paths stop execution. No Google tools are required. See [the local reporting skill](skills/web-update-report/SKILL.md).
+
+### Optional Google Workspace common context
 
 Only the targets table and output Drive folder are required. To add shared guidance for materiality review and research, supply **either** inline `Common context:` or `Context source:` with an explicit Google Docs or Drive-hosted `.md` ID/URL. Local context paths are not supported by the GWS skill.
 
@@ -42,15 +53,19 @@ flowchart LR
     DP --> DR["reports/"]
     DS <-->|restore / persist| WS["workspace snapshot"]
     WS --> WORKSPACE["output/ + internal/"]
-    CSV --> ORCH["web-update-report-gws: orchestrate"]
-    WORKSPACE --> ORCH
+    CSV --> GWS["web-update-report-gws: wrapper"]
+    GWS --> ORCH["web-update-report: local orchestration"]
+    WORKSPACE --> GWS
+    ORCH -->|after each core call| GWS
+    GWS -->|verified snapshot / resume| ORCH
     ORCH --> CORE["web-update-monitor: check / pending"]
     CORE -->|material only| RESEARCH["web-update-research"]
     RESEARCH -->|Markdown section| ORCH
     ORCH -->|finalize| CORE
     CORE --> WORKSPACE
     CORE --> REPORT["output/report/<run-id>.md"]
-    REPORT -->|run complete| GMD["Drive Markdown file"]
+    REPORT -->|run complete| GWS
+    GWS --> GMD["Drive Markdown file"]
     GMD -->|verify| DELIVERY["internal/gws/delivery.json"]
     GMD --> DR
 ```
@@ -71,16 +86,18 @@ For **Claude Code Routines**, invoke `/web-update-report-gws` and specify the tw
 
 ```mermaid
 flowchart LR
-    GWS["web-update-report-gws (entrypoint)"] --> MON["web-update-monitor: check / materiality"]
+    GWS["web-update-report-gws (optional wrapper)"] --> LOCAL["web-update-report (local entrypoint)"]
+    LOCAL --> MON["web-update-monitor: check / materiality"]
     MON -->|material review| RESEARCH["web-update-research: search / draft"]
-    RESEARCH -->|report section| GWS
-    GWS -->|finalize once| MON
+    RESEARCH -->|report section| LOCAL
+    LOCAL -->|finalize once| MON
     MON --> FINAL["canonical report"]
-    FINAL --> GWS
+    FINAL --> LOCAL
+    LOCAL -->|completed runs| GWS
     GWS --> DRIVE["verified Drive delivery"]
 ```
 
-The GWS orchestrator executes monitoring first, calls research **only** after it judges a change material, then finalizes once per URL through the monitor. The verified facts and the agent's analysis are separate report sections; failed or unavailable search results are disclosed, not filled with guesses. This preserves the single canonical `output/report/<run-id>.md` output and its Google Drive SHA-256 ledger. See [the research skill](skills/web-update-research/SKILL.md).
+The local `web-update-report` orchestrator executes monitoring first, calls research **only** after it judges a change material, then finalizes once per URL through the monitor. The verified facts and the agent's analysis are separate report sections; failed or unavailable search results are disclosed, not filled with guesses. This preserves the single canonical `output/report/<run-id>.md` output. The optional GWS wrapper persists every core operation synchronously and owns the Google Drive SHA-256 delivery ledger. See [the research skill](skills/web-update-research/SKILL.md).
 
 The core's optional `finalize --archive-evidence` feature remains available for captured monitored evidence, independent of research. It does not archive externally searched web pages.
 
@@ -184,6 +201,7 @@ Then run tests and validate the canonical skills with the [Agent Skills referenc
 ```bash
 uv run pytest
 skills-ref validate skills/web-update-monitor
+skills-ref validate skills/web-update-report
 skills-ref validate skills/web-update-report-gws
 skills-ref validate skills/web-update-research
 ```

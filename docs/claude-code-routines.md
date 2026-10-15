@@ -1,8 +1,9 @@
 # Claude Code Routines: Google Workspace runbook
 
-Use `web-update-report-gws` as the **only entrypoint**. It calls the installed
-`web-update-monitor` and `web-update-research` skills, maintains a local
-workspace, and persists snapshots and completed Markdown reports to Drive.
+Use `web-update-report-gws` as the **only entrypoint**. It invokes installed
+`web-update-report`, which uses `web-update-monitor` and `web-update-research`
+for local reporting. Install all four skills. The wrapper persists each core
+operation and delivers completed canonical Markdown reports to Drive.
 
 ## Configure the Routine
 
@@ -58,8 +59,12 @@ or Docs conversion for immutable state.
    with original `fileSize` metadata; then validate all rows through core CSV
    parsing. Without source checksum, equal-length alteration is unprovable.
    Prefer Sheets cell-value reads when appropriate, never previews.
-4. Resume pending reviews, monitor, research material changes and finalize via
-   the core API. Persist after every state change. `pack` stages exact UTF-8
+4. Project and validate the current targets table, then invoke `web-update-report`
+   to resume, monitor, research material changes and finalize through the core API.
+   Supply the required synchronous persistence handoff: after every `pending`
+   (including list/detail recovery), `check`, `ingest`, `discard`, and `finalize`,
+   pause local work until the wrapper verifies a snapshot. Error returns also
+   require checkpointing; a failed checkpoint stops the workflow. `pack` stages exact UTF-8
    payloads; unsupported binary/control content fails explicitly.
 5. `transfer-encode` each **local original** payload, pass `base64Content` into
    connector create, then Base64-download the returned ID and `transfer-decode`
@@ -73,7 +78,9 @@ or Docs conversion for immutable state.
    delete obsolete manifests first, confirm their absence, then delete only
    payloads unreferenced by remaining manifests. Stop cleanup on uncertainty;
    leave unknown/orphan files alone.
-8. Deliver canonical Markdown only after pending reviews clear. Use the Base64
+8. Refresh public pending state and persist possible recovery before delivery.
+   Deliver canonical Markdown only after that run’s pending reviews clear;
+   any blocked recovery entry defers all delivery. Use the Base64
    bridge to verify exact-ID report bytes against the local original digest;
    only then record the ledger and persist it. If ledger persistence fails,
    restore committed state and reuse/verify the same exact report filename
