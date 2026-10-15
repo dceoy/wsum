@@ -39,20 +39,20 @@ Do **not** perform a separate connector inventory, preflight capability
 audit, or synthetic 10 KiB/100 KiB/1 MiB ZIP round-trip before the run.
 Resolve tools and operate on the requested resources directly:
 
-1. Load the current targets with the core CSV validator or Sheets cell
-   values. For a Drive CSV, compare exact downloaded bytes against the
-   Drive `size` metadata. A size match alone cannot detect same-length
-   corruption.
-2. Restore the newest verified `workspaces/workspace-*.zip` snapshot,
-   or initialize a new workspace only if the output folder has no existing
-   managed state. Follow the immutable folder binding rules in the skill.
-3. Monitor targets, resume pending reviews, research material changes,
+1. Resolve optional context and the output folder binding. Restore the
+   newest verified `workspaces/workspace-*.zip` snapshot, or initialize only
+   if the output folder has no existing managed state.
+2. Load and validate the **current** targets after restore, before resuming
+   pending reviews. Use the core CSV validator or Sheets cell values. For a
+   Drive CSV, compare downloaded byte length with Drive `size` metadata.
+   Size alone cannot detect same-length corruption.
+3. Resume pending reviews, monitor targets, research material changes,
    finalize once, and persist the complete workspace ZIP after changes.
-4. On every actual ZIP upload, read the new file back by **exact Drive ID**.
-   Compare size and SHA-256 to `gws.py pack` and run `gws.py verify`.
-   Retain at most three **verified** generations.
-5. Deliver completed canonical Markdown reports with exact-ID read-back;
-   record delivery only after verifying the report bytes.
+4. On each ZIP upload, read the new file back by **exact Drive ID**. Compare
+   size and SHA-256 to `gws.py pack` and run `gws.py verify`. Retain at
+   most three **verified** generations.
+5. Deliver completed canonical Markdown reports with exact-ID read-back.
+   Record delivery only after verifying report bytes.
 
 The standard Drive MCP can return binary data as a **base64 string**.
 Do not manually copy, split, regenerate, or reconstruct base64 in agent
