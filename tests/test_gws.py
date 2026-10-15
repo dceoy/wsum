@@ -841,3 +841,55 @@ def test_text_commands_cli(
     )
     gws.main()
     assert json.loads(capsys.readouterr().out)["file_count"] == len(draft["files"])
+
+
+def test_base64_bridge_preserves_exact_utf8(tmp_path: Path) -> None:
+    """Model-mediated text transport can be validated against local bytes."""
+    import base64
+
+    original = tmp_path / "original.txt"
+    original.write_bytes(b"\\xef\\xbb\\xbf" + "報告\\r\\n".encode() + b"no newline")
+    transfer = gws.transfer_encode(original)
+    assert transfer["size"] == len(original.read_bytes())
+    assert transfer["sha256"] == hashlib.sha256(original.read_bytes()).hexdigest()
+    encoded = tmp_path / "from-connector.b64"
+    encoded.write_text(str(transfer["base64Content"]), encoding="ascii")
+    dest = tmp_path / "readback.txt"
+    result = gws.transfer_decode(
+        encoded, dest, int(transfer["size"]), str(transfer["sha256"])
+    )
+    assert result["verified"] is True
+    assert dest.read_bytes() == original.read_bytes()
+    assert base64.b64decode(str(transfer["base64Content"])) == dest.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("encoded", "size", "digest"),
+    [
+        ("not-base64!", 1, None),
+        ("YQ==", 2, None),
+        ("Yg==", 1, hashlib.sha256(b"a").hexdigest()),
+        ("YQ==", 1, "0" * 63),
+    ],
+)
+def test_base64_bridge_rejects_invalid_readback(
+    tmp_path: Path, encoded: str, size: int, digest: str | None
+) -> None:
+    """A failed read-back never creates a partial local source file."""
+    source = tmp_path / "download.b64"
+    source.write_text(encoded)
+    dest = tmp_path / "readback.txt"
+    with pytest.raises(gws.GwsError):
+        gws.transfer_decode(source, dest, size, digest)
+    assert not dest.exists()
+
+
+def test_base64_bridge_source_has_no_independent_digest(tmp_path: Path) -> None:
+    """Original Drive CSV can only prove byte size without a source checksum."""
+    source = tmp_path / "download.b64"
+    source.write_text("YQ==")
+    dest = tmp_path / "readback.txt"
+    assert gws.transfer_decode(source, dest, 1, None)["verified"] is False
+    assert dest.read_bytes() == b"a"
+    with pytest.raises(gws.GwsError, match="must not exist"):
+        gws.transfer_decode(source, dest, 1, None)
