@@ -38,7 +38,7 @@ and full used range for Sheets input. No manual A1 range is needed.
 Use the existing authorized Google connector and local Python only. No extra
 Drive API/CLI, credentials, Apps Script, service or infrastructure is needed.
 Tool names vary: follow the agent-facing create/read/list/delete contract in
-[the skill](../skills/web-update-report-gws/SKILL.md#google-drive-text-contract).
+[the skill](../skills/web-update-report-gws/SKILL.md#google-drive-connector-base64-contract-cowork-compatible).
 Cowork does **not** materialize connector bytes to local files. Its
 `download_file_content` returns Base64 and `create_file` accepts
 `base64Content`. Use the skill's model-mediated `transfer-encode` /
@@ -51,8 +51,8 @@ or Docs conversion for immutable state.
 1. Resolve optional context, the parent and its immutable
    `wsum-text.binding.json`. Start initial setup with a fresh dedicated folder;
    verify both child IDs. Never recreate missing managed resources.
-2. Base64-download the newest `workspace-*.json` manifest and every payload by exact ID, and decode to fresh local scratch files.
-   Validate filename/generation, safe paths, sizes and SHA-256, then restore to
+2. Base64-download the newest `workspace-*.json` manifest and every payload
+   by exact ID, and decode to fresh local scratch files. Validate filename/generation, safe paths, sizes and SHA-256, then restore to
    a new local directory. Validate the required delivery ledger.
 3. For Drive CSV, decode the full Base64 field and compare its decoded length
    with original `fileSize` metadata; then validate all rows through core CSV
@@ -63,11 +63,11 @@ or Docs conversion for immutable state.
    payloads; unsupported binary/control content fails explicitly.
 5. `transfer-encode` each **local original** payload, pass `base64Content` into
    connector create, then Base64-download the returned ID and `transfer-decode`
-   with its original size/SHA-256. `prepare` validates read-back receipts. Re-list and check the
-   expected active identity **immediately before** creating the manifest last.
+   with its original size/SHA-256. `prepare` validates read-back receipts.
+   Re-list and check the expected active identity **immediately before**
+   creating the manifest last.
 6. Decode the exact-ID manifest Base64 against the **prepared original**
-   manifest size/SHA-256, then run `verify`;
-   run `verify` for all payloads. Re-list to confirm the self-commit is newest
+   manifest size/SHA-256, then run `verify` for all payloads. Re-list to confirm the self-commit is newest
    and unique before updating expected identity or reporting durability.
 7. Retain three verified generations using `retention`. Revalidate the listing,
    delete obsolete manifests first, confirm their absence, then delete only
@@ -75,9 +75,9 @@ or Docs conversion for immutable state.
    leave unknown/orphan files alone.
 8. Deliver canonical Markdown only after pending reviews clear. Use the Base64
    bridge to verify exact-ID report bytes against the local original digest;
-   only then record the ledger and persist it. If
-   ledger persistence fails, restore committed state and reuse/verify the same
-   exact report filename on retry. Never report that failed ledger as durable.
+   only then record the ledger and persist it. If ledger persistence fails,
+   restore committed state and reuse/verify the same exact report filename
+   on retry. Never report that failed ledger as durable.
 
 Only one writer may run per workspace. Listing guards detect stale sessions
 but provide no atomic lock. Ambiguous creates require exact-name reconciliation
@@ -85,9 +85,9 @@ with exact-ID byte checks; never blindly retry or delete a previous generation.
 
 ## Failure handling
 
-Missing bound resources, Base64 relay/context limits, incomplete reads/listings, corrupt newest manifests,
-unsafe paths, missing payloads, hash mismatch, stale expected identity or an
-unavailable required text operation stop execution. A failure is not an empty
+Missing bound resources, Base64 relay/context limits, incomplete reads or
+listings, corrupt newest manifests, unsafe paths, missing payloads, hash
+mismatch, stale expected identity or unavailable transfer operations stop. A failure is not an empty
 first run, and no older generation is silently selected. Cleanup failures can
 leave extra files without invalidating an already verified commit.
 Do not bypass environment-denied HTTP 403 with main-agent fetch. Keep resolved
