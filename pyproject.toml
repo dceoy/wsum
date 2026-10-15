@@ -43,10 +43,10 @@ ignore = [
   "implicit-namespace-package",  # executable skill helper, not an import package
   "docstring-missing-returns",  # concise helper docstrings
   "docstring-missing-exception",  # failures carry contextual GwsError messages
-  "complex-structure",  # explicit ZIP safety checks stay visible
+  "complex-structure",  # explicit text safety checks stay visible
   "too-many-branches",  # fail-closed manifest parsing
   "too-many-boolean-expressions",  # strict manifest record contract
-  "too-many-statements-in-try-clause",  # atomic file and ZIP operations
+  "too-many-statements-in-try-clause",  # atomic file operations
   "raise-vanilla-args",  # contextual user-facing errors
   "raw-string-in-exception",  # contextual user-facing errors
   "f-string-in-exception",  # contextual user-facing errors
