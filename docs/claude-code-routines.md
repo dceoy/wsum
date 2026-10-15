@@ -39,33 +39,43 @@ Use the existing authorized Google connector and local Python only. No extra
 Drive API/CLI, credentials, Apps Script, service or infrastructure is needed.
 Tool names vary: follow the agent-facing create/read/list/delete contract in
 [the skill](../skills/web-update-report-gws/SKILL.md#google-drive-text-contract).
-Use complete exact-ID original text, materialized losslessly as UTF-8. Previews,
-truncation, Docs conversion and manual Base64 transcription cannot verify storage.
+Cowork does **not** materialize connector bytes to local files. Its
+`download_file_content` returns Base64 and `create_file` accepts
+`base64Content`. Use the skill's model-mediated `transfer-encode` /
+`transfer-decode` bridge. Compute the upload size/SHA-256 from the **local
+original**, relay opaque Base64 and verify the separately downloaded exact-ID
+bytes. A self-comparison of two model-rendered copies is not verification.
+Never use changing `read_file_content` prose, preview, truncated content
+or Docs conversion for immutable state.
 
 1. Resolve optional context, the parent and its immutable
    `wsum-text.binding.json`. Start initial setup with a fresh dedicated folder;
    verify both child IDs. Never recreate missing managed resources.
-2. Read the newest `workspace-*.json` manifest and every payload by exact ID.
+2. Base64-download the newest `workspace-*.json` manifest and every payload by exact ID, and decode to fresh local scratch files.
    Validate filename/generation, safe paths, sizes and SHA-256, then restore to
    a new local directory. Validate the required delivery ledger.
-3. Project current targets before resuming pending reviews. For Drive CSV,
-   compare original byte length with `size` metadata; size alone cannot detect
-   equal-length corruption. Sheets inputs require range values, not previews.
+3. For Drive CSV, decode the full Base64 field and compare its decoded length
+   with original `fileSize` metadata; then validate all rows through core CSV
+   parsing. Without source checksum, equal-length alteration is unprovable.
+   Prefer Sheets cell-value reads when appropriate, never previews.
 4. Resume pending reviews, monitor, research material changes and finalize via
    the core API. Persist after every state change. `pack` stages exact UTF-8
    payloads; unsupported binary/control content fails explicitly.
-5. Create text payloads and read back every returned ID. `prepare` checks their
-   sizes/hashes before producing the final manifest. Re-list and check the
+5. `transfer-encode` each **local original** payload, pass `base64Content` into
+   connector create, then Base64-download the returned ID and `transfer-decode`
+   with its original size/SHA-256. `prepare` validates read-back receipts. Re-list and check the
    expected active identity **immediately before** creating the manifest last.
-6. Read back the manifest by exact ID and compare size/SHA-256 with `prepare`;
+6. Decode the exact-ID manifest Base64 against the **prepared original**
+   manifest size/SHA-256, then run `verify`;
    run `verify` for all payloads. Re-list to confirm the self-commit is newest
    and unique before updating expected identity or reporting durability.
 7. Retain three verified generations using `retention`. Revalidate the listing,
    delete obsolete manifests first, confirm their absence, then delete only
    payloads unreferenced by remaining manifests. Stop cleanup on uncertainty;
    leave unknown/orphan files alone.
-8. Deliver completed canonical Markdown only after pending reviews clear.
-   Verify exact-ID report bytes, then record the ledger and persist it. If
+8. Deliver canonical Markdown only after pending reviews clear. Use the Base64
+   bridge to verify exact-ID report bytes against the local original digest;
+   only then record the ledger and persist it. If
    ledger persistence fails, restore committed state and reuse/verify the same
    exact report filename on retry. Never report that failed ledger as durable.
 
@@ -75,7 +85,7 @@ with exact-ID byte checks; never blindly retry or delete a previous generation.
 
 ## Failure handling
 
-Missing bound resources, incomplete reads/listings, corrupt newest manifests,
+Missing bound resources, Base64 relay/context limits, incomplete reads/listings, corrupt newest manifests,
 unsafe paths, missing payloads, hash mismatch, stale expected identity or an
 unavailable required text operation stop execution. A failure is not an empty
 first run, and no older generation is silently selected. Cleanup failures can
@@ -89,7 +99,9 @@ context, credentials and tokens out of persisted state.
 exact hash checks, fresh-workspace restore, repeated commits, three-generation
 retention and injected failures. No Google credentials are used.
 
-**Live connector compatibility has not been tested.** Implementation, PR review
+**Live connector compatibility has not been tested.** Model relay is bounded
+by tool/context size and cannot stream large files. Original Drive CSV bytes
+have size-only provenance without source checksum. Implementation, PR review
 and merge do not require live access. In an authorized Claude Code web/Routines
 environment, verify actual text create/read-back with Unicode, CRLF, BOM and no
 final newline, manifest-last commit, report delivery and fresh-session restore.
