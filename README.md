@@ -16,7 +16,7 @@ Local-first Agent Skills for monitoring public web pages, PDFs, and feeds, resea
 
 ### Local reporting
 
-Use Python 3.11+ and a host agent with Skill discovery and shell execution. From a checkout:
+Use Python 3.11–3.14 and a host agent with Skill discovery and shell execution. From a checkout:
 
 ```bash
 git clone https://github.com/dceoy/wsum.git
