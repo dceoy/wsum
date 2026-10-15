@@ -27,7 +27,7 @@ Targets: /path/to/targets.csv
 Workspace: /path/to/workspace
 ```
 
-Optionally add inline `Common context:` or `Context source: /path/to/context.md`, but not both. The local skill validates the current CSV, resumes pending work, and writes canonical reports under `output/report/`. No Google tools are required. See [the local reporting skill](skills/web-update-report/SKILL.md).
+Optionally add inline `Common context:` or `Context source: /path/to/context.md`, but not both. After validating context and the current CSV, the local skill creates a missing workspace root or reuses an existing non-symlink directory, resumes pending work, and writes canonical reports under `output/report/`. Existing workspace contents are preserved; invalid paths stop execution. No Google tools are required. See [the local reporting skill](skills/web-update-report/SKILL.md).
 
 ### Optional Google Workspace common context
 

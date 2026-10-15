@@ -34,7 +34,7 @@ The wrapper supplies the workspace, validated current CSV, optional resolved inl
 
 ## Resume, monitor, research, and finalize
 
-Use the monitor's public `workspace.py` interface exclusively; never inspect or modify `internal/state/` directly. In commands below, `WORKSPACE` and `TARGETS_CSV` are the selected paths. The monitor creates its directories as needed.
+Use the monitor's public `workspace.py` interface exclusively; never inspect or modify `internal/state/` directly. In commands below, `WORKSPACE` and `TARGETS_CSV` are the selected paths. The core requires an existing non-symlink workspace root; it creates only its managed subdirectories as needed.
 
 1. **Validate current input before recovery or mutation.** Use the installed core's `load_targets` to validate the entire CSV, including disabled rows; an old projection or saved pending metadata cannot substitute for invalid current input. For example:
 
@@ -45,6 +45,8 @@ Use the monitor's public `workspace.py` interface exclusively; never inspect or 
    load_targets(sys.argv[1])
    PY
    ```
+
+   **Initialize the local root after context and CSV validation, before the first core command.** Inspect `WORKSPACE` itself with `lstat` (without resolving away a symlink). For a standalone local run, if the root is absent, create that directory and any missing parents without replacing an existing path, then verify it is a non-symlink directory. Reuse a valid existing directory with its contents intact. Reject symlinks, including dangling ones, non-directory paths, inaccessible paths, and creation failures; do not delete, replace, or reset existing state. For a wrapped invocation, require the wrapper's restored/initialized root to already exist and pass the same validation; a missing root is an error, never permission to start an empty workspace.
 
 2. **Resume first.** Enumerate handles, then fetch each full current review:
 
