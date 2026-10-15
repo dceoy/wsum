@@ -25,17 +25,24 @@ uv sync --no-dev
 source .venv/bin/activate
 ```
 
-Create a targets CSV (see below), then invoke the skill in the local agent:
+Create `targets.csv` (see below) in the agent's working directory, then invoke:
+
+```text
+/web-update-report
+```
+
+By default, the skill reads `./targets.csv`, uses `.` as its persistent workspace, and reads `./context.md` **if present**. Missing `context.md` means no common context; missing/invalid `targets.csv` or an invalid existing context file is an error. Relative paths are resolved from the agent's working directory, not from the installed skill directory.
+
+Override any of these paths when needed:
 
 ```text
 /web-update-report
 Targets: /absolute/path/to/targets.csv
 Workspace: /absolute/path/to/workspace
+Context source: /absolute/path/to/context.md
 ```
 
-The CSV and workspace are separate paths. The skill validates input, creates a missing workspace root safely, resumes pending reviews, and writes reports under `output/report/`. **The first successful check establishes baselines; it does not produce a change report.** Subsequent material changes can produce one report per check run. No Google tools are required.
-
-Optionally supply either `Common context:` (inline text) or `Context source: /path/to/context.md`, not both.
+Alternatively use `Common context:` with inline text instead of `Context source:`; do not supply both. An explicit context overrides the default `context.md`. The CSV and workspace remain independent paths. The skill validates input, creates a missing workspace root safely, resumes pending reviews, and writes reports under `output/report/` inside the selected workspace. **The first successful check establishes baselines; it does not produce a change report.** Subsequent material changes can produce one report per check run. No Google tools are required.
 
 ### Google Workspace reporting (optional)
 
