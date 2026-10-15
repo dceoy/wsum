@@ -4,11 +4,11 @@ Local-first Agent Skills for monitoring public web pages, PDFs, and feeds, resea
 
 ## Choose an entrypoint
 
-| Goal | Invoke | Required skills |
-| --- | --- | --- |
-| Monitor targets with the core API | [`web-update-monitor`](skills/web-update-monitor/SKILL.md) | Monitor |
-| Create reports in a local workspace | [`web-update-report`](skills/web-update-report/SKILL.md) | Report, monitor, research |
-| Restore state and deliver reports via Google Drive | [`web-update-report-gws`](skills/web-update-report-gws/SKILL.md) | All four |
+| Goal                                               | Invoke                                                           | Required skills           |
+| -------------------------------------------------- | ---------------------------------------------------------------- | ------------------------- |
+| Monitor targets with the core API                  | [`web-update-monitor`](skills/web-update-monitor/SKILL.md)       | Monitor                   |
+| Create reports in a local workspace                | [`web-update-report`](skills/web-update-report/SKILL.md)         | Report, monitor, research |
+| Restore state and deliver reports via Google Drive | [`web-update-report-gws`](skills/web-update-report-gws/SKILL.md) | All four                  |
 
 [`web-update-research`](skills/web-update-research/SKILL.md) is a child skill used **only for material changes**, not a standalone monitoring entrypoint. Install each required skill separately from the [packaging workflow](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain), or use this checkout's `.agents/skills/` discovery links (`.claude/skills/` points to them). Invoke only the chosen entrypoint.
 
