@@ -1,5 +1,6 @@
 """Workspace-GWS deterministic boundary regression tests."""
 
+import base64
 import hashlib
 import json
 import sys
@@ -845,10 +846,8 @@ def test_text_commands_cli(
 
 def test_base64_bridge_preserves_exact_utf8(tmp_path: Path) -> None:
     """Model-mediated text transport can be validated against local bytes."""
-    import base64
-
     original = tmp_path / "original.txt"
-    original.write_bytes(b"\\xef\\xbb\\xbf" + "報告\\r\\n".encode() + b"no newline")
+    original.write_bytes(b"\xef\xbb\xbf" + "報告\r\n".encode() + b"no newline")
     transfer = gws.transfer_encode(original)
     assert transfer["size"] == len(original.read_bytes())
     assert transfer["sha256"] == hashlib.sha256(original.read_bytes()).hexdigest()
