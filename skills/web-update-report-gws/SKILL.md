@@ -2,14 +2,14 @@
 name: web-update-report-gws
 description: Wrap web-update-report with CSV/Spreadsheet input projection, verified Google Drive workspace persistence and report delivery, and optional inline or Google Docs/Markdown common context.
 license: MIT
-compatibility: Requires installed web-update-report, web-update-monitor, and web-update-research skills, scratch storage, Google Sheets reads for Spreadsheet inputs, and Google Drive read/write for reports and workspace text files. When a context source is supplied, full authenticated Docs/Drive reads are required.
+compatibility: Requires installed web-update-report and web-update-monitor skills, scratch storage, Google Sheets reads for Spreadsheet inputs, and Google Drive read/write for reports and workspace text files. When a context source is supplied, full authenticated Docs/Drive reads are required.
 ---
 
 # Google Workspace Web Update Report Wrapper
 
 Use this Google Workspace entrypoint with two required resources: one targets table (local CSV, Drive CSV, or Google Spreadsheet) and one existing Google Drive output folder. Optionally accept inline common context or an explicit Google Doc/Drive Markdown context source. This wrapper restores the workspace, projects current input, invokes `web-update-report` for the complete local reporting workflow, persists every core transition, and delivers completed canonical Markdown reports. Do not ask users to invoke child skills separately.
 
-`web-update-report` owns monitor → materiality → research → finalize through `web-update-monitor` and `web-update-research`. This wrapper owns only Google input/context resolution, workspace transport, synchronous persistence handoffs, completion checks, and idempotent delivery. Keep Google integration outside all three local skills and introduce no second semantic journal, research state, or report queue.
+`web-update-report` owns monitor → materiality → research → finalize using `web-update-monitor` and its own research procedure. This wrapper owns only Google input/context resolution, workspace transport, synchronous persistence handoffs, completion checks, and idempotent delivery. Keep Google integration outside both local skills and introduce no second semantic journal, research state, or report queue.
 
 ## Google Drive connector Base64 contract (Cowork-compatible)
 
@@ -98,7 +98,8 @@ flowchart LR
     ORCH -->|after every core call| GWS
     GWS -->|verified snapshot / resume| ORCH
     ORCH --> CORE["web-update-monitor: check / pending / materiality"]
-    CORE -->|material review only| RESEARCH["web-update-research: search / synthesis"]
+    CORE -->|pending review| ORCH
+    ORCH -->|material changes only| RESEARCH["Research / synthesis within web-update-report"]
     RESEARCH -->|one Markdown section| ORCH
     ORCH -->|finalize once per URL| CORE
     CORE --> WORKSPACE
@@ -115,7 +116,7 @@ The Drive workspaces folder retains three verified manifests and their text payl
 
 ## Required orchestration (single entrypoint)
 
-Call `web-update-report-gws` once per run. Resolve the installed `web-update-report`, `web-update-monitor`, and `web-update-research` skills before starting; read the local orchestrator's instructions. Follow this resumable sequence:
+Call `web-update-report-gws` once per run. Resolve the installed `web-update-report` and `web-update-monitor` skills before starting; read the local orchestrator's instructions. Follow this resumable sequence:
 
 1. Resolve and validate optional common context before any workspace mutation. Restore and validate the immutable Drive folder binding, newest verified text snapshot, and delivery ledger; initialize only for a genuinely fresh output folder. Acquire and validate the current selected CSV/Spreadsheet, projecting it to `internal/gws/targets.csv`. Persist initialization/projection before invoking local monitoring; never use an old projection when current input fails.
 2. **Invoke `web-update-report`**, supplying the restored `WORKSPACE`, validated `TARGETS_CSV`, complete resolved inline context if present, output language/instructions, and the **required synchronous persistence handoff** below. It reconciles/resumes pending reviews, checks targets, recovers website HTTP 403 through monitor ingest, judges materiality, researches material updates, and finalizes once per URL. Follow that skill rather than running a parallel monitoring loop here.
@@ -127,7 +128,7 @@ The handoff is an agent-level procedure, not a new helper option or background j
 
 ## Claude Code Routines
 
-The entrypoint uses the installed local report, monitor, and research skills, Python >=3.11 with
+The entrypoint uses the installed local report and monitor skills, Python >=3.11 with
 `pypdf`, scratch storage, the selected Google Drive resources and (for
 Spreadsheet targets) Sheets cell-value reads. Resolve tools as needed rather
 than enumerating them in a mandatory preflight.
@@ -341,7 +342,7 @@ Canonical compact JSON has sorted keys and ASCII escapes. Manifest shape:
 BOM, non-ASCII text and absent final newlines. It rejects invalid UTF-8 and
 control characters other than tab/CR/LF; binary entries fail explicitly.
 Snapshot all regular files under `output/` and `internal/`, excluding only
-hidden atomic temporary files. Do not change monitor/research workspace formats.
+hidden atomic temporary files. Do not change local workspace formats.
 Limits: 2,000 files, 64 MiB per payload, 256 MiB total, 2 MiB manifest.
 Empty directories are not stored; both roots are recreated on restore.
 
@@ -429,7 +430,7 @@ listing check.
 
 ## Resolve installed dependencies
 
-Discover `web-update-report`, `web-update-monitor`, and `web-update-research` independently. Read the installed local orchestrator and its dependencies. Record the monitor root as `WEB_UPDATE_MONITOR_SKILL_DIR` for CSV validation/projection and public pending completion checks. Invoke the local orchestrator with the handoff contract in **Required orchestration**; it owns all monitoring/research/finalization decisions.
+Discover `web-update-report` and `web-update-monitor` independently. Read the installed local orchestrator and its dependencies. Record the monitor root as `WEB_UPDATE_MONITOR_SKILL_DIR` for CSV validation/projection and public pending completion checks. Invoke the local orchestrator with the handoff contract in **Required orchestration**; it owns all monitoring/research/finalization decisions.
 
 Do not assume installed packages are siblings or resolve core scripts relative to this wrapper. Every core command uses the resolved monitor root.
 

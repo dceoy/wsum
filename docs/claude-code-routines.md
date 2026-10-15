@@ -1,8 +1,8 @@
 # Claude Code Routines: Google Workspace runbook
 
 Use `web-update-report-gws` as the **only entrypoint**. It invokes installed
-`web-update-report`, which uses `web-update-monitor` and `web-update-research`
-for local reporting. Install all four skills. The wrapper persists each core
+`web-update-report`, which uses `web-update-monitor` and includes research
+for local reporting. Install all three skills. The wrapper persists each core
 operation and delivers completed canonical Markdown reports to Drive.
 
 ## Configure the Routine

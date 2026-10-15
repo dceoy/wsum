@@ -4,13 +4,13 @@ Local-first Agent Skills for monitoring public web pages, PDFs, and feeds, resea
 
 ## Choose an entrypoint
 
-| Goal                                               | Invoke                                                           | Required skills           |
-| -------------------------------------------------- | ---------------------------------------------------------------- | ------------------------- |
-| Monitor targets with the core API                  | [`web-update-monitor`](skills/web-update-monitor/SKILL.md)       | Monitor                   |
-| Create reports in a local workspace                | [`web-update-report`](skills/web-update-report/SKILL.md)         | Report, monitor, research |
-| Restore state and deliver reports via Google Drive | [`web-update-report-gws`](skills/web-update-report-gws/SKILL.md) | All four                  |
+| Goal                                               | Invoke                                                           | Required skills |
+| -------------------------------------------------- | ---------------------------------------------------------------- | --------------- |
+| Monitor targets with the core API                  | [`web-update-monitor`](skills/web-update-monitor/SKILL.md)       | Monitor         |
+| Create reports in a local workspace                | [`web-update-report`](skills/web-update-report/SKILL.md)         | Report, monitor |
+| Restore state and deliver reports via Google Drive | [`web-update-report-gws`](skills/web-update-report-gws/SKILL.md) | All three       |
 
-[`web-update-research`](skills/web-update-research/SKILL.md) is a child skill used **only for material changes**, not a standalone monitoring entrypoint. Install each required skill separately from the [packaging workflow](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain), or use this checkout's `.agents/skills/` discovery links (`.claude/skills/` points to them). Invoke only the chosen entrypoint.
+`web-update-report` includes research and drafting for material changes. Install each required skill separately from the [packaging workflow](https://github.com/dceoy/wsum/actions/workflows/agent-skills-package.yml?query=branch%3Amain), or use this checkout's `.agents/skills/` discovery links (`.claude/skills/` points to them). Invoke only the chosen entrypoint.
 
 ## Quick start
 
@@ -39,7 +39,7 @@ Optionally supply either `Common context:` (inline text) or `Context source: /pa
 
 ### Google Workspace reporting (optional)
 
-Install all four skills and invoke:
+Install all three skills and invoke:
 
 ```text
 /web-update-report-gws
@@ -60,7 +60,7 @@ flowchart LR
     GWS -->|"Restore + validate"| LOCAL
     LOCAL --> MON["web-update-monitor"]
     MON -->|"Changed / resumed review"| REVIEW{"Material?"}
-    REVIEW -->|Yes| RESEARCH["web-update-research"]
+    REVIEW -->|Yes| RESEARCH["Research within web-update-report"]
     REVIEW -->|No| FINAL["Core finalize"]
     RESEARCH -->|"Cited section"| FINAL
     FINAL -->|"Material only"| MD["output/report/<run-id>.md"]
@@ -115,6 +115,6 @@ uv sync
 uv run pytest
 ```
 
-[CI](.github/workflows/ci.yml) runs tests, linting, security checks, and validation of all four canonical Agent Skills with [`skills-ref`](https://github.com/agentskills/agentskills/tree/main/skills-ref).
+[CI](.github/workflows/ci.yml) runs tests, linting, security checks, and validation of all three canonical Agent Skills with [`skills-ref`](https://github.com/agentskills/agentskills/tree/main/skills-ref).
 
 Keep operational targets CSVs, downloaded content, `output/`, `internal/`, and credentials out of Git. Browser-rendered sources require separately controlled public-network egress; static-fetch failures must not silently trigger a browser.
