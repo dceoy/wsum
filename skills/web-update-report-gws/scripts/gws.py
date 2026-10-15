@@ -6,6 +6,8 @@ Google connector transport and permissions remain the host agent's responsibilit
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import csv
 import hashlib
 import importlib.util
@@ -70,6 +72,42 @@ def _write_atomic(path: Path, content: bytes) -> None:
         temp.replace(path)
     finally:
         temp.unlink(missing_ok=True)
+
+
+def transfer_encode(path: Path) -> dict[str, str | int]:
+    """Expose exact local UTF-8 bytes for a connector base64Content upload."""
+    content = _text_bytes(path)
+    return {
+        "base64Content": base64.b64encode(content).decode("ascii"),
+        "sha256": _digest(content),
+        "size": len(content),
+    }
+
+
+def transfer_decode(
+    source: Path, destination: Path, size: int, sha256: str | None
+) -> dict[str, str | int | bool]:
+    """Materialize a connector Base64 response and check independent expectations."""
+    if destination.exists() or destination.is_symlink():
+        raise GwsError("transfer destination must not exist")
+    if size < 0 or size > MAX_ENTRY:
+        raise GwsError("invalid transfer byte size")
+    if sha256 is not None and not SHA_RE.fullmatch(sha256):
+        raise GwsError("invalid expected transfer SHA-256")
+    encoded = source.read_bytes().strip()
+    if len(encoded) > ((MAX_ENTRY + 2) // 3) * 4:
+        raise GwsError("encoded transfer exceeds size limit")
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise GwsError("invalid connector Base64 content") from exc
+    if len(content) != size:
+        raise GwsError("connector transfer size mismatch")
+    digest = _digest(content)
+    if sha256 is not None and digest != sha256:
+        raise GwsError("connector transfer SHA-256 mismatch")
+    _write_atomic(destination, content)
+    return {"sha256": digest, "size": len(content), "verified": sha256 is not None}
 
 
 def _timestamp(value: str) -> datetime:
@@ -637,6 +675,13 @@ def ledger(path: Path, report: Path, record: bool) -> dict[str, typing.Any]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    p = commands.add_parser("transfer-encode")
+    p.add_argument("--file", type=Path, required=True)
+    p = commands.add_parser("transfer-decode")
+    p.add_argument("--base64-file", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--size", type=int, required=True)
+    p.add_argument("--sha256")
     p = commands.add_parser("project")
     source = p.add_mutually_exclusive_group(required=True)
     source.add_argument("--sheet-json", type=Path)
@@ -684,7 +729,13 @@ def main() -> None:
     parser = _parser()
     args = parser.parse_args()
     try:
-        if args.command == "project":
+        if args.command == "transfer-encode":
+            result = transfer_encode(args.file)
+        elif args.command == "transfer-decode":
+            result = transfer_decode(
+                args.base64_file, args.output, args.size, args.sha256
+            )
+        elif args.command == "project":
             if args.drive_csv is None and args.drive_size is not None:
                 raise GwsError("Drive CSV metadata requires --drive-csv")
             if args.drive_csv is not None and args.drive_size is None:
