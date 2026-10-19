@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from argparse import Namespace
 from pathlib import Path
 from typing import cast
 
@@ -73,9 +74,10 @@ def test_check_records_success_not_failure_or_skip(
     assert workspace.check(tmp_path, targets)["targets"] == [
         {"action": "skipped", "target_id": target_id, "name": "Example"}
     ]
-    assert workspace.observation_status(tmp_path, target_id=target_id)[
-        "last_checked_at"
-    ] == previous
+    assert (
+        workspace.observation_status(tmp_path, target_id=target_id)["last_checked_at"]
+        == previous
+    )
 
 
 def test_baseline_promotion_and_changed_review_are_distinct(
@@ -85,12 +87,12 @@ def test_baseline_promotion_and_changed_review_are_distinct(
     fetched = tmp_path / "fetch.txt"
     fetched.write_text("old\n")
 
-    def fake_run(args: object) -> dict[str, object]:
-        path = Path(getattr(args, "input"))
-        output = Path(getattr(args, "output"))
+    def fake_run(args: Namespace) -> dict[str, object]:
+        path = Path(args.input)
+        output = Path(args.output)
         content = path.read_bytes()
         output.write_bytes(content)
-        previous_path = getattr(args, "previous", None)
+        previous_path = args.previous
         previous = Path(previous_path).read_bytes() if previous_path else None
         return {
             "status": (
@@ -167,9 +169,7 @@ def test_status_command_and_corrupt_record_fail_closed(
         workspace.observation_status(tmp_path, target_id=target_id)
 
 
-def test_observation_rejects_symlink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_observation_rejects_symlink(tmp_path: Path) -> None:
     _, target_id = _targets(tmp_path)
     state = tmp_path / "internal" / "state"
     state.mkdir(parents=True)
@@ -184,4 +184,3 @@ def test_observation_rejects_symlink(
         pytest.skip("symlinks are not supported")
     with pytest.raises(workspace.WorkspaceError, match="unsafe"):
         workspace.observation_status(tmp_path, target_id=target_id)
-    del monkeypatch
