@@ -30,6 +30,11 @@ _OUTPUT_DIR = "output"
 _STATE_DIR = "state"
 _OBSERVATION_DIR = "observations"
 _OBSERVATION_FIELDS = ("last_checked_at", "baseline_updated_at")
+_OBSERVATION_BINDINGS = (
+    "baseline_sha256",
+    "pending_baseline_sha256",
+    "pending_baseline_updated_at",
+)
 _MAX_OBSERVATION_BYTES = 1024
 _REPORT_DIR = "report"
 _PENDING_RECOVERY_DIR = "recovery"
@@ -575,10 +580,13 @@ def _observation_directory(state: Path, *, create: bool) -> Path | None:
     return path
 
 
-def _read_observation(state: Path, target_id: str) -> dict[str, str | None]:
+def _load_observation(state: Path, target_id: str) -> dict[str, str | None]:
     """Read timestamps without inferring unknown historical observations."""
     target_id = _validate_target_id(target_id)
-    empty: dict[str, str | None] = dict.fromkeys(_OBSERVATION_FIELDS)
+    empty: dict[str, str | None] = dict.fromkeys((
+        *_OBSERVATION_FIELDS,
+        *_OBSERVATION_BINDINGS,
+    ))
     directory = _observation_directory(state, create=False)
     if directory is None:
         return empty
@@ -599,9 +607,20 @@ def _read_observation(state: Path, target_id: str) -> dict[str, str | None]:
     if not isinstance(value, dict):
         raise WorkspaceError("observation record is invalid")
     record = cast("dict[str, object]", value)
-    if set(record) != set(_OBSERVATION_FIELDS):
+    if frozenset(record) not in {
+        frozenset(_OBSERVATION_FIELDS),
+        frozenset((*_OBSERVATION_FIELDS, *_OBSERVATION_BINDINGS)),
+    }:
         raise WorkspaceError("observation record is invalid")
-    for field in _OBSERVATION_FIELDS:
+    for field in _OBSERVATION_BINDINGS:
+        record.setdefault(field, None)
+    for field in ("baseline_sha256", "pending_baseline_sha256"):
+        _validate_sha256(record[field], field, allow_none=True)
+    if (record["pending_baseline_sha256"] is None) != (
+        record["pending_baseline_updated_at"] is None
+    ):
+        raise WorkspaceError("pending observation is invalid")
+    for field in (*_OBSERVATION_FIELDS, "pending_baseline_updated_at"):
         timestamp = record[field]
         if timestamp is None:
             continue
@@ -618,15 +637,56 @@ def _read_observation(state: Path, target_id: str) -> dict[str, str | None]:
     return cast("dict[str, str | None]", record)
 
 
-def _record_observation(state: Path, target_id: str, field: str) -> None:
-    """Persist a UTC timestamp after the corresponding successful transition."""
+def _observation_baseline(
+    state: Path, target_id: str, record: Mapping[str, str | None]
+) -> tuple[str | None, str | None]:
+    """Select a timestamp only when its digest matches the current baseline."""
+    snapshots = state / "snapshots"
+    info = _optional_lstat(snapshots, "snapshot directory")
+    if info is None:
+        return None, None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise WorkspaceError("snapshot directory must be a non-symlink directory")
+    snapshot = _read_snapshot(snapshots / f"{target_id}.txt")
+    digest = None if snapshot is None else hashlib.sha256(snapshot).hexdigest()
+    for digest_field, time_field in (
+        ("pending_baseline_sha256", "pending_baseline_updated_at"),
+        ("baseline_sha256", "baseline_updated_at"),
+    ):
+        if digest is not None and record[digest_field] == digest:
+            return digest, record[time_field]
+    return None, None
+
+
+def _read_observation(state: Path, target_id: str) -> dict[str, str | None]:
+    record = _load_observation(state, target_id)
+    _, timestamp = _observation_baseline(state, target_id, record)
+    return {
+        "last_checked_at": record["last_checked_at"],
+        "baseline_updated_at": timestamp,
+    }
+
+
+def _record_observation(
+    state: Path, target_id: str, field: str, *, candidate_sha256: str | None = None
+) -> None:
+    """Persist a source timestamp or prepare a digest-bound promotion timestamp."""
     if field not in _OBSERVATION_FIELDS:
         raise WorkspaceError("unsupported observation field")
     target_id = _validate_target_id(target_id)
-    record = _read_observation(state, target_id)
+    record = _load_observation(state, target_id)
+    digest, timestamp = _observation_baseline(state, target_id, record)
+    record["baseline_sha256"] = digest
+    record["baseline_updated_at"] = timestamp
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    previous = record[field]
-    record[field] = max(now, previous) if previous is not None else now
+    if field == "baseline_updated_at":
+        record["pending_baseline_sha256"] = _validate_sha256(
+            candidate_sha256, "candidate_sha256"
+        )
+        record["pending_baseline_updated_at"] = now
+    else:
+        previous = record[field]
+        record[field] = max(now, previous) if previous is not None else now
     directory = cast("Path", _observation_directory(state, create=True))
     destination = directory / f"{target_id}.json"
     data = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
@@ -642,6 +702,16 @@ def _record_observation(state: Path, target_id: str, field: str) -> None:
         _fsync_directory(directory)
     except OSError as exc:
         raise WorkspaceError("cannot fsync observation directory") from exc
+
+
+def _try_record_observation(
+    state: Path, target_id: str, field: str, *, candidate_sha256: str | None = None
+) -> None:
+    """Keep auxiliary metadata failures separate from core monitoring outcomes."""
+    try:
+        _record_observation(state, target_id, field, candidate_sha256=candidate_sha256)
+    except (WorkspaceError, OSError) as exc:
+        print(f"observation warning for {target_id}: {exc}", file=sys.stderr)
 
 
 def observation_status(
@@ -726,6 +796,9 @@ def _promote_snapshot(
             "current_sha256": current_sha256,
         }
 
+    _try_record_observation(
+        state, target_id, "baseline_updated_at", candidate_sha256=candidate_digest
+    )
     temporary = _write_temporary_file(destination, candidate_data, "snapshot")
     try:
         temporary.replace(destination)
@@ -740,7 +813,6 @@ def _promote_snapshot(
     durable_sha256 = None if durable is None else hashlib.sha256(durable).hexdigest()
     if durable_sha256 != candidate_digest:
         raise WorkspaceError("snapshot read-back mismatch")
-    _record_observation(state, target_id, "baseline_updated_at")
     return {
         "action": "snapshot_promoted",
         "applied": True,
@@ -1862,7 +1934,9 @@ def check(
                 max_links=max_links,
             )
             if outcome.get("action") in {"baseline_created", "unchanged", "review"}:
-                _record_observation(state, str(target["target_id"]), "last_checked_at")
+                _try_record_observation(
+                    state, str(target["target_id"]), "last_checked_at"
+                )
             outcomes.append(
                 _compact_review(outcome)
                 if compact and outcome.get("action") == "review"
@@ -1953,7 +2027,7 @@ def ingest_agent_fetch(
         link_evidence_incomplete=link_evidence_incomplete,
     )
     if result.get("action") in {"baseline_created", "unchanged", "review"}:
-        _record_observation(state, target_id, "last_checked_at")
+        _try_record_observation(state, target_id, "last_checked_at")
     return result
 
 

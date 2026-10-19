@@ -2386,9 +2386,9 @@ def test_promote_snapshot_fsyncs_snapshot_directories(
     expected = [
         state,
         state,
-        state / "snapshots",
         state,
         state / "observations",
+        state / "snapshots",
     ]
     assert fsynced == expected
 

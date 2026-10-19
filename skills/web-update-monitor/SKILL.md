@@ -118,7 +118,11 @@ python scripts/workspace.py --workspace "$WORKSPACE" status
 python scripts/workspace.py --workspace "$WORKSPACE" status --target-id "<target-id>"
 ```
 
-A missing record or field is reported as `null`, not inferred from file modification times. Records are maintained using atomic file replacement and included in Google Drive workspace snapshots through the GWS wrapper. Historical timestamps from preexisting baselines cannot be reconstructed reliably; a failed metadata write may likewise leave an unknown timestamp even if a snapshot promotion completed.
+A missing record is reported as `null`, never inferred from file modification times. Records use atomic file replacement and are included in Google Drive workspace snapshots through the GWS wrapper. Before baseline replacement, the helper durably prepares a UTC timestamp and candidate digest while retaining the previous baseline pair. Status exposes the prepared timestamp only when the current snapshot matches that digest; retries preserve that timestamp rather than assigning retry time. A later observation consolidates the matching pair. The timestamp identifies preparation of the successful promotion, rather than the exact fsync completion instant.
+
+Observation failures emit an `observation warning` on stderr while successful monitoring and finalization keep their normal JSON results. If metadata cannot be prepared, promotion still proceeds; a baseline without a matching digest-bound timestamp is reported as `null`, including legacy records whose baseline timestamp has no digest association. `last_checked_at` from valid legacy records remains available.
+
+Invalid metadata is never overwritten or followed through a symlink. `status` fails explicitly on unsafe or corrupt entries. Inspect and restore the affected `internal/state/observations/<target-id>.json`, or remove the invalid entry (or unsafe observations directory) after retaining any evidence you need. Subsequent successful observations establish new known timestamps; unrecorded promotion history remains unknown. Monitoring does not automatically delete corrupt records.
 
 ## Check targets
 

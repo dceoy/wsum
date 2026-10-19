@@ -406,3 +406,281 @@ def test_ingest_conflict_does_not_record_success(
     )
     assert result["action"] == "snapshot_conflict"
     assert workspace.observation_status(tmp_path)["targets"] == []
+
+
+def _ingest(root: Path, targets: Path, target_id: str, text: str) -> dict[str, object]:
+    fetched = root / "fetch.txt"
+    fetched.write_text(text)
+    return workspace.ingest_agent_fetch(
+        root,
+        targets,
+        target_id=target_id,
+        run_id=_RUN_ID,
+        input_path=fetched,
+        link_depth=0,
+    )
+
+
+def _break_observations(
+    root: Path, target_id: str, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = root / "internal" / "state" / "observations"
+    directory.mkdir(parents=True, exist_ok=True)
+    record = directory / f"{target_id}.json"
+    if kind == "corrupt":
+        record.write_text("broken json")
+    elif kind == "symlink":
+        record.unlink(missing_ok=True)
+        external = root / "external.json"
+        external.write_text("untouched")
+        record.symlink_to(external)
+    else:
+        original = workspace._write_temporary_file
+
+        def failed_write(destination: Path, data: bytes, description: str) -> Path:
+            if description == "observation record":
+                raise OSError
+            return original(destination, data, description)
+
+        monkeypatch.setattr(workspace, "_write_temporary_file", failed_write)
+
+
+@pytest.mark.parametrize("kind", ["corrupt", "write", "symlink"])
+def test_ingest_metadata_failure_preserves_core_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+) -> None:
+    targets, target_id = _targets(tmp_path)
+    _break_observations(tmp_path, target_id, kind, monkeypatch)
+    assert (
+        _ingest(tmp_path, targets, target_id, "old\n")["action"] == "baseline_created"
+    )
+    assert _ingest(tmp_path, targets, target_id, "old\n")["action"] == "unchanged"
+    assert _ingest(tmp_path, targets, target_id, "new\n")["action"] == "review"
+    assert "observation warning" in capsys.readouterr().err
+    snapshot = tmp_path / "internal" / "state" / "snapshots" / f"{target_id}.txt"
+    assert snapshot.read_text() == "old\n"
+    if kind == "symlink":
+        assert (tmp_path / "external.json").read_text() == "untouched"
+
+
+@pytest.mark.parametrize("kind", ["corrupt", "write", "symlink"])
+@pytest.mark.parametrize("compact", [False, True])
+def test_check_metadata_failure_preserves_core_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+    compact: bool,
+) -> None:
+    targets, target_id = _targets(tmp_path)
+    fetched = tmp_path / "fetch.txt"
+    fetched.write_text("old\n")
+
+    def local_monitor(
+        state: Path,
+        target: dict[str, object],
+        run_id: str,
+        *,
+        link_depth: int,
+        max_links: int,
+    ) -> dict[str, object]:
+        return workspace._monitor_target_from_source(
+            state,
+            target,
+            run_id,
+            ["--input", str(fetched)],
+            link_depth=link_depth,
+            max_links=max_links,
+        )
+
+    monkeypatch.setattr(workspace, "_monitor_target", local_monitor)
+    _break_observations(tmp_path, target_id, kind, monkeypatch)
+    for text, action in [
+        ("old\n", "baseline_created"),
+        ("old\n", "unchanged"),
+        ("new\n", "review"),
+    ]:
+        fetched.write_text(text)
+        result = workspace.check(tmp_path, targets, compact=compact, link_depth=0)
+        assert cast("list[dict[str, object]]", result["targets"])[0]["action"] == action
+    assert "observation warning" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("kind", ["corrupt", "write", "symlink"])
+@pytest.mark.parametrize("archive", [False, True])
+def test_finalize_metadata_failure_preserves_core_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+    archive: bool,
+) -> None:
+    targets, target_id = _targets(tmp_path)
+    _ingest(tmp_path, targets, target_id, "old\n")
+    review = _ingest(tmp_path, targets, target_id, "new\n")
+    _break_observations(tmp_path, target_id, kind, monkeypatch)
+    result = workspace.finalize(
+        tmp_path,
+        {
+            "target_id": target_id,
+            "revision": review["revision"],
+            "material": True,
+            "report": "Changed content.\n",
+        },
+        targets=targets,
+        archive_evidence=archive,
+    )
+    assert result["action"] == "finalized"
+    snapshot = tmp_path / "internal" / "state" / "snapshots" / f"{target_id}.txt"
+    assert snapshot.read_text() == "new\n"
+    assert "observation warning" in capsys.readouterr().err
+    if kind == "write":
+        assert (
+            workspace.observation_status(tmp_path, target_id=target_id)[
+                "baseline_updated_at"
+            ]
+            is None
+        )
+
+
+@pytest.mark.parametrize("archive", [False, True])
+def test_finalize_retry_preserves_prepared_timestamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive: bool,
+) -> None:
+    targets, target_id = _targets(tmp_path)
+    _ingest(tmp_path, targets, target_id, "old\n")
+    review = _ingest(tmp_path, targets, target_id, "new\n")
+    decision = {
+        "target_id": target_id,
+        "revision": review["revision"],
+        "material": True,
+        "report": "Changed content.\n",
+    }
+    original_report = workspace._write_report
+
+    def fail_report(*_args: object, **_kwargs: object) -> Path:
+        message = "report failed after snapshot promotion"
+        raise workspace.WorkspaceError(message)
+
+    monkeypatch.setattr(workspace, "_write_report", fail_report)
+    with pytest.raises(workspace.WorkspaceError, match="report failed"):
+        workspace.finalize(
+            tmp_path, decision, targets=targets, archive_evidence=archive
+        )
+    state = tmp_path / "internal" / "state"
+    path = state / "observations" / f"{target_id}.json"
+    record = json.loads(path.read_text())
+    # A distinct persisted timestamp makes accidental use of retry time observable.
+    record["pending_baseline_updated_at"] = "2020-01-01T00:00:00Z"
+    path.write_text(json.dumps(record))
+    monkeypatch.setattr(workspace, "_write_report", original_report)
+    assert (
+        workspace.finalize(
+            tmp_path, decision, targets=targets, archive_evidence=archive
+        )["action"]
+        == "finalized"
+    )
+    assert (
+        workspace.observation_status(tmp_path, target_id=target_id)[
+            "baseline_updated_at"
+        ]
+        == "2020-01-01T00:00:00Z"
+    )
+    # A later source observation consolidates the matching prepared pair.
+    assert _ingest(tmp_path, targets, target_id, "new\n")["action"] == "unchanged"
+    assert (
+        workspace.observation_status(tmp_path, target_id=target_id)[
+            "baseline_updated_at"
+        ]
+        == "2020-01-01T00:00:00Z"
+    )
+
+
+def test_failed_snapshot_replace_preserves_previous_timestamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    targets, target_id = _targets(tmp_path)
+    _ingest(tmp_path, targets, target_id, "old\n")
+    previous = workspace.observation_status(tmp_path, target_id=target_id)
+    review = _ingest(tmp_path, targets, target_id, "new\n")
+    original = Path.replace
+
+    def fail_snapshot(path: Path, destination: Path) -> Path:
+        if destination.parent.name == "snapshots":
+            raise OSError
+        return original(path, destination)
+
+    monkeypatch.setattr(Path, "replace", fail_snapshot)
+    with pytest.raises(workspace.WorkspaceError, match="cannot promote snapshot"):
+        workspace.finalize(
+            tmp_path,
+            {"target_id": target_id, "revision": review["revision"], "material": False},
+        )
+    assert (
+        workspace.observation_status(tmp_path, target_id=target_id)[
+            "baseline_updated_at"
+        ]
+        == previous["baseline_updated_at"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("baseline_sha256", "invalid"),
+        ("pending_baseline_sha256", "invalid"),
+        ("pending_baseline_updated_at", None),
+        ("pending_baseline_updated_at", "yesterday"),
+    ],
+)
+def test_invalid_observation_binding(
+    tmp_path: Path,
+    field: str,
+    value: str | None,
+) -> None:
+    targets, target_id = _targets(tmp_path)
+    _ingest(tmp_path, targets, target_id, "old\n")
+    path = tmp_path / "internal" / "state" / "observations" / f"{target_id}.json"
+    record = json.loads(path.read_text())
+    record[field] = value
+    path.write_text(json.dumps(record))
+    with pytest.raises(workspace.WorkspaceError):
+        workspace.observation_status(tmp_path, target_id=target_id)
+
+
+def test_observation_legacy_baseline_is_unassociated(tmp_path: Path) -> None:
+    _, target_id = _targets(tmp_path)
+    state = workspace._state_dir(tmp_path)
+    directory = state / "observations"
+    directory.mkdir()
+    (directory / f"{target_id}.json").write_text(
+        json.dumps({
+            "last_checked_at": "2020-01-01T00:00:00Z",
+            "baseline_updated_at": "2020-01-01T00:00:00Z",
+        })
+    )
+    (state / "snapshots").mkdir()
+    status = workspace.observation_status(tmp_path, target_id=target_id)
+    assert status["last_checked_at"] == "2020-01-01T00:00:00Z"
+    assert status["baseline_updated_at"] is None
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink"])
+def test_observation_rejects_unsafe_snapshot_directory(
+    tmp_path: Path, kind: str
+) -> None:
+    _, target_id = _targets(tmp_path)
+    state = workspace._state_dir(tmp_path)
+    path = state / "snapshots"
+    if kind == "file":
+        path.write_text("unsafe")
+    else:
+        path.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(workspace.WorkspaceError, match="snapshot directory"):
+        workspace.observation_status(tmp_path, target_id=target_id)
