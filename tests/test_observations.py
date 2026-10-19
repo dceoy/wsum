@@ -115,20 +115,28 @@ def test_baseline_promotion_and_changed_review_are_distinct(
         }
 
     monkeypatch.setattr(workspace.monitor, "run", fake_run)
-    kwargs = {
-        "target_id": target_id,
-        "run_id": _RUN_ID,
-        "input_path": fetched,
-        "link_depth": 0,
-    }
-    first = workspace.ingest_agent_fetch(tmp_path, targets, **kwargs)
+    first = workspace.ingest_agent_fetch(
+        tmp_path,
+        targets,
+        target_id=target_id,
+        run_id=_RUN_ID,
+        input_path=fetched,
+        link_depth=0,
+    )
     assert first["action"] == "baseline_created"
     recorded = workspace.observation_status(tmp_path, target_id=target_id)
     assert recorded["last_checked_at"] is not None
     assert recorded["baseline_updated_at"] is not None
 
     fetched.write_text("new\n")
-    review = workspace.ingest_agent_fetch(tmp_path, targets, **kwargs)
+    review = workspace.ingest_agent_fetch(
+        tmp_path,
+        targets,
+        target_id=target_id,
+        run_id=_RUN_ID,
+        input_path=fetched,
+        link_depth=0,
+    )
     assert review["action"] == "review"
     observation = workspace.observation_status(tmp_path, target_id=target_id)
     assert observation["baseline_updated_at"] == recorded["baseline_updated_at"]
@@ -384,14 +392,10 @@ def test_ingest_conflict_does_not_record_success(
     targets, target_id = _targets(tmp_path)
     fetched = tmp_path / "fetch.txt"
     fetched.write_text("content")
-    monkeypatch.setattr(
-        workspace,
-        "_monitor_target_from_source",
-        lambda *_args, **_kwargs: {
-            "action": "snapshot_conflict",
-            "target_id": target_id,
-        },
-    )
+    def fake_conflict(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {"action": "snapshot_conflict", "target_id": target_id}
+
+    monkeypatch.setattr(workspace, "_monitor_target_from_source", fake_conflict)
     result = workspace.ingest_agent_fetch(
         tmp_path,
         targets,
