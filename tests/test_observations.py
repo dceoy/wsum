@@ -9,11 +9,11 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-if TYPE_CHECKING:
-    from argparse import Namespace
-
 import pytest
 import workspace
+
+if TYPE_CHECKING:
+    from argparse import Namespace
 
 
 _RUN_ID = "20261001T000000Z-deadbeef"
@@ -164,7 +164,7 @@ def test_status_command_and_corrupt_record_fail_closed(
         "baseline_updated_at": None,
     }
 
-    state = tmp_path / "internal" / "state"
+    state = workspace._state_dir(tmp_path)
     workspace._record_observation(state, target_id, "last_checked_at")
     path = state / "observations" / f"{target_id}.json"
     path.write_text('{"last_checked_at":"yesterday","baseline_updated_at":null}')
@@ -256,9 +256,10 @@ def test_observation_rejects_unsafe_directory(tmp_path: Path, kind: str) -> None
 
 def test_observation_listing_and_missing_record(tmp_path: Path) -> None:
     _, target_id = _targets(tmp_path)
-    state = tmp_path / "internal" / "state"
+    state = workspace._state_dir(tmp_path)
     workspace._record_observation(state, target_id, "last_checked_at")
-    records = cast("list[dict[str, object]]", workspace.observation_status(tmp_path)["targets"])
+    result = workspace.observation_status(tmp_path)
+    records = cast("list[dict[str, object]]", result["targets"])
     assert len(records) == 1
     assert records[0]["target_id"] == target_id
     assert records[0]["last_checked_at"] is not None
@@ -269,7 +270,8 @@ def test_observation_listing_and_missing_record(tmp_path: Path) -> None:
 
     ignored = state / "observations" / ".leftover.tmp"
     ignored.write_text("discarded")
-    assert len(cast("list[object]", workspace.observation_status(tmp_path)["targets"])) == 1
+    result = workspace.observation_status(tmp_path)
+    assert len(cast("list[object]", result["targets"])) == 1
     (state / "observations" / "unexpected.txt").write_text("bad")
     with pytest.raises(workspace.WorkspaceError, match="unexpected"):
         workspace.observation_status(tmp_path)
@@ -277,7 +279,7 @@ def test_observation_listing_and_missing_record(tmp_path: Path) -> None:
 
 def test_observation_listing_rejects_unsafe_temporary(tmp_path: Path) -> None:
     _, target_id = _targets(tmp_path)
-    state = tmp_path / "internal" / "state"
+    state = workspace._state_dir(tmp_path)
     workspace._record_observation(state, target_id, "last_checked_at")
     (state / "observations" / ".unexpected.tmp").mkdir()
     with pytest.raises(workspace.WorkspaceError, match="unexpected"):
@@ -288,7 +290,7 @@ def test_observation_listing_handles_disappearing_temporary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, target_id = _targets(tmp_path)
-    state = tmp_path / "internal" / "state"
+    state = workspace._state_dir(tmp_path)
     workspace._record_observation(state, target_id, "last_checked_at")
     temporary = state / "observations" / ".race.tmp"
     temporary.write_text("temp")
@@ -332,7 +334,7 @@ def test_record_observation_rejects_replace_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, target_id = _targets(tmp_path)
-    state = tmp_path / "internal" / "state"
+    state = workspace._state_dir(tmp_path)
 
     def failed_replace(_self: Path, _destination: Path) -> None:
         raise OSError("injected replace error")
@@ -346,7 +348,7 @@ def test_record_observation_rejects_fsync_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, target_id = _targets(tmp_path)
-    state = tmp_path / "internal" / "state"
+    state = workspace._state_dir(tmp_path)
     original = workspace._fsync_directory
 
     def failed_fsync(path: Path) -> None:
