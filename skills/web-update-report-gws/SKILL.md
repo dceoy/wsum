@@ -346,6 +346,14 @@ hidden atomic temporary files. Do not change local workspace formats.
 Limits: 2,000 files, 64 MiB per payload, 256 MiB total, 2 MiB manifest.
 Empty directories are not stored; both roots are recreated on restore.
 
+Records for files under `internal/state/snapshots/` additionally carry an optional
+integer `mtime_ns` in the range `0..2^63-1`. It preserves the snapshot promotion
+identity used by observation timestamps; it is never a source for displayed
+historical dates. Restore applies the exact stamp and verifies readback before
+installing the workspace, failing if the filesystem rounds it. Older manifests
+without the field remain supported; older helpers that reject extra manifest
+fields must be upgraded to read newly packed snapshots.
+
 ### Restore
 
 List the complete bound workspace folder. Validate timestamped manifest names

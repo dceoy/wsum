@@ -49,6 +49,7 @@ flowchart TB
     C --> R["output/report/"]
     C --> S["internal/state/"]
     S --> SS["snapshots/"]
+    S --> OB["observations/"]
     S --> P["pending/"]
     P --> PT["<target-id>/"]
     PT --> PS["state.json"]
@@ -62,6 +63,7 @@ Generated files have these roles:
 - selected target CSV: user-facing monitoring configuration passed to each core workflow invocation.
 - `output/report/<run-id>.md`: one user-facing report for a check run when at least one material change is finalized.
 - `internal/state/snapshots/<target-id>.txt`: accepted normalized baseline.
+- `internal/state/observations/<target-id>.json`: UTC `last_checked_at` (latest successful source observation) and `baseline_updated_at` (latest durable baseline promotion), both nullable. Existing baselines are not assigned invented historical timestamps.
 - `internal/state/pending/<target-id>/candidate.txt`: normalized changed candidate awaiting semantic review.
 - `internal/state/pending/<target-id>/state.json`: resumable review transaction containing the run ID, revision, baseline/candidate hashes, bounded diff metadata, and the parent/linked-document review context needed to resume without refetching.
 
@@ -101,6 +103,26 @@ The scripts require Python 3.11 or newer and `pypdf`:
 ```bash
 python -m pip install -r requirements.txt
 ```
+
+## Observation timestamps
+
+The core records two per-URL UTC timestamps independently of baseline content:
+
+- `last_checked_at` advances after a successful `check` or `ingest` (baseline, unchanged, or review). Pending targets reused without a fetch, skipped targets, failed fetches and HTTP 403 handoffs do not advance it until successful ingestion.
+- `baseline_updated_at` advances when a newly accepted baseline is written (initial baseline or finalized change), including non-material changes. Unchanged checks do not change it.
+
+Read the recorded values without fetching or changing targets:
+
+```bash
+python scripts/workspace.py --workspace "$WORKSPACE" status
+python scripts/workspace.py --workspace "$WORKSPACE" status --target-id "<target-id>"
+```
+
+A missing record is reported as `null`, never inferred from file modification times. Records use atomic file replacement and are included in Google Drive workspace snapshots through the GWS wrapper. Before baseline replacement, the helper durably prepares a UTC timestamp, candidate digest, and snapshot modification stamp while retaining the previous baseline association. Status exposes the prepared timestamp only when the current snapshot matches both the digest and stamp; retries preserve that timestamp rather than assigning retry time. A later observation consolidates the matching pair. The timestamp identifies preparation of the successful promotion, rather than the exact fsync completion instant. Snapshot modification stamps increase strictly per promotion (even after clock rollback) and serve only as identities; displayed dates are never inferred from them. A filesystem that cannot represent the requested stamp exactly fails snapshot staging before replacement. The GWS wrapper preserves these stamps through pack/restore.
+
+Observation failures emit an `observation warning` on stderr while successful monitoring and finalization keep their normal JSON results. If metadata cannot be prepared, promotion still proceeds; a baseline without a matching promotion-bound timestamp is reported as `null`, including legacy records whose baseline timestamp has no promotion association. `last_checked_at` from valid legacy records remains available.
+
+Invalid metadata is never overwritten or followed through a symlink. `status` fails explicitly on unsafe or corrupt entries. Inspect and restore the affected `internal/state/observations/<target-id>.json`, or remove the invalid entry (or unsafe observations directory) after retaining any evidence you need. Subsequent successful observations establish new known timestamps; unrecorded promotion history remains unknown. Monitoring does not automatically delete corrupt records.
 
 ## Check targets
 

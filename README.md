@@ -96,6 +96,7 @@ workspace/
 ├── output/report/             # canonical run-level Markdown reports
 └── internal/
     ├── state/snapshots/        # accepted baselines
+    ├── state/observations/     # last checked and baseline updated (UTC)
     ├── state/pending/          # resumable reviews
     ├── state/recovery/         # interrupted transactions
     └── evidence/               # optional captured source evidence

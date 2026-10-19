@@ -428,7 +428,15 @@ def _manifest(path: Path, *, draft: bool = False) -> dict[str, typing.Any]:
             raise GwsError("invalid manifest file record")
         item = typing.cast("dict[str, typing.Any]", raw_item)
         if (
-            set(item) != ({"path", "size", "sha256"} | (set() if draft else {"id"}))
+            set(item) - {"mtime_ns"}
+            != ({"path", "size", "sha256"} | (set() if draft else {"id"}))
+            or (
+                "mtime_ns" in item
+                and (
+                    type(item["mtime_ns"]) is not int
+                    or not 0 <= item["mtime_ns"] <= 2**63 - 1
+                )
+            )
             or not isinstance(item["path"], str)
             or not _safe_path(item["path"])
             or item["path"] in names
@@ -479,7 +487,10 @@ def pack(workspace: Path, snapshot: Path, generation: str) -> dict[str, typing.A
                 raise GwsError("workspace size limit exceeded")
             digest = _digest(content)
             (stage / "payloads" / f"{digest}.txt").write_bytes(content)
-            files.append({"path": name, "size": len(content), "sha256": digest})
+            item = {"path": name, "size": len(content), "sha256": digest}
+            if name.startswith("internal/state/snapshots/"):
+                item["mtime_ns"] = path.stat().st_mtime_ns
+            files.append(item)
         manifest = {"format": "wsum-text-1", "generation": generation, "files": files}
         (stage / "draft.json").write_bytes(_json_bytes(manifest))
         _manifest(stage / "draft.json", draft=True)
@@ -574,6 +585,15 @@ def restore(
             path = stage / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
+        for item in value["files"]:
+            if "mtime_ns" in item:
+                path = stage / item["path"]
+                stamp = item["mtime_ns"]
+                os.utime(path, ns=(stamp, stamp))
+                if path.stat().st_mtime_ns != stamp:
+                    raise GwsError(
+                        "restored snapshot identity precision is unsupported"
+                    )
         if destination.exists() or destination.is_symlink():
             raise GwsError("restore destination already exists")
         stage.rename(destination)
