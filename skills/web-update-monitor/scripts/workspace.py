@@ -589,7 +589,6 @@ def _read_observation(state: Path, target_id: str) -> dict[str, str | None]:
     if (
         not stat.S_ISREG(info.st_mode)
         or stat.S_ISLNK(info.st_mode)
-        or stat.S_IMODE(info.st_mode) & 0o077
         or not 0 < info.st_size <= _MAX_OBSERVATION_BYTES
     ):
         raise WorkspaceError("observation record is unsafe")
