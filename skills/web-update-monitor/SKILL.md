@@ -49,6 +49,7 @@ flowchart TB
     C --> R["output/report/"]
     C --> S["internal/state/"]
     S --> SS["snapshots/"]
+    S --> OB["observations/"]
     S --> P["pending/"]
     P --> PT["<target-id>/"]
     PT --> PS["state.json"]
@@ -62,6 +63,7 @@ Generated files have these roles:
 - selected target CSV: user-facing monitoring configuration passed to each core workflow invocation.
 - `output/report/<run-id>.md`: one user-facing report for a check run when at least one material change is finalized.
 - `internal/state/snapshots/<target-id>.txt`: accepted normalized baseline.
+- `internal/state/observations/<target-id>.json`: UTC `last_checked_at` (latest successful source observation) and `baseline_updated_at` (latest durable baseline promotion), both nullable. Existing baselines are not assigned invented historical timestamps.
 - `internal/state/pending/<target-id>/candidate.txt`: normalized changed candidate awaiting semantic review.
 - `internal/state/pending/<target-id>/state.json`: resumable review transaction containing the run ID, revision, baseline/candidate hashes, bounded diff metadata, and the parent/linked-document review context needed to resume without refetching.
 
@@ -101,6 +103,22 @@ The scripts require Python 3.11 or newer and `pypdf`:
 ```bash
 python -m pip install -r requirements.txt
 ```
+
+## Observation timestamps
+
+The core records two per-URL UTC timestamps independently of baseline content:
+
+- `last_checked_at` advances after a successful `check` or `ingest` (baseline, unchanged, or review). Pending targets reused without a fetch, skipped targets, failed fetches and HTTP 403 handoffs do not advance it until successful ingestion.
+- `baseline_updated_at` advances when a newly accepted baseline is written (initial baseline or finalized change), including non-material changes. Unchanged checks do not change it.
+
+Read the recorded values without fetching or changing targets:
+
+```bash
+python scripts/workspace.py --workspace "$WORKSPACE" status
+python scripts/workspace.py --workspace "$WORKSPACE" status --target-id "<target-id>"
+```
+
+A missing record or field is reported as `null`, not inferred from file modification times. Records are maintained using atomic file replacement and included in Google Drive workspace snapshots through the GWS wrapper. Historical timestamps from preexisting baselines cannot be reconstructed reliably; a failed metadata write may likewise leave an unknown timestamp even if a snapshot promotion completed.
 
 ## Check targets
 

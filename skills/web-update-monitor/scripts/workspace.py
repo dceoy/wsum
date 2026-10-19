@@ -28,6 +28,9 @@ import monitor
 _INTERNAL_DIR = "internal"
 _OUTPUT_DIR = "output"
 _STATE_DIR = "state"
+_OBSERVATION_DIR = "observations"
+_OBSERVATION_FIELDS = ("last_checked_at", "baseline_updated_at")
+_MAX_OBSERVATION_BYTES = 1024
 _REPORT_DIR = "report"
 _PENDING_RECOVERY_DIR = "recovery"
 _MAX_CSV_BYTES = 1024 * 1024
@@ -559,6 +562,113 @@ def _write_temporary_file(destination: Path, data: bytes, description: str) -> P
     return path
 
 
+
+def _observation_directory(state: Path, *, create: bool) -> Path | None:
+    """Return the safely validated per-target observation directory."""
+    path = state / _OBSERVATION_DIR
+    if create:
+        return _ensure_directory(path, "observation directory", sync_parent=True)
+    info = _optional_lstat(path, "observation directory")
+    if info is None:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise WorkspaceError("observation directory must be a non-symlink directory")
+    return path
+
+
+def _read_observation(state: Path, target_id: str) -> dict[str, str | None]:
+    """Read timestamps without inferring unknown historical observations."""
+    target_id = _validate_target_id(target_id)
+    empty: dict[str, str | None] = dict.fromkeys(_OBSERVATION_FIELDS)
+    directory = _observation_directory(state, create=False)
+    if directory is None:
+        return empty
+    path = directory / f"{target_id}.json"
+    info = _optional_lstat(path, "observation record")
+    if info is None:
+        return empty
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or stat.S_IMODE(info.st_mode) & 0o077
+        or not 0 < info.st_size <= _MAX_OBSERVATION_BYTES
+    ):
+        raise WorkspaceError("observation record is unsafe")
+    try:
+        value = json.loads(path.read_bytes())
+    except (OSError, ValueError) as exc:
+        raise WorkspaceError("cannot read observation record") from exc
+    if not isinstance(value, dict) or set(value) != set(_OBSERVATION_FIELDS):
+        raise WorkspaceError("observation record is invalid")
+    for field in _OBSERVATION_FIELDS:
+        timestamp = value[field]
+        if timestamp is None:
+            continue
+        if not isinstance(timestamp, str):
+            raise WorkspaceError("observation timestamp is invalid")
+        try:
+            parsed = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError as exc:
+            raise WorkspaceError("observation timestamp is invalid") from exc
+        if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != timestamp:
+            raise WorkspaceError("observation timestamp is invalid")
+    return cast("dict[str, str | None]", value)
+
+
+def _record_observation(state: Path, target_id: str, field: str) -> None:
+    """Persist a UTC timestamp after the corresponding successful transition."""
+    if field not in _OBSERVATION_FIELDS:
+        raise WorkspaceError("unsupported observation field")
+    target_id = _validate_target_id(target_id)
+    record = _read_observation(state, target_id)
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    previous = record[field]
+    record[field] = max(now, previous) if previous is not None else now
+    directory = _observation_directory(state, create=True)
+    if directory is None:
+        raise WorkspaceError("observation directory is unavailable")
+    destination = directory / f"{target_id}.json"
+    data = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+    temporary = _write_temporary_file(destination, data, "observation record")
+    try:
+        temporary.replace(destination)
+    except OSError as exc:
+        raise WorkspaceError("cannot persist observation record") from exc
+    finally:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+    try:
+        _fsync_directory(directory)
+    except OSError as exc:
+        raise WorkspaceError("cannot fsync observation directory") from exc
+
+
+def observation_status(
+    workspace: str | Path, *, target_id: str | None = None
+) -> dict[str, object]:
+    """Return locally recorded timestamps without fetching any targets."""
+    state = _state_dir(_workspace(workspace))
+    if target_id is not None:
+        target_id = _validate_target_id(target_id)
+        return {"target_id": target_id, **_read_observation(state, target_id)}
+    directory = _observation_directory(state, create=False)
+    if directory is None:
+        return {"targets": []}
+    targets: list[dict[str, object]] = []
+    for entry in sorted(directory.iterdir(), key=lambda item: item.name):
+        if entry.name.startswith(".") and entry.name.endswith(".tmp"):
+            info = _optional_lstat(entry, "temporary observation record")
+            if info is not None and stat.S_ISREG(info.st_mode):
+                continue
+        if not entry.name.endswith(".json"):
+            raise WorkspaceError("unexpected observation directory entry")
+        current_id = _validate_target_id(entry.name[:-5])
+        targets.append({
+            "target_id": current_id,
+            **_read_observation(state, current_id),
+        })
+    return {"targets": targets}
+
 def _fsync_snapshot_directory(path: Path) -> None:
     try:
         _fsync_directory(path)
@@ -628,6 +738,7 @@ def _promote_snapshot(
     durable_sha256 = None if durable is None else hashlib.sha256(durable).hexdigest()
     if durable_sha256 != candidate_digest:
         raise WorkspaceError("snapshot read-back mismatch")
+    _record_observation(state, target_id, "baseline_updated_at")
     return {
         "action": "snapshot_promoted",
         "applied": True,
@@ -1748,6 +1859,8 @@ def check(
                 link_depth=link_depth,
                 max_links=max_links,
             )
+            if outcome.get("action") in {"baseline_created", "unchanged", "review"}:
+                _record_observation(state, str(target["target_id"]), "last_checked_at")
             outcomes.append(
                 _compact_review(outcome)
                 if compact and outcome.get("action") == "review"
@@ -1828,7 +1941,7 @@ def ingest_agent_fetch(
         and links_path is None
         and content_type_main in {"", "text/plain"}
     )
-    return _monitor_target_from_source(
+    result = _monitor_target_from_source(
         state,
         target,
         run_id,
@@ -1837,6 +1950,9 @@ def ingest_agent_fetch(
         max_links=max_links,
         link_evidence_incomplete=link_evidence_incomplete,
     )
+    if result.get("action") in {"baseline_created", "unchanged", "review"}:
+        _record_observation(state, target_id, "last_checked_at")
+    return result
 
 
 def _validate_interests(value: object) -> list[dict[str, object]]:
@@ -2885,6 +3001,9 @@ def _parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--link-depth", type=int, default=_DEFAULT_LINK_DEPTH)
     ingest_parser.add_argument("--max-links", type=int, default=_MAX_LINKS)
 
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("--target-id")
+
     pending_parser = subparsers.add_parser("pending")
     pending_parser.add_argument("--target-id")
 
@@ -2927,6 +3046,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 link_depth=args.link_depth,
                 max_links=args.max_links,
             )
+        elif args.command == "status":
+            result = observation_status(args.workspace, target_id=args.target_id)
         elif args.command == "pending":
             result = pending_reviews(
                 args.workspace,
