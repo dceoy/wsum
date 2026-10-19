@@ -130,9 +130,8 @@ def test_baseline_promotion_and_changed_review_are_distinct(
     fetched.write_text("new\n")
     review = workspace.ingest_agent_fetch(tmp_path, targets, **kwargs)
     assert review["action"] == "review"
-    assert workspace.observation_status(tmp_path, target_id=target_id)[
-        "baseline_updated_at"
-    ] == recorded["baseline_updated_at"]
+    observation = workspace.observation_status(tmp_path, target_id=target_id)
+    assert observation["baseline_updated_at"] == recorded["baseline_updated_at"]
 
     final = workspace.finalize(
         tmp_path,
@@ -143,9 +142,8 @@ def test_baseline_promotion_and_changed_review_are_distinct(
         },
     )
     assert final["action"] == "finalized"
-    assert workspace.observation_status(tmp_path, target_id=target_id)[
-        "baseline_updated_at"
-    ] is not None
+    observation = workspace.observation_status(tmp_path, target_id=target_id)
+    assert observation["baseline_updated_at"] is not None
     assert (
         tmp_path / "internal" / "state" / "snapshots" / f"{target_id}.txt"
     ).read_text() == "new\n"
@@ -155,9 +153,8 @@ def test_status_command_and_corrupt_record_fail_closed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _, target_id = _targets(tmp_path)
-    assert workspace.main([
-        "--workspace", str(tmp_path), "status", "--target-id", target_id,
-    ]) == 0
+    argv = ["--workspace", str(tmp_path), "status", "--target-id", target_id]
+    assert workspace.main(argv) == 0
     assert json.loads(capsys.readouterr().out) == {
         "target_id": target_id,
         "last_checked_at": None,
@@ -264,9 +261,8 @@ def test_observation_listing_and_missing_record(tmp_path: Path) -> None:
     assert records[0]["target_id"] == target_id
     assert records[0]["last_checked_at"] is not None
     assert records[0]["baseline_updated_at"] is None
-    assert workspace.observation_status(tmp_path, target_id="not-monitored")[
-        "last_checked_at"
-    ] is None
+    missing = workspace.observation_status(tmp_path, target_id="not-monitored")
+    assert missing["last_checked_at"] is None
 
     ignored = state / "observations" / ".leftover.tmp"
     ignored.write_text("discarded")
@@ -325,9 +321,8 @@ def test_record_observation_never_moves_time_backward(tmp_path: Path) -> None:
     )
     record.chmod(0o600)
     workspace._record_observation(state, target_id, "last_checked_at")
-    assert workspace.observation_status(tmp_path, target_id=target_id)[
-        "last_checked_at"
-    ] == "2099-01-01T00:00:00Z"
+    current = workspace.observation_status(tmp_path, target_id=target_id)
+    assert current["last_checked_at"] == "2099-01-01T00:00:00Z"
 
 
 def test_record_observation_rejects_replace_error(
