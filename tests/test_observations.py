@@ -392,6 +392,7 @@ def test_ingest_conflict_does_not_record_success(
     targets, target_id = _targets(tmp_path)
     fetched = tmp_path / "fetch.txt"
     fetched.write_text("content")
+
     def fake_conflict(*_args: object, **_kwargs: object) -> dict[str, str]:
         return {"action": "snapshot_conflict", "target_id": target_id}
 
