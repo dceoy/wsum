@@ -214,15 +214,16 @@ def test_observation_rejects_invalid_records(
         workspace.observation_status(tmp_path, target_id=target_id)
 
 
-def test_observation_rejects_insecure_permissions(tmp_path: Path) -> None:
+def test_observation_accepts_gws_restored_permissions(tmp_path: Path) -> None:
     _, target_id = _targets(tmp_path)
     directory = tmp_path / "internal" / "state" / "observations"
     directory.mkdir(parents=True)
     record = directory / f"{target_id}.json"
     record.write_text('{"last_checked_at":null,"baseline_updated_at":null}')
     record.chmod(0o644)
-    with pytest.raises(workspace.WorkspaceError, match="unsafe"):
-        workspace.observation_status(tmp_path, target_id=target_id)
+    result = workspace.observation_status(tmp_path, target_id=target_id)
+    assert result["last_checked_at"] is None
+    assert result["baseline_updated_at"] is None
 
 
 def test_observation_rejects_nonregular_record(tmp_path: Path) -> None:
