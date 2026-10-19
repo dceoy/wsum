@@ -337,7 +337,7 @@ def test_record_observation_rejects_replace_error(
     state = workspace._state_dir(tmp_path)
 
     def failed_replace(_self: Path, _destination: Path) -> None:
-        raise OSError("injected replace error")
+        raise OSError
 
     monkeypatch.setattr(Path, "replace", failed_replace)
     with pytest.raises(workspace.WorkspaceError, match="cannot persist"):
@@ -353,7 +353,7 @@ def test_record_observation_rejects_fsync_error(
 
     def failed_fsync(path: Path) -> None:
         if path.name == "observations":
-            raise OSError("injected fsync error")
+            raise OSError
         original(path)
 
     monkeypatch.setattr(workspace, "_fsync_directory", failed_fsync)
