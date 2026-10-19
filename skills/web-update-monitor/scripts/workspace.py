@@ -625,7 +625,7 @@ def _record_observation(state: Path, target_id: str, field: str) -> None:
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     previous = record[field]
     record[field] = max(now, previous) if previous is not None else now
-    directory = _observation_directory(state, create=True)
+    directory = cast("Path", _observation_directory(state, create=True))
     destination = directory / f"{target_id}.json"
     data = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
     temporary = _write_temporary_file(destination, data, "observation record")
