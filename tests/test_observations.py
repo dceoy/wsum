@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -637,12 +638,16 @@ def test_failed_snapshot_replace_preserves_previous_timestamp(
         ("pending_baseline_sha256", "invalid"),
         ("pending_baseline_updated_at", None),
         ("pending_baseline_updated_at", "yesterday"),
+        ("baseline_mtime_ns", 1),
+        ("baseline_mtime_ns", "-1"),
+        ("pending_baseline_mtime_ns", "9" * 19),
+        ("pending_baseline_mtime_ns", "9" * 20),
     ],
 )
 def test_invalid_observation_binding(
     tmp_path: Path,
     field: str,
-    value: str | None,
+    value: str | int | None,
 ) -> None:
     targets, target_id = _targets(tmp_path)
     _ingest(tmp_path, targets, target_id, "old\n")
@@ -684,3 +689,66 @@ def test_observation_rejects_unsafe_snapshot_directory(
         path.symlink_to(tmp_path, target_is_directory=True)
     with pytest.raises(workspace.WorkspaceError, match="snapshot directory"):
         workspace.observation_status(tmp_path, target_id=target_id)
+
+
+@pytest.mark.parametrize("clock", [0, 10**18], ids=["rollback", "coarse"])
+def test_returning_content_during_metadata_outage_has_unknown_timestamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: int,
+) -> None:
+    targets, target_id = _targets(tmp_path)
+    monkeypatch.setattr(workspace, "time_ns", lambda: clock)
+    _ingest(tmp_path, targets, target_id, "A\n")
+    snapshot = tmp_path / "internal/state/snapshots" / f"{target_id}.txt"
+    first_stamp = snapshot.stat().st_mtime_ns
+    review = _ingest(tmp_path, targets, target_id, "B\n")
+    decision = {
+        "target_id": target_id,
+        "revision": review["revision"],
+        "material": False,
+    }
+    assert workspace.finalize(tmp_path, decision)["action"] == "finalized"
+    second_stamp = snapshot.stat().st_mtime_ns
+    assert second_stamp > first_stamp
+    with monkeypatch.context() as outage:
+        _break_observations(tmp_path, target_id, "write", outage)
+        review = _ingest(tmp_path, targets, target_id, "A\n")
+        decision["revision"] = review["revision"]
+        assert workspace.finalize(tmp_path, decision)["action"] == "finalized"
+    assert snapshot.stat().st_mtime_ns > second_stamp
+    assert (
+        workspace.observation_status(tmp_path, target_id=target_id)[
+            "baseline_updated_at"
+        ]
+        is None
+    )
+    assert _ingest(tmp_path, targets, target_id, "A\n")["action"] == "unchanged"
+    assert (
+        workspace.observation_status(tmp_path, target_id=target_id)[
+            "baseline_updated_at"
+        ]
+        is None
+    )
+
+
+def test_snapshot_identity_rejects_inexact_filesystem(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    targets, target_id = _targets(tmp_path)
+    original = os.utime
+
+    def inexact(path: Path, *, ns: tuple[int, int]) -> None:
+        original(path, ns=(ns[0] - 1, ns[1] - 1))
+
+    monkeypatch.setattr(workspace.os, "utime", inexact)
+    with pytest.raises(workspace.WorkspaceError, match="identity precision"):
+        _ingest(tmp_path, targets, target_id, "content\n")
+    assert not (tmp_path / "internal/state/snapshots" / f"{target_id}.txt").exists()
+    assert (
+        workspace.observation_status(tmp_path, target_id=target_id)[
+            "baseline_updated_at"
+        ]
+        is None
+    )

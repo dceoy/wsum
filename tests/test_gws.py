@@ -892,3 +892,73 @@ def test_base64_bridge_source_has_no_independent_digest(tmp_path: Path) -> None:
     assert dest.read_bytes() == b"a"
     with pytest.raises(gws.GwsError, match="must not exist"):
         gws.transfer_decode(source, dest, 1, None)
+
+
+def test_observation_identity_survives_drive_snapshot_restore(tmp_path: Path) -> None:
+    import workspace  # ruff: ignore[import-outside-top-level]
+
+    ws = _workspace(tmp_path)
+    targets = tmp_path / "targets.csv"
+    targets.write_text("name,url\nExample,https://example.com/\n")
+    target_id = str(workspace.load_targets(targets)[0]["target_id"])
+    fetched = tmp_path / "fetch.txt"
+    fetched.write_text("baseline content\n")
+    workspace.ingest_agent_fetch(
+        ws,
+        targets,
+        target_id=target_id,
+        run_id="20261001T000000Z-deadbeef",
+        input_path=fetched,
+        link_depth=0,
+    )
+    expected = workspace.observation_status(ws, target_id=target_id)
+    assert expected["baseline_updated_at"] is not None
+    drive = FakeDrive(tmp_path / "drive")
+    committed = drive.commit(ws, None)
+    manifest = drive.read(committed["id"])
+    restored = tmp_path / "restored"
+    gws.restore(manifest, drive.readbacks(manifest), restored)
+    assert workspace.observation_status(restored, target_id=target_id) == expected
+    snapshot = Path("internal/state/snapshots") / f"{target_id}.txt"
+    assert (restored / snapshot).stat().st_mtime_ns == (
+        ws / snapshot
+    ).stat().st_mtime_ns
+
+
+@pytest.mark.parametrize("stamp", [True, -1, 2**63, "123", None])
+def test_restore_rejects_invalid_snapshot_mtime(tmp_path: Path, stamp: object) -> None:
+    drive = FakeDrive(tmp_path / "drive")
+    committed = drive.commit(_workspace(tmp_path), None)
+    manifest = drive.read(committed["id"])
+    readbacks = drive.readbacks(manifest)
+    content = json.loads(manifest.read_bytes())
+    content["files"][0]["mtime_ns"] = stamp
+    manifest.write_text(json.dumps(content))
+    destination = tmp_path / "restored"
+    with pytest.raises(gws.GwsError, match="manifest file record"):
+        gws.restore(manifest, readbacks, destination)
+    assert not destination.exists()
+
+
+def test_restore_rejects_inexact_snapshot_mtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    drive = FakeDrive(tmp_path / "drive")
+    ws = _workspace(tmp_path)
+    snapshot = ws / "internal/state/snapshots/example.txt"
+    snapshot.parent.mkdir()
+    snapshot.write_text("baseline\n")
+    committed = drive.commit(ws, None)
+    manifest = drive.read(committed["id"])
+    readbacks = drive.readbacks(manifest)
+    original = gws.os.utime
+
+    def inexact(path: Path, *, ns: tuple[int, int]) -> None:
+        original(path, ns=(ns[0] - 1, ns[1] - 1))
+
+    monkeypatch.setattr(gws.os, "utime", inexact)
+    destination = tmp_path / "restored"
+    with pytest.raises(gws.GwsError, match="identity precision"):
+        gws.restore(manifest, readbacks, destination)
+    assert not destination.exists()
