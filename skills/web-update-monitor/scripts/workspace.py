@@ -606,9 +606,9 @@ def _read_observation(state: Path, target_id: str) -> dict[str, str | None]:
         if not isinstance(timestamp, str):
             raise WorkspaceError("observation timestamp is invalid")
         try:
-            parsed = datetime.strptime(
-                timestamp, "%Y-%m-%dT%H:%M:%SZ"
-            ).replace(tzinfo=UTC)
+            parsed = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=UTC
+            )
         except ValueError as exc:
             raise WorkspaceError("observation timestamp is invalid") from exc
         if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != timestamp:
