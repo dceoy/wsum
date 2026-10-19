@@ -2383,7 +2383,13 @@ def test_promote_snapshot_fsyncs_snapshot_directories(
     result = _promote(state, digest)
 
     assert result["action"] == "snapshot_promoted"
-    expected = [state, state, state / "snapshots"]
+    expected = [
+        state,
+        state,
+        state / "snapshots",
+        state,
+        state / "observations",
+    ]
     assert fsynced == expected
 
 
