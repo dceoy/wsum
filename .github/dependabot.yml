@@ -9,7 +9,9 @@ updates:
       default-days: 7
     open-pull-requests-limit: 10
   - package-ecosystem: pip
-    directory: /
+    directories:
+      - /
+      - /skills/web-update-monitor
     schedule:
       interval: daily
     cooldown:
