@@ -562,7 +562,6 @@ def _write_temporary_file(destination: Path, data: bytes, description: str) -> P
     return path
 
 
-
 def _observation_directory(state: Path, *, create: bool) -> Path | None:
     """Return the safely validated per-target observation directory."""
     path = state / _OBSERVATION_DIR
@@ -607,7 +606,7 @@ def _read_observation(state: Path, target_id: str) -> dict[str, str | None]:
         if not isinstance(timestamp, str):
             raise WorkspaceError("observation timestamp is invalid")
         try:
-            parsed = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")
+            parsed = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
         except ValueError as exc:
             raise WorkspaceError("observation timestamp is invalid") from exc
         if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != timestamp:
@@ -668,6 +667,7 @@ def observation_status(
             **_read_observation(state, current_id),
         })
     return {"targets": targets}
+
 
 def _fsync_snapshot_directory(path: Path) -> None:
     try:
