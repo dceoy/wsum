@@ -596,10 +596,13 @@ def _read_observation(state: Path, target_id: str) -> dict[str, str | None]:
         value = json.loads(path.read_bytes())
     except (OSError, ValueError) as exc:
         raise WorkspaceError("cannot read observation record") from exc
-    if not isinstance(value, dict) or set(value) != set(_OBSERVATION_FIELDS):
+    if not isinstance(value, dict):
+        raise WorkspaceError("observation record is invalid")
+    record = cast("dict[str, object]", value)
+    if set(record) != set(_OBSERVATION_FIELDS):
         raise WorkspaceError("observation record is invalid")
     for field in _OBSERVATION_FIELDS:
-        timestamp = value[field]
+        timestamp = record[field]
         if timestamp is None:
             continue
         if not isinstance(timestamp, str):
@@ -612,7 +615,7 @@ def _read_observation(state: Path, target_id: str) -> dict[str, str | None]:
             raise WorkspaceError("observation timestamp is invalid") from exc
         if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != timestamp:
             raise WorkspaceError("observation timestamp is invalid")
-    return cast("dict[str, str | None]", value)
+    return cast("dict[str, str | None]", record)
 
 
 def _record_observation(state: Path, target_id: str, field: str) -> None:
