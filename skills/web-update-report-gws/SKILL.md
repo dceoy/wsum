@@ -384,7 +384,7 @@ python "$GWS_SKILL_DIR/scripts/gws.py" checkpoint-needed \
   --workspace "$WORKSPACE" --manifest "$COMMITTED_MANIFEST"
 ```
 
-If the returned `changed` is `false`, the committed state already covers all durable workspace bytes and baseline mtimes; acknowledge the handoff without staging, uploading, or advancing the expected manifest identity. If `changed` is `true`, complete the checkpoint procedure below. When initializing a workspace without a committed manifest, always checkpoint. Never use a draft, unverified, or merely listed manifest for this comparison. A comparison error is a persistence failure, not permission to skip it.
+If the returned `changed` is `false`, the committed state already covers all durable workspace bytes and baseline mtimes. **Before acknowledging**, re-list the bound workspace folder and invoke the existing `next-generation` guard below using the current `EXPECTED` and fresh `LISTING` to reject external changes to the active manifest; discard its proposed generation without uploading anything. Only then skip staging and retain the same expected manifest identity. If `changed` is `true`, complete the checkpoint procedure below. When initializing a workspace without a committed manifest, always checkpoint. Never use a draft, unverified, or merely listed manifest for this comparison. A comparison error or stale Drive identity is a persistence failure, not permission to skip it.
 
 1. Freeze workspace writes and re-list the bound workspace folder.
    Save the complete exact-ID listing as `LISTING`, and keep the previously
