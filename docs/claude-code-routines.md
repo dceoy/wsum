@@ -36,59 +36,51 @@ and full used range for Sheets input. No manual A1 range is needed.
 
 ## Text persistence operations
 
-Use the existing authorized Google connector and local Python only. No extra
-Drive API/CLI, credentials, Apps Script, service or infrastructure is needed.
-Tool names vary: follow the agent-facing create/read/list/delete contract in
-[the skill](../skills/web-update-report-gws/SKILL.md#google-drive-connector-base64-contract-cowork-compatible).
-Cowork does **not** materialize connector bytes to local files. Its
-`download_file_content` returns Base64 and `create_file` accepts
-`base64Content`. Use the skill's model-mediated `transfer-encode` /
-`transfer-decode` bridge. Compute the upload size/SHA-256 from the **local
-original**, relay opaque Base64 and verify the separately downloaded exact-ID
-bytes. A self-comparison of two model-rendered copies is not verification.
-Never use changing `read_file_content` prose, preview, truncated content
-or Docs conversion for immutable state.
+Use the authorized Google Drive connector and local Python only; no additional
+Drive API, service or credentials are needed. See the
+[skill](../skills/web-update-report-gws/SKILL.md#google-drive-connector-text-chunk-contract).
+New workspace snapshots use `wsum-archive-1` with a deterministic tar.gz
+archive and linked text chunks. Older `wsum-text-1` snapshots remain readable.
+Uploads use `create_file.textContent`, with
+`contentMimeType: text/plain` and `disableConversionToGoogleType: true`,
+not `base64Content`. Downloads still return a Base64 envelope via
+`download_file_content`; decode it with `transfer-decode`.
 
-1. Resolve optional context, the parent and its immutable
-   `wsum-text.binding.json`. Start initial setup with a fresh dedicated folder;
-   verify both child IDs. Never recreate missing managed resources.
-2. Base64-download the newest `workspace-*.json` manifest and every payload
-   by exact ID, and decode to fresh local scratch files. Validate filename/generation, safe paths, sizes and SHA-256, then restore to
-   a new local directory. Validate the required delivery ledger.
-3. For Drive CSV, decode the full Base64 field and compare its decoded length
-   with original `fileSize` metadata; then validate all rows through core CSV
-   parsing. Without source checksum, equal-length alteration is unprovable.
-   Prefer Sheets cell-value reads when appropriate, never previews.
-4. Project and validate the current targets table, then invoke `web-update-report`
-   to resume, monitor, research material changes and finalize through the core API.
-   Supply the required synchronous persistence handoff: after every `pending`
-   (including list/detail recovery), `check`, `ingest`, `discard`, and `finalize`,
-   pause local work until the wrapper verifies a snapshot. Error returns also
-   require checkpointing; a failed checkpoint stops the workflow. `pack` stages exact UTF-8
-   payloads; unsupported binary/control content fails explicitly.
-5. `transfer-encode` each **local original** payload, pass `base64Content` into
-   connector create, then Base64-download the returned ID and `transfer-decode`
-   with its original size/SHA-256. `prepare` validates read-back receipts.
-   Re-list and check the expected active identity **immediately before**
-   creating the manifest last.
-6. Decode the exact-ID manifest Base64 against the **prepared original**
-   manifest size/SHA-256, then run `verify` for all payloads. Re-list to confirm the self-commit is newest
-   and unique before updating expected identity or reporting durability.
-7. Retain three verified generations using `retention`. Revalidate the listing,
-   delete obsolete manifests first, confirm their absence, then delete only
-   payloads unreferenced by remaining manifests. Stop cleanup on uncertainty;
-   leave unknown/orphan files alone.
-8. Refresh public pending state and persist possible recovery before delivery.
-   Deliver canonical Markdown only after that run’s pending reviews clear;
-   any blocked recovery entry defers all delivery. Use the Base64
-   bridge to verify exact-ID report bytes against the local original digest;
-   only then record the ledger and persist it. If ledger persistence fails,
-   restore committed state and reuse/verify the same exact report filename
-   on retry. Never report that failed ledger as durable.
+1. Resolve optional context, bound output folder and immutable
+   `wsum-text.binding.json`. Restore the newest verified generation by
+   exact ID. For archive manifests, follow and authenticate the full
+   linked chunk chain; for legacy manifests use the old payload map.
+   Never initialize an empty baseline following a failed restore.
+2. Read and validate current CSV or Sheets values; project current targets
+   and validate the delivery ledger. Invoke `web-update-report`. The wrapper
+   must checkpoint after every `pending`, `check`, `ingest`, `discard`
+   and `finalize`, including any command that might recover state.
+3. Run `next-generation`, then `archive-pack` to create deterministic
+   compressed bytes. For each Base64 fragment, **from last index to
+   index 0**, run `archive-link` with the verified next reference.
+4. Run `transfer-text` on each linked JSON chunk. Create a plain text
+   Drive file with conversion disabled; download by resulting exact ID
+   and run `transfer-decode` against original local length and SHA-256.
+   Store the resulting verified `{id,size,sha256}` as the next reference
+   for the following lower-index chunk. Any failure aborts the checkpoint.
+5. Once chunk 0 is verified, use `archive-prepare` to write the compact
+   root manifest. Re-list and confirm unchanged active identity before
+   creating `workspace-<generation>.json` **last**, via `textContent`.
+   Download and validate its original size and SHA-256, run `verify` on
+   all exact-ID chunk readbacks, then re-list to confirm the committed
+   manifest is newest before acknowledging durable persistence.
+6. Keep the three latest *verified* generations. Delete obsolete
+   manifests first, and only then unreferenced chunks after a fresh
+   listing; preserve unknown or orphan files.
+7. Refresh pending state. Deliver completed canonical Markdown reports
+   with the existing exact-ID Base64 readback and ledger process, then
+   checkpoint the updated ledger using the new archive format.
 
-Only one writer may run per workspace. Listing guards detect stale sessions
-but provide no atomic lock. Ambiguous creates require exact-name reconciliation
-with exact-ID byte checks; never blindly retry or delete a previous generation.
+One writer per workspace; listings detect stale sessions but are not
+distributed locks. Reconcile ambiguous file creates by name and exact-ID
+readback, not blind retry. Live connector transport/context limits still
+apply; a large number of 24 KiB compressed fragments can require many
+tool calls. Reject incomplete fields and unsupported types.
 
 ## Failure handling
 
@@ -102,9 +94,9 @@ context, credentials and tokens out of persisted state.
 
 ## Offline verification and live follow-up
 
-`tests/test_gws.py` uses a small fake Drive text store for deterministic packing,
-exact hash checks, fresh-workspace restore, repeated commits, three-generation
-retention and injected failures. No Google credentials are used.
+`tests/test_gws.py` covers legacy snapshots; `tests/test_gws_archive.py` covers
+compressed text chains, integrity and mtime preservation. Both use offline data.
+No Google credentials are used.
 
 **Live connector compatibility has not been tested.** Model relay is bounded
 by tool/context size and cannot stream large files. Original Drive CSV bytes
