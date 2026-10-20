@@ -67,12 +67,14 @@ def test_json_restore_rejects_unsafe_paths(tmp_path: Path, entry: str) -> None:
         json.dumps({
             "format": gws.JSON_FORMAT,
             "generation": GENERATION,
-            "files": [{
-                "path": entry,
-                "size": 0,
-                "sha256": hashlib.sha256(b"").hexdigest(),
-                "text": "",
-            }],
+            "files": [
+                {
+                    "path": entry,
+                    "size": 0,
+                    "sha256": hashlib.sha256(b"").hexdigest(),
+                    "text": "",
+                }
+            ],
         })
     )
     readbacks = tmp_path / "readbacks.json"
@@ -102,11 +104,13 @@ def test_json_pack_rejects_oversized_input(tmp_path: Path) -> None:
 
 def test_reject_removed_text_snapshot_format(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({
-        "format": "wsum-text-1",
-        "generation": GENERATION,
-        "files": [],
-    }))
+    manifest.write_text(
+        json.dumps({
+            "format": "wsum-text-1",
+            "generation": GENERATION,
+            "files": [],
+        })
+    )
     readbacks = tmp_path / "readbacks.json"
     readbacks.write_text("{}")
     with pytest.raises(gws.GwsError, match="invalid JSON state header"):
@@ -575,10 +579,17 @@ def test_json_commands_cli(
     ws = _json_workspace(tmp_path)
     staged = tmp_path / "cli-staged"
     monkeypatch.setattr(
-        sys, "argv",
+        sys,
+        "argv",
         [
-            "gws.py", "json-pack", "--workspace", str(ws),
-            "--snapshot", str(staged), "--generation", GENERATION,
+            "gws.py",
+            "json-pack",
+            "--workspace",
+            str(ws),
+            "--snapshot",
+            str(staged),
+            "--generation",
+            GENERATION,
         ],
     )
     gws.main()
@@ -586,16 +597,25 @@ def test_json_commands_cli(
 
     manifest, maps, _, _ = _json_commit(ws, tmp_path, "20261009T000001Z")
     monkeypatch.setattr(
-        sys, "argv",
-        ["gws.py", "verify", "--manifest", str(manifest),
-         "--readbacks", str(maps)],
+        sys,
+        "argv",
+        ["gws.py", "verify", "--manifest", str(manifest), "--readbacks", str(maps)],
     )
     gws.main()
     assert json.loads(capsys.readouterr().out)["file_count"] > 0
     monkeypatch.setattr(
-        sys, "argv",
-        ["gws.py", "restore", "--manifest", str(manifest),
-         "--readbacks", str(maps), "--workspace", str(tmp_path / "restored")],
+        sys,
+        "argv",
+        [
+            "gws.py",
+            "restore",
+            "--manifest",
+            str(manifest),
+            "--readbacks",
+            str(maps),
+            "--workspace",
+            str(tmp_path / "restored"),
+        ],
     )
     gws.main()
     assert json.loads(capsys.readouterr().out)["generation"] == "20261009T000001Z"
@@ -661,8 +681,12 @@ def test_observation_identity_survives_drive_snapshot_restore(tmp_path: Path) ->
     fetched = tmp_path / "fetch.txt"
     fetched.write_text("baseline content\n")
     workspace.ingest_agent_fetch(
-        ws, targets, target_id=target_id, run_id="20261001T000000Z-deadbeef",
-        input_path=fetched, link_depth=0,
+        ws,
+        targets,
+        target_id=target_id,
+        run_id="20261001T000000Z-deadbeef",
+        input_path=fetched,
+        link_depth=0,
     )
     expected = workspace.observation_status(ws, target_id=target_id)
     assert expected["baseline_updated_at"] is not None
@@ -678,9 +702,7 @@ def test_observation_identity_survives_drive_snapshot_restore(tmp_path: Path) ->
 
 @pytest.mark.parametrize("stamp", [True, -1, 2**63, "123", None])
 def test_restore_rejects_invalid_snapshot_mtime(tmp_path: Path, stamp: object) -> None:
-    manifest, maps, _, _ = _json_commit(
-        _json_workspace(tmp_path), tmp_path, GENERATION
-    )
+    manifest, maps, _, _ = _json_commit(_json_workspace(tmp_path), tmp_path, GENERATION)
     data = json.loads(manifest.read_text())
     snapshot = next(item for item in data["files"] if "snapshots/" in item["path"])
     snapshot["mtime_ns"] = stamp
@@ -692,11 +714,10 @@ def test_restore_rejects_invalid_snapshot_mtime(tmp_path: Path, stamp: object) -
 
 
 def test_restore_rejects_inexact_snapshot_mtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest, maps, _, _ = _json_commit(
-        _json_workspace(tmp_path), tmp_path, GENERATION
-    )
+    manifest, maps, _, _ = _json_commit(_json_workspace(tmp_path), tmp_path, GENERATION)
     original = gws.os.utime
 
     def inexact(path: Path, *, ns: tuple[int, int]) -> None:

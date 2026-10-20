@@ -924,9 +924,7 @@ def verify(manifest: Path, readbacks: Path) -> dict[str, typing.Any]:
     }
 
 
-def restore(
-    manifest: Path, readbacks: Path, workspace: Path
-) -> dict[str, typing.Any]:
+def restore(manifest: Path, readbacks: Path, workspace: Path) -> dict[str, typing.Any]:
     """Restore a verified current-format workspace into a new directory."""
     state, contents, _ = _json_verified(manifest, readbacks)
     if workspace.exists() or workspace.is_symlink():
