@@ -46,9 +46,9 @@ Claude. There is no new Drive API credential, CLI, Cloud Run or Apps Script.
   Large objects can require many calls. Stop explicitly rather than losing
   state; use a direct Drive API transport only if separately authorized.
 
-The existing legacy `wsum-text-1` format remains restorable.
-CSV inputs and delivered Markdown report bytes retain their existing
-`transfer-encode` / `base64Content` bridge until migrated separately.
+CSV inputs and delivered Markdown reports use the existing
+`transfer-encode` / `base64Content` bridge; checkpoint and object
+uploads use `transfer-text` / `textContent`.
 
 **Drive CSV provenance:** file metadata usually supplies original size but
 not a trusted SHA-256, so equal-length source corruption is not detectable.
@@ -147,16 +147,15 @@ The composite's deterministic work is implemented by
 remain the agent's responsibility. Resolve `GWS_SKILL_DIR` from the installed
 composite and `WEB_UPDATE_MONITOR_SKILL_DIR` from installed core skill discovery.
 
-Download the newest committed JSON manifest by exact Drive ID. For
-`wsum-json-1`, load small state fields directly from that JSON. For every
+Download the newest committed `wsum-json-1` manifest by exact Drive ID.
+Load small state fields directly from its JSON. For every
 external object, traverse its verified hash-linked text chunks by exact ID,
 decode the connector's returned Base64 envelopes into scratch text files, and
 construct a JSON readbacks map keyed by **object content SHA-256**:
 
 `{"<object-sha256>":{"head":{"id":"...","size":123,"sha256":"..."},"readbacks":{"<chunk-ID>":"/scratch/chunk.txt"}}}`
 
-For `wsum-text-1`, retain the historical mapping of payload Drive IDs to
-scratch paths. Verify manifest generation against filename. Restore into a
+Verify manifest generation against filename. Restore into a
 **nonexistent** workspace:
 
 ```bash
@@ -364,8 +363,8 @@ truncate or convert state into a monolithic archive.
 1. Verify immutable parent binding and complete workspace-folder listing.
    Select newest manifest by generation filename (not Drive modification
    time); reject duplicate names and missing exact IDs.
-2. Download/verify the manifest via complete Base64 response. For new
-   `wsum-json-1`, parse its inline state and exact external-object head
+2. Download/verify the `wsum-json-1` manifest via complete Base64 response.
+   Parse its inline state and exact external-object head
    references. For each object SHA, download the chain of all chunks,
    in ascending index order, by exact ID; each JSON chunk's `next`
    provides the next verified reference. Build `READBACKS` as described
@@ -375,7 +374,6 @@ truncate or convert state into a monolithic archive.
    references, decompresses with an output bound, reconstructs byte-exact
    UTF-8 files, verifies hashes and restores promoted `mtime_ns` exactly.
    A broken newest checkpoint must fail closed, not silently fall back.
-4. For legacy `wsum-text-1`, use its original per-file readback mapping.
 
 ### Persist after every state mutation
 
@@ -409,7 +407,8 @@ truncate or convert state into a monolithic archive.
    older manifest. Preserve the prior manifest readback path as evidence.
    This assumes prior verified objects have not been overwritten remotely;
    full remote verification is required again at restore and maintenance.
-3. For a new object, its staged fragments are under
+3. For a new object, stage only compressed Base64 fragments, not
+   redundant uncompressed `source.txt` copies. The fragments are under
    `$STAGED/objects/<sha256>/<four-digit-index>.txt`.
    Initialize scratch `NEXT_JSON` to literal `null`. For index
    `chunks-1` down to `0`, run:
@@ -481,6 +480,12 @@ truncate or convert state into a monolithic archive.
    revalidate the active identity before cleanup; never delete unknown
    files. If a complete verified listing is too large for the connector,
    skip cleanup safely rather than compromising an existing generation.
+
+After a successfully verified checkpoint, remove only that transaction's
+disposable local staging directory and upload scratch fragments. Retain
+exact-ID readbacks and prior manifest files for as long as subsequent
+verification, object reuse, or retention needs them. Do not remove a
+failed transaction's evidence before its recovery is resolved.
 
 A failed write leaves previously committed state valid; incomplete
 objects remain unreferenced and may be reconciled separately. An
