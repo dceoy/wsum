@@ -5314,8 +5314,7 @@ def _create_interest_review(tmp_path: Path) -> tuple[str, Path, Path, Path]:
         _ENRICHED_HEADER
         + "First,https://vendor.example/updates,Vendor,Product,plans,01,true\n"
         + "Second,https://vendor.example/updates,Vendor,Product,API,"
-        "2,true\n"
-        + "Disabled,https://vendor.example/updates,,,,3,false\n",
+        "2,true\n" + "Disabled,https://vendor.example/updates,,,,3,false\n",
         encoding="utf-8",
     )
     target = load_targets(tmp_path / "targets.csv")[0]
@@ -5431,9 +5430,7 @@ def test_invalid_priority_in_later_disabled_row_prevents_mutation(
     ] == ["First", "Second"]
 
 
-@pytest.mark.parametrize(
-    "field", ["name", "url", "publisher", "category", "keywords"]
-)
+@pytest.mark.parametrize("field", ["name", "url", "publisher", "category", "keywords"])
 @pytest.mark.parametrize("token", ['"', "〃", "同上", "同左"])
 def test_ditto_cells_rejected_with_record_and_field(
     tmp_path: Path, field: str, token: str
