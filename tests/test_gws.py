@@ -812,6 +812,175 @@ def _json_commit(
     return manifest, receipts, current, staged
 
 
+class FakeDrive:
+    """Small exact-ID text store; no production connector or credentials."""
+
+    def __init__(self, root: Path) -> None:
+        """Initialize an empty store."""
+        self.root = root
+        root.mkdir()
+        self.files: dict[str, tuple[str, bytes]] = {}
+        self.objects: dict[str, dict[str, _ObjectReceipt]] = {}
+        self.sequence = 0
+        self.durable: list[dict[str, str]] = []
+
+    def create(self, name: str, content: bytes) -> str:
+        """Create an immutable text file.
+
+        Returns:
+            The returned stable file ID.
+        """
+        content.decode("utf-8")
+        self.sequence += 1
+        file_id = f"id-{self.sequence}"
+        self.files[file_id] = (name, content)
+        return file_id
+
+    def listing(self) -> list[dict[str, str]]:
+        """Return a complete direct-child listing."""
+        return [{"id": key, "name": value[0]} for key, value in self.files.items()]
+
+    def read(self, file_id: str) -> Path:
+        """Materialize complete exact-ID bytes.
+
+        Returns:
+            The local read-back path.
+        """
+        path = self.root / file_id
+        path.write_bytes(self.files[file_id][1])
+        return path
+
+    def readbacks(self, manifest: Path) -> Path:
+        """Materialize every referenced payload.
+
+        Returns:
+            The mapping file path.
+        """
+        objects = self.objects[manifest.name]
+        result = {
+            digest: {
+                "head": receipt["head"],
+                "readbacks": {key: str(self.read(key)) for key in receipt["readbacks"]},
+            }
+            for digest, receipt in objects.items()
+        }
+        path = self.root / (manifest.name + "-readbacks.json")
+        path.write_text(json.dumps(result))
+        return path
+
+    def upload_objects(
+        self, snapshot: Path, generation: str, failure: str
+    ) -> dict[str, _ObjectReceipt]:
+        """Upload hash-linked objects with optional injected transport damage.
+
+        Returns:
+            Object heads and exact-ID readbacks keyed by content digest.
+        """
+        receipts: dict[str, _ObjectReceipt] = {}
+        for item in json.loads((snapshot / "draft.json").read_text())["files"]:
+            if "object" not in item or item["sha256"] in receipts:
+                continue
+            digest = item["sha256"]
+            nxt = snapshot / "next.json"
+            nxt.write_text("null")
+            readbacks: dict[str, str] = {}
+            for index in reversed(range(item["object"]["chunks"])):
+                chunk = snapshot / f"upload-{digest}-{index}.txt"
+                meta = gws.json_link(
+                    snapshot / "objects" / digest / f"{index:04d}.txt",
+                    nxt,
+                    index,
+                    chunk,
+                )
+                text = gws.transfer_text(chunk)["textContent"]
+                assert isinstance(text, str)
+                content = text.encode("utf-8")
+                file_id = self.create(
+                    f"object-{generation}-{digest}-{index}.txt", content
+                )
+                if failure == "missing":
+                    del self.files[file_id]
+                if failure == "truncated":
+                    self.files[file_id] = (self.files[file_id][0], content[:-1])
+                if failure == "corrupt":
+                    self.files[file_id] = (self.files[file_id][0], b"x" * len(content))
+                readbacks[file_id] = str(self.read(file_id))
+                nxt.write_text(json.dumps({"id": file_id, **meta}))
+                if failure == "incomplete":
+                    break
+            receipts[digest] = {
+                "head": cast("_ChunkRef", json.loads(nxt.read_text())),
+                "readbacks": readbacks,
+            }
+        return receipts
+
+    def commit(
+        self, ws: Path, expected: dict[str, str] | None, failure: str = ""
+    ) -> dict[str, str]:
+        """Follow the contract, recording durability after verification.
+
+        Returns:
+            The committed identity.
+
+        Raises:
+            gws.GwsError: Manifest read-back mismatch.
+        """
+        generation = gws.next_generation(
+            self.listing(), datetime(2026, 10, 9, tzinfo=UTC), expected
+        )
+        snapshot = self.root / f"stage-{generation}-{self.sequence}"
+        gws.json_pack(ws, snapshot, generation)
+        receipts = self.upload_objects(snapshot, generation, failure)
+        receipt_path = snapshot / "receipts.json"
+        receipt_path.write_text(json.dumps(receipts))
+        manifest = snapshot / "manifest.json"
+        gws.json_prepare(snapshot, receipt_path, manifest)
+        if failure == "stale":
+            self.create("workspace-20261010T000000Z.json", b"{}")
+        # The second guard is immediately before the last create.
+        gws.next_generation(self.listing(), datetime(2026, 10, 9, tzinfo=UTC), expected)
+        name = f"workspace-{generation}.json"
+        file_id = self.create(name, manifest.read_bytes())
+        if failure == "manifest":
+            self.files[file_id] = (name, b"{}")
+        self.objects[file_id] = receipts
+        downloaded = self.read(file_id)
+        if downloaded.read_bytes() != manifest.read_bytes():
+            message = "manifest read-back mismatch"
+            raise gws.GwsError(message)
+        gws.verify(downloaded, self.readbacks(downloaded))
+        active = {"name": name, "id": file_id}
+        assert gws.next_generation(
+            self.listing(), datetime(2026, 10, 9, tzinfo=UTC), active
+        )
+        self.durable.append(active)
+        return active
+
+    def cleanup(self) -> None:
+        """Apply a verified retention plan."""
+        rows: list[dict[str, str]] = []
+        for identity in (
+            row for row in self.listing() if gws.SNAPSHOT_RE.fullmatch(row["name"])
+        ):
+            manifest = self.read(identity["id"])
+            # Each manifest needs its own mapping file for the retained snapshot.
+            readbacks = self.root / f"reads-{identity['id']}.json"
+            readbacks.write_bytes(self.readbacks(manifest).read_bytes())
+            rows.append({
+                **identity,
+                "manifest": str(manifest),
+                "readbacks": str(readbacks),
+            })
+        generations = self.root / "generations.json"
+        generations.write_text(json.dumps(rows))
+        plan = gws.retention(generations)
+        # Delete manifests first; a stop between these phases only leaks data.
+        obsolete = {row["id"] for row in rows} - set(plan["retain"])
+        for file_id in [*sorted(obsolete), *sorted(set(plan["delete"]) - obsolete)]:
+            del self.files[file_id]
+        self.durable = [row for row in self.durable if row["id"] in plan["retain"]]
+
+
 def test_small_json_state_with_external_snapshots_restores_exact_bytes(
     tmp_path: Path,
 ) -> None:
@@ -1050,3 +1219,93 @@ def test_commit_verify_rejects_replaced_head(tmp_path: Path) -> None:
     altered.write_text(json.dumps(forged))
     with pytest.raises(gws.GwsError, match="reference changed"):
         gws.json_verify_commit(altered, receipts_path)
+
+
+@pytest.mark.parametrize(
+    "failure", ["truncated", "corrupt", "missing", "incomplete", "stale", "manifest"]
+)
+def test_failed_commit_preserves_committed_generation(
+    tmp_path: Path, failure: str
+) -> None:
+    ws = _json_workspace(tmp_path)
+    drive = FakeDrive(tmp_path / "drive")
+    expected = drive.commit(ws, None)
+    before = dict(drive.files)
+    with pytest.raises((gws.GwsError, KeyError)):
+        drive.commit(ws, expected, failure)
+    if failure not in {"stale", "manifest"}:
+        assert [
+            row for row in drive.listing() if gws.SNAPSHOT_RE.fullmatch(row["name"])
+        ] == [expected]
+    if failure == "stale":
+        assert not any(
+            row["name"] == "workspace-20261009T000001Z.json" for row in drive.listing()
+        )
+    assert drive.durable == [expected]
+    assert all(drive.files[key] == value for key, value in before.items())
+    manifest = drive.read(expected["id"])
+    gws.restore(manifest, drive.readbacks(manifest), tmp_path / "restored")
+
+
+def test_cleanup_failure_leaves_verified_commits(tmp_path: Path) -> None:
+    ws = _json_workspace(tmp_path)
+    drive = FakeDrive(tmp_path / "drive")
+    expected = None
+    for _ in range(4):
+        expected = drive.commit(ws, expected)
+    before = dict(drive.files)
+    corrupt_id = drive.durable[0]["id"]
+    drive.files[corrupt_id] = (drive.files[corrupt_id][0], b"{}")
+    damaged = dict(drive.files)
+    with pytest.raises((gws.GwsError, KeyError)):
+        drive.cleanup()
+    assert drive.files == damaged  # no deletion until complete validation
+    drive.files[corrupt_id] = before[corrupt_id]
+    # An interrupted cleanup can leak obsolete payloads without harming latest.
+    del drive.files[corrupt_id]
+    assert expected is not None
+    manifest = drive.read(expected["id"])
+    gws.restore(manifest, drive.readbacks(manifest), tmp_path / "restored")
+
+
+def test_report_delivery_retry_after_failed_ledger_persistence(tmp_path: Path) -> None:
+    ws = _json_workspace(tmp_path)
+    report = ws / "output/report/20261009T000000Z-abcdef12.md"
+    report.write_text("canonical report\n")
+    drive = FakeDrive(tmp_path / "drive")
+    committed = drive.commit(ws, None)
+    report_id = drive.create("Web Update Report — " + report.name, report.read_bytes())
+    assert drive.read(report_id).read_bytes() == report.read_bytes()
+    gws.ledger(ws / "internal/gws/delivery.json", report, record=True)
+    with pytest.raises(gws.GwsError):
+        drive.commit(ws, committed, "incomplete")
+    manifest = drive.read(committed["id"])
+    restored = tmp_path / "retry"
+    gws.restore(manifest, drive.readbacks(manifest), restored)
+    restored_report = restored / report.relative_to(ws)
+    ledger = restored / "internal/gws/delivery.json"
+    assert not gws.ledger(ledger, restored_report, record=False)["delivered"]
+    matching = [
+        row
+        for row in drive.listing()
+        if row["name"] == "Web Update Report — " + report.name
+    ]
+    assert len(matching) == 1
+    assert drive.read(matching[0]["id"]).read_bytes() == restored_report.read_bytes()
+    gws.ledger(ledger, restored_report, record=True)
+    final = drive.commit(restored, committed)
+    assert (
+        len([
+            row
+            for row in drive.listing()
+            if row["name"] == "Web Update Report — " + report.name
+        ])
+        == 1
+    )
+    manifest = drive.read(final["id"])
+    gws.restore(manifest, drive.readbacks(manifest), tmp_path / "final")
+    assert gws.ledger(
+        tmp_path / "final/internal/gws/delivery.json",
+        tmp_path / "final" / report.relative_to(ws),
+        record=False,
+    )["delivered"]
