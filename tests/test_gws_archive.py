@@ -2,7 +2,6 @@
 
 import json
 import os
-from datetime import UTC, datetime
 from pathlib import Path
 
 import gws
@@ -49,7 +48,11 @@ def _commit(
         file_id = f"{prefix}-id-{index}"
         readbacks[file_id] = path
         nxt.write_text(
-            json.dumps({"id": file_id, "size": result["size"], "sha256": result["sha256"]})
+            json.dumps({
+                "id": file_id,
+                "size": result["size"],
+                "sha256": result["sha256"],
+            })
         )
     manifest = tmp_path / f"manifest-{prefix}.json"
     gws_archive.prepare(snapshot, nxt, manifest)
@@ -73,9 +76,9 @@ def test_archive_round_trip_is_deterministic_and_restores_mtime(tmp_path: Path) 
     assert set(gws.verify(manifest, readbacks)["ids"]) == set(ids)
     restored = tmp_path / "restored"
     result = gws.restore(manifest, readbacks, restored)
-    assert result["file_count"] == len(list(workspace.rglob("*"))) - len(
-        [p for p in workspace.rglob("*") if p.is_dir()]
-    )
+    assert result["file_count"] == len(list(workspace.rglob("*"))) - len([
+        p for p in workspace.rglob("*") if p.is_dir()
+    ])
     for original in workspace.rglob("*"):
         if original.is_file():
             new = restored / original.relative_to(workspace)
@@ -104,15 +107,15 @@ def test_archive_corruption_and_missing_chunks_fail_closed(tmp_path: Path) -> No
 
 def test_archive_retention_handles_legacy_and_new_format(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
-    manifest, readbacks, ids = _commit(
-        workspace, tmp_path, "20261020T000000Z", "one"
-    )
-    rows = [{
-        "name": "workspace-20261020T000000Z.json",
-        "id": "archive-manifest-id",
-        "manifest": str(manifest),
-        "readbacks": str(readbacks),
-    }]
+    manifest, readbacks, ids = _commit(workspace, tmp_path, "20261020T000000Z", "one")
+    rows = [
+        {
+            "name": "workspace-20261020T000000Z.json",
+            "id": "archive-manifest-id",
+            "manifest": str(manifest),
+            "readbacks": str(readbacks),
+        }
+    ]
     generations = tmp_path / "generations.json"
     generations.write_text(json.dumps(rows))
     plan = gws.retention(generations)
@@ -123,9 +126,7 @@ def test_archive_retention_handles_legacy_and_new_format(tmp_path: Path) -> None
 
 def test_archive_invalid_chain_index_is_rejected(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
-    manifest, readbacks, ids = _commit(
-        workspace, tmp_path, "20261020T000000Z", "one"
-    )
+    manifest, readbacks, ids = _commit(workspace, tmp_path, "20261020T000000Z", "one")
     head = json.loads(manifest.read_text())["head"]["id"]
     body = json.loads(ids[head].read_text())
     body["index"] = 1

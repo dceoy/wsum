@@ -87,7 +87,11 @@ def transfer_encode(path: Path) -> dict[str, str | int]:
 def transfer_text(path: Path) -> dict[str, str | int]:
     """Expose plain UTF-8 bytes for Google Drive textContent uploads."""
     content = _text_bytes(path)
-    return {"textContent": content.decode("utf-8"), "sha256": _digest(content), "size": len(content)}
+    return {
+        "textContent": content.decode("utf-8"),
+        "sha256": _digest(content),
+        "size": len(content),
+    }
 
 
 def transfer_decode(
@@ -619,7 +623,9 @@ def restore(
 
 def _manifest_format(path: Path) -> str:
     """Identify the format without accepting an unchecked manifest as valid."""
-    value = json.loads(_text_bytes(path, MAX_MANIFEST), object_pairs_hook=_unique_object)
+    value = json.loads(
+        _text_bytes(path, MAX_MANIFEST), object_pairs_hook=_unique_object
+    )
     if not isinstance(value, dict) or not isinstance(value.get("format"), str):
         raise GwsError("invalid manifest format")
     return value["format"]

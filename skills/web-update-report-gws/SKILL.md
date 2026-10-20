@@ -348,27 +348,27 @@ compressed archive size and SHA-256, total chunk count and a single
 1. Freeze local writes. List current Drive workspace contents and run
    `next-generation` with the last verified committed identity.
 2. Run `gws.py archive-pack --workspace "$WORKSPACE" --generation
-   "$GENERATION" --snapshot "$STAGED"`. The helper stages the deterministic
+"$GENERATION" --snapshot "$STAGED"`. The helper stages the deterministic
    archive in scratch and writes Base64 fragments under
    `$STAGED/fragments/0000.txt`, etc.
 3. Set a scratch `NEXT_JSON` to literal `null`. For index
    `count - 1` descending to `0`, run
    `gws.py archive-link --fragment "$FRAGMENT" --next-json "$NEXT_JSON"
-   --index "$INDEX" --output "$CHUNK"`. This writes a linked JSON text
+--index "$INDEX" --output "$CHUNK"`. This writes a linked JSON text
    chunk. Run `gws.py transfer-text --file "$CHUNK"`, relay only its
    `textContent` to Drive `create_file` as `text/plain` (conversion
    disabled), using an immutable name such as
    `chunk-<generation>-<index>.txt`.
 4. Base64-download the resulting chunk's exact ID. Run
    `transfer-decode --base64-file "$BASE64_SCRATCH" --output "$READBACK"
-   --size "$SIZE" --sha256 "$SHA256"` using the **original local linked
+--size "$SIZE" --sha256 "$SHA256"` using the **original local linked
    chunk** metadata. Only after successful readback overwrite the scratch
    `NEXT_JSON` with
    `{"id":"<DriveID>","size":123,"sha256":"<64 lowercase hex>"}`,
    then advance to the next lower index.
 5. After index 0 succeeds, run
    `gws.py archive-prepare --snapshot "$STAGED" --head-json "$NEXT_JSON"
-   --manifest "$PREPARED_MANIFEST"`. Re-list and rerun
+--manifest "$PREPARED_MANIFEST"`. Re-list and rerun
    `next-generation` against the **unchanged earlier expected identity**;
    any conflict stops the commit.
 6. Upload the compact prepared manifest via `transfer-text` and

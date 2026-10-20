@@ -69,7 +69,7 @@ not `base64Content`. Downloads still return a Base64 envelope via
    Download and validate its original size and SHA-256, run `verify` on
    all exact-ID chunk readbacks, then re-list to confirm the committed
    manifest is newest before acknowledging durable persistence.
-6. Keep the three latest *verified* generations. Delete obsolete
+6. Keep the three latest _verified_ generations. Delete obsolete
    manifests first, and only then unreferenced chunks after a fresh
    listing; preserve unknown or orphan files.
 7. Refresh pending state. Deliver completed canonical Markdown reports

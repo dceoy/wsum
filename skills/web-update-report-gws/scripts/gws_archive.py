@@ -106,7 +106,9 @@ def pack(workspace: Path, snapshot: Path, generation: str) -> dict[str, typing.A
             if total > gws.MAX_TOTAL:
                 raise gws.GwsError("workspace size limit exceeded")
             record: dict[str, typing.Any] = {
-                "path": name, "size": len(content), "sha256": _hash(content)
+                "path": name,
+                "size": len(content),
+                "sha256": _hash(content),
             }
             if name.startswith("internal/state/snapshots/"):
                 record["mtime_ns"] = path.stat().st_mtime_ns
@@ -114,8 +116,12 @@ def pack(workspace: Path, snapshot: Path, generation: str) -> dict[str, typing.A
             payloads.append((name, content))
         archive = stage / "workspace.tar.gz"
         with archive.open("wb") as output:
-            with gzip.GzipFile(fileobj=output, mode="wb", mtime=0, filename="") as zipped:
-                with tarfile.open(fileobj=zipped, mode="w", format=tarfile.PAX_FORMAT) as tar:
+            with gzip.GzipFile(
+                fileobj=output, mode="wb", mtime=0, filename=""
+            ) as zipped:
+                with tarfile.open(
+                    fileobj=zipped, mode="w", format=tarfile.PAX_FORMAT
+                ) as tar:
                     index = gws._json_bytes(entries)
                     tar.addfile(_entry(METADATA, index), io.BytesIO(index))
                     for name, content in payloads:
@@ -149,7 +155,9 @@ def pack(workspace: Path, snapshot: Path, generation: str) -> dict[str, typing.A
             shutil.rmtree(stage)
 
 
-def link(fragment: Path, next_ref: Path, output: Path, index: int) -> dict[str, typing.Any]:
+def link(
+    fragment: Path, next_ref: Path, output: Path, index: int
+) -> dict[str, typing.Any]:
     """Wrap a fragment with the previously uploaded successor reference."""
     if output.exists() or output.is_symlink():
         raise gws.GwsError("refusing to overwrite linked chunk")
@@ -240,7 +248,10 @@ def _archive_bytes(
             _ref(current)
         elif current is not None:
             raise gws.GwsError("unexpected additional archive chunk")
-    if total != value["archive"]["size"] or digest.hexdigest() != value["archive"]["sha256"]:
+    if (
+        total != value["archive"]["size"]
+        or digest.hexdigest() != value["archive"]["sha256"]
+    ):
         raise gws.GwsError("archive size or SHA-256 mismatch")
     return value, b"".join(parts), list(seen)
 
@@ -252,19 +263,27 @@ def _validated_files(archive: bytes) -> dict[str, tuple[bytes, int | None]]:
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
             members = iter(tar)
             first = next(members)
-            if first.name != METADATA or not first.isfile() or first.size > gws.MAX_MANIFEST:
+            if (
+                first.name != METADATA
+                or not first.isfile()
+                or first.size > gws.MAX_MANIFEST
+            ):
                 raise gws.GwsError("archive workspace index is missing")
             index_stream = tar.extractfile(first)
             if index_stream is None:
                 raise gws.GwsError("unreadable archive workspace index")
-            entries = json.loads(index_stream.read(), object_pairs_hook=gws._unique_object)
+            entries = json.loads(
+                index_stream.read(), object_pairs_hook=gws._unique_object
+            )
             if not isinstance(entries, list) or len(entries) > gws.MAX_FILES:
                 raise gws.GwsError("invalid archive workspace index")
             expected: dict[str, dict[str, typing.Any]] = {}
             total = 0
             for value in entries:
                 if not isinstance(value, dict) or set(value) - {"mtime_ns"} != {
-                    "path", "size", "sha256"
+                    "path",
+                    "size",
+                    "sha256",
                 }:
                     raise gws.GwsError("invalid archive file metadata")
                 name = value["path"]
@@ -276,11 +295,14 @@ def _validated_files(archive: bytes) -> dict[str, tuple[bytes, int | None]]:
                     or not 0 <= value["size"] <= gws.MAX_ENTRY
                     or not isinstance(value["sha256"], str)
                     or not gws.SHA_RE.fullmatch(value["sha256"])
-                    or ("mtime_ns" in value and (
-                        type(value["mtime_ns"]) is not int
-                        or not 0 <= value["mtime_ns"] <= 2**63 - 1
-                        or not name.startswith("internal/state/snapshots/")
-                    ))
+                    or (
+                        "mtime_ns" in value
+                        and (
+                            type(value["mtime_ns"]) is not int
+                            or not 0 <= value["mtime_ns"] <= 2**63 - 1
+                            or not name.startswith("internal/state/snapshots/")
+                        )
+                    )
                 ):
                     raise gws.GwsError("invalid or duplicate archive file metadata")
                 expected[name] = value
@@ -292,7 +314,11 @@ def _validated_files(archive: bytes) -> dict[str, tuple[bytes, int | None]]:
             ):
                 raise gws.GwsError("archive workspace paths or size exceed limits")
             for member in members:
-                if member.name not in expected or member.name in files or not member.isfile():
+                if (
+                    member.name not in expected
+                    or member.name in files
+                    or not member.isfile()
+                ):
                     raise gws.GwsError("unsafe or unexpected archive member")
                 record = expected[member.name]
                 if member.size != record["size"]:
