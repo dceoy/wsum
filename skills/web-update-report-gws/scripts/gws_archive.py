@@ -21,6 +21,8 @@ from pathlib import Path
 
 import gws
 
+# pyright: reportPrivateUsage=false  # shared validation layer lives in gws.py
+
 FORMAT = "wsum-archive-1"
 CHUNK_BYTES = 24 * 1024
 MAX_CHUNKS = 2048
@@ -40,32 +42,41 @@ def _load_json(path: Path, limit: int = gws.MAX_MANIFEST) -> typing.Any:
 
 
 def _ref(value: object) -> dict[str, typing.Any]:
+    """Validate an immutable Drive chunk reference."""
+    if not isinstance(value, dict):
+        raise gws.GwsError("invalid archive chunk reference")
+    record = typing.cast("dict[str, typing.Any]", value)
     if (
-        not isinstance(value, dict)
-        or set(value) != {"id", "size", "sha256"}
-        or not gws._file_id(value["id"])
-        or type(value["size"]) is not int
-        or not 0 < value["size"] <= MAX_CHUNK_TEXT
-        or not isinstance(value["sha256"], str)
-        or not gws.SHA_RE.fullmatch(value["sha256"])
+        set(record) != {"id", "size", "sha256"}
+        or not gws._file_id(record["id"])
+        or type(record["size"]) is not int
+        or not 0 < record["size"] <= MAX_CHUNK_TEXT
+        or not isinstance(record["sha256"], str)
+        or not gws.SHA_RE.fullmatch(record["sha256"])
     ):
         raise gws.GwsError("invalid archive chunk reference")
-    return value
+    return record
 
 
 def _manifest(path: Path) -> dict[str, typing.Any]:
-    value = _load_json(path)
+    """Validate the archive root manifest before trusting any file ID."""
+    raw = _load_json(path)
+    if not isinstance(raw, dict):
+        raise gws.GwsError("invalid archive manifest")
+    value = typing.cast("dict[str, typing.Any]", raw)
+    archive_raw = value.get("archive")
+    if not isinstance(archive_raw, dict):
+        raise gws.GwsError("invalid archive manifest")
+    archive = typing.cast("dict[str, typing.Any]", archive_raw)
     if (
-        not isinstance(value, dict)
-        or set(value) != {"format", "generation", "archive", "count", "head"}
+        set(value) != {"format", "generation", "archive", "count", "head"}
         or value["format"] != FORMAT
         or not isinstance(value["generation"], str)
-        or not isinstance(value["archive"], dict)
-        or set(value["archive"]) != {"size", "sha256"}
-        or type(value["archive"]["size"]) is not int
-        or not 0 < value["archive"]["size"] <= MAX_ARCHIVE
-        or not isinstance(value["archive"]["sha256"], str)
-        or not gws.SHA_RE.fullmatch(value["archive"]["sha256"])
+        or set(archive) != {"size", "sha256"}
+        or type(archive["size"]) is not int
+        or not 0 < archive["size"] <= MAX_ARCHIVE
+        or not isinstance(archive["sha256"], str)
+        or not gws.SHA_RE.fullmatch(archive["sha256"])
         or type(value["count"]) is not int
         or not 1 <= value["count"] <= MAX_CHUNKS
     ):
@@ -185,13 +196,12 @@ def prepare(snapshot: Path, head_ref: Path, destination: Path) -> dict[str, typi
     if destination.exists() or destination.is_symlink():
         raise gws.GwsError("refusing to overwrite manifest")
     draft = _load_json(snapshot / "draft.json")
-    if (
-        not isinstance(draft, dict)
-        or set(draft) != {"format", "generation", "archive", "count"}
-        or draft["format"] != FORMAT
-    ):
+    if not isinstance(draft, dict):
         raise gws.GwsError("invalid staged archive")
-    manifest = {**draft, "head": _ref(_load_json(head_ref, MAX_CHUNK_TEXT))}
+    record = typing.cast("dict[str, typing.Any]", draft)
+    if set(record) != {"format", "generation", "archive", "count"} or record["format"] != FORMAT:
+        raise gws.GwsError("invalid staged archive")
+    manifest = {**record, "head": _ref(_load_json(head_ref, MAX_CHUNK_TEXT))}
     content = gws._json_bytes(manifest)
     destination.write_bytes(content)
     try:
@@ -209,6 +219,7 @@ def _archive_bytes(
     paths = _load_json(readbacks)
     if not isinstance(paths, dict):
         raise gws.GwsError("invalid archive readback map")
+    paths = typing.cast("dict[str, object]", paths)
     seen: set[str] = set()
     parts: list[bytes] = []
     current: object = value["head"]
@@ -223,10 +234,12 @@ def _archive_bytes(
         content = gws._text_bytes(Path(paths[file_id]), MAX_CHUNK_TEXT)
         if len(content) != ref["size"] or _hash(content) != ref["sha256"]:
             raise gws.GwsError("archive chunk readback hash mismatch")
-        record = json.loads(content, object_pairs_hook=gws._unique_object)
+        raw_record = json.loads(content, object_pairs_hook=gws._unique_object)
+        if not isinstance(raw_record, dict):
+            raise gws.GwsError("invalid archive chunk structure")
+        record = typing.cast("dict[str, typing.Any]", raw_record)
         if (
-            not isinstance(record, dict)
-            or set(record) != {"index", "payload", "next"}
+            set(record) != {"index", "payload", "next"}
             or type(record["index"]) is not int
             or record["index"] != index
             or not isinstance(record["payload"], str)
@@ -279,12 +292,11 @@ def _validated_files(archive: bytes) -> dict[str, tuple[bytes, int | None]]:
                 raise gws.GwsError("invalid archive workspace index")
             expected: dict[str, dict[str, typing.Any]] = {}
             total = 0
-            for value in entries:
-                if not isinstance(value, dict) or set(value) - {"mtime_ns"} != {
-                    "path",
-                    "size",
-                    "sha256",
-                }:
+            for raw_value in typing.cast("list[object]", entries):
+                if not isinstance(raw_value, dict):
+                    raise gws.GwsError("invalid archive file metadata")
+                value = typing.cast("dict[str, typing.Any]", raw_value)
+                if set(value) - {"mtime_ns"} != {"path", "size", "sha256"}:
                     raise gws.GwsError("invalid archive file metadata")
                 name = value["path"]
                 if (
