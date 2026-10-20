@@ -953,6 +953,7 @@ def restore(
             shutil.rmtree(stage)
     return {"generation": state["generation"], "file_count": len(contents)}
 
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)

@@ -924,7 +924,7 @@ def test_retention_preserves_shared_current_objects(tmp_path: Path) -> None:
 
     # A corrupt generation aborts retention before any deletion is planned.
     first = Path(rows[0]["manifest"])
-    first.write_text("{}")
+    first.write_text("{}", encoding="utf-8")
     with pytest.raises(gws.GwsError, match="invalid JSON state"):
         gws.retention(manifest_list)
 
