@@ -1008,6 +1008,51 @@ def test_small_json_state_with_external_snapshots_restores_exact_bytes(
                 assert copied.stat().st_mtime_ns == path.stat().st_mtime_ns
 
 
+def test_json_pack_omits_reused_large_object_fragments(tmp_path: Path) -> None:
+    ws = _json_workspace(tmp_path)
+    previous, _, receipts, _ = _json_commit(ws, tmp_path, GENERATION)
+    stage = tmp_path / "reused-stage"
+    draft = gws.json_pack(
+        ws, stage, "20261009T000001Z", previous_manifest=previous
+    )
+    assert not list((stage / "objects").iterdir())
+
+    receipt_map = {
+        item["sha256"]: {
+            "head": receipts[item["sha256"]]["head"],
+            "previous_manifest": str(previous),
+        }
+        for item in draft["files"]
+        if "object" in item
+    }
+    receipt_path = tmp_path / "reuse-receipts.json"
+    receipt_path.write_text(json.dumps(receipt_map))
+    output = tmp_path / "reused-manifest.json"
+    prepared = gws.json_prepare(stage, receipt_path, output)
+    assert prepared["new_objects"] == 0
+    assert prepared["reused_objects"] > 0
+    assert gws.json_verify_commit(output, receipt_path)["new_objects"] == 0
+
+    # A new large object still creates fragments.
+    (ws / "output/report/a.md").write_bytes(b"x" * 2048)
+    next_stage = tmp_path / "next-stage"
+    changed = gws.json_pack(
+        ws, next_stage, "20261009T000002Z", previous_manifest=previous
+    )
+    assert sum("object" in item for item in changed["files"]) > len(receipt_map)
+    assert len(list((next_stage / "objects").iterdir())) == 1
+
+    invalid = tmp_path / "invalid-previous.json"
+    invalid.write_text("{}")
+    with pytest.raises(gws.GwsError, match="invalid JSON state"):
+        gws.json_pack(
+            ws,
+            tmp_path / "invalid-stage",
+            "20261009T000003Z",
+            previous_manifest=invalid,
+        )
+
+
 def test_checkpoint_needed_skips_unchanged_state_and_detects_mutations(
     tmp_path: Path,
 ) -> None:
