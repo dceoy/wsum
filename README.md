@@ -54,9 +54,9 @@ Targets: <LOCAL_CSV_OR_DRIVE_CSV_OR_GOOGLE_SHEET>
 Output: <EXISTING_DEDICATED_DRIVE_FOLDER>
 ```
 
-The wrapper restores verified snapshots, validates the current target table, invokes the local workflow, checkpoints core operations, and delivers **completed** Markdown reports through Drive. Optional context can be inline or an explicit Google Doc/Drive Markdown `Context source:`; local Markdown paths are **not** supported by this wrapper.
+The wrapper restores small JSON checkpoints and content-addressed page objects, validates the current target table, invokes the local workflow, checkpoints core operations, and delivers **completed** Markdown reports through Drive. Unchanged large objects are reused across checkpoints, and only new objects are chunked for textContent transport. Optional context can be inline or an explicit Google Doc/Drive Markdown `Context source:`; local Markdown paths are **not** supported by this wrapper.
 
-See the [GWS Skill](skills/web-update-report-gws/SKILL.md) and [Claude Code Routines runbook](docs/claude-code-routines.md) for folder binding, Base64 transport, exact-byte verification, recovery, and limits. **Live Cowork/Routines connector round trips remain unverified**; offline connector tests are not an operational guarantee.
+See the [GWS Skill](skills/web-update-report-gws/SKILL.md) and [Claude Code Routines runbook](docs/claude-code-routines.md) for folder binding, JSON state/Drive textContent transport, exact-byte verification, migration from legacy snapshots, recovery, and limits. **Live Cowork/Routines connector round trips remain unverified**; offline connector tests are not an operational guarantee.
 
 ## How it works
 
