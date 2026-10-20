@@ -1,13 +1,13 @@
 ---
 name: web-update-report-gws
-description: Wrap web-update-report with CSV/Spreadsheet input projection, verified Google Drive workspace persistence and report delivery, and optional inline or Google Docs/Markdown common context.
+description: Wrap web-update-report with CSV/Spreadsheet input projection, verified Google Drive workspace persistence and report delivery, and optional single-source Google Docs/Markdown context.
 license: MIT
 compatibility: Requires installed web-update-report and web-update-monitor skills, scratch storage, Google Sheets reads for Spreadsheet inputs, and Google Drive read/write for reports and workspace text files. When a context source is supplied, full authenticated Docs/Drive reads are required.
 ---
 
 # Google Workspace Web Update Report Wrapper
 
-Use this Google Workspace entrypoint with two required resources: one targets table (local CSV, Drive CSV, or Google Spreadsheet) and one existing Google Drive output folder. Optionally accept inline common context or an explicit Google Doc/Drive Markdown context source. This wrapper restores the workspace, projects current input, invokes `web-update-report` for the complete local reporting workflow, persists every core transition, and delivers completed canonical Markdown reports. Do not ask users to invoke child skills separately.
+Use this Google Workspace entrypoint with two required resources: one targets table (local CSV, Drive CSV, or Google Spreadsheet) and one existing Google Drive output folder. Optionally accept one explicit Google Doc/Drive Markdown context source. This wrapper restores the workspace, projects current input, invokes `web-update-report` for the complete local reporting workflow, persists every core transition, and delivers completed canonical Markdown reports. Do not ask users to invoke child skills separately.
 
 `web-update-report` owns monitor → materiality → research → finalize using `web-update-monitor` and its own research procedure. This wrapper owns only Google input/context resolution, workspace transport, synchronous persistence handoffs, completion checks, and idempotent delivery. Keep Google integration outside both local skills and introduce no second semantic journal, research state, or report queue.
 
@@ -57,10 +57,7 @@ compatibility must be verified before production use.
 
 ## Optional common context (run-wide)
 
-Only the targets CSV/Spreadsheet and output Drive folder are required. Common context is optional; accept either:
-
-- `Common context:` with inline text.
-- `Context source:` with one explicit Google Doc or Drive-hosted `.md` file ID/URL (not a local path).
+Only the targets CSV/Spreadsheet and output Drive folder are required. Context is optional: accept at most one `Context source:` with a Google Doc or Drive-hosted `.md` file ID/URL (not a local path). Reject inline `Common context:`, multiple sources, and local paths.
 
 With neither, keep the existing target-driven behavior. Reject both modes together; never infer a source from Drive filenames, monitored pages, or previous reports.
 
@@ -80,7 +77,7 @@ With neither, keep the existing target-driven behavior. Reject both modes togeth
 
 ### Apply supplied context
 
-Pass the **same complete text** as resolved inline common context to `web-update-report`, which forwards it to every monitor materiality review (including resumed reviews) and to research for material updates. Do not forward the Google source reference or scratch path. It guides relevance and reporting but never overrides the current `criteria`/`keywords`, adds or disables targets, changes fetch/traversal, suppresses explicitly material changes, or alters transaction state. When context is absent, invoke the local skill without context. Do not re-finalize previous reports.
+Pass the **same complete text** as internal resolved context (not a public inline input) to `web-update-report`, which forwards it to every monitor materiality review (including resumed reviews) and to research for material updates. Do not forward the Google source reference or scratch path. It guides relevance and reporting but supplements the current `keywords`, adds or disables targets, changes fetch/traversal, or alters transaction state. When context is absent, invoke the local skill without context. Do not re-finalize previous reports.
 
 ## Architecture
 
@@ -280,7 +277,7 @@ The **only required resource inputs** (prompt or Routine configuration) are:
 - **Input targets table:** local CSV path, Google Drive CSV file URL/ID, or Google Spreadsheet URL/ID.
 - **Output folder:** one existing Google Drive folder URL/ID, used as the parent of managed `workspaces/` and `reports/` folders.
 
-Optionally supply **either** inline `Common context:` **or** `Context source:` with one Google Doc/Drive Markdown URL or ID; local Markdown paths are not supported. When supplied, the orchestrator resolves and validates the text once before mutations and propagates it to monitoring judgment and research; it is not part of the targets table or persistent state. No worksheet name, range, workspace directory, state file, or report folder
+Optionally supply only one `Context source:` with a Google Doc/Drive Markdown URL or ID; inline context, multiple sources, and local Markdown paths are not supported. When supplied, the orchestrator resolves and validates the text once before mutations and propagates it to monitoring judgment and research; it is not part of the targets table or persistent state. No worksheet name, range, workspace directory, state file, or report folder
 needs to be supplied. The agent discovers all three installed dependencies and creates
 a fresh local scratch workspace automatically on each invocation. An optional
 worksheet/range override can select a non-default tab.
@@ -535,18 +532,18 @@ For Spreadsheet inputs only, project monitoring rows into the canonical
 enriched header, in this order:
 
 ```csv
-name,url,publisher,category,keywords,criteria,priority,enabled
-Subscription updates,https://vendor.example/updates,Example Vendor,Product,subscription plans,Report changes to plan availability and limits,1,true
-Integration updates,https://vendor.example/updates,Example Vendor,Product,API integrations,Report breaking integration changes,2,true
-Service notices,https://operator.example/notices,Example Operator,Operations,,Report changes to maintenance schedules,2,true
-Technical publications,https://institute.example/publications,Example Institute,Research,technical reports,,,false
+name,url,publisher,category,keywords,priority,enabled
+Subscription updates,https://vendor.example/updates,Example Vendor,Product,subscription plans,1,true
+Integration updates,https://vendor.example/updates,Example Vendor,Product,API integrations,2,true
+Service notices,https://operator.example/notices,Example Operator,Operations,,2,true
+Technical publications,https://institute.example/publications,Example Institute,Research,technical reports,,false
 ```
 
 These values are synthetic reserved-domain placeholders, not live-fetch fixtures. This example has four interests, three URL groups, and two enabled fetch targets.
 
 Spreadsheet projection rules (CSV inputs use the core CSV schema verbatim):
 
-- Require `name,url`; select supported `publisher,category,keywords,criteria,priority,enabled` columns by exact name. Reject duplicate selected headers and do not introduce alternate input spellings or `target_id`.
+- Require `name,url`; select supported `publisher,category,keywords,priority,enabled` columns by exact name. Reject duplicate selected headers and do not introduce alternate input spellings or `target_id`.
 - Optional text defaults to blank. Priority is blank or a positive ASCII decimal integer, leading zeros allowed. Enabled is blank (true by default) or trimmed case-insensitive true/false. Keywords are free semantic hints, not a query language; priority is display metadata only.
 - Ignore unrelated worksheet columns. Runtime CSV rejects unknown columns, so serialize only the canonical enriched fields.
 - Preserve every row and its metadata, including duplicate/identical URL rows and disabled interests. Delegate exact-URL grouping and all row/URL/priority/ditto validation to the core `load_targets(staged_csv_path)` contract; do not deduplicate rows in the projection.
@@ -567,7 +564,7 @@ After restore, ledger validation, current targets projection, and verified persi
 
 - `Workspace:` the restored local workspace.
 - `Targets:` `$WORKSPACE/internal/gws/targets.csv`, the current validated projection.
-- `Common context:` the complete resolved text, if supplied; never the Google source ID or deleted staging path.
+- Internal resolved context: the complete text from the sole selected source, if supplied; never the Google source ID or deleted staging path.
 - Requested report language and run-level traversal limits, if supplied.
 - The required synchronous persistence handoff from **Required orchestration**.
 
