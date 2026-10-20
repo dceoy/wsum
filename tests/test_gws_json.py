@@ -165,3 +165,56 @@ def test_oversized_state_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(gws.GwsError, match="JSON exceeds connector"):
         gws_json.pack(ws, tmp_path / "too-large", "20261020T000000Z")
     assert not (tmp_path / "too-large").exists()
+
+
+def test_retention_preserves_shared_object_ids_and_legacy_restore(
+    tmp_path: Path,
+) -> None:
+    ws = _workspace(tmp_path)
+    legacy_stage = tmp_path / "legacy-stage"
+    legacy = gws.pack(ws, legacy_stage, "20261019T000000Z")
+    legacy_receipts: dict[str, dict[str, str]] = {}
+    old_reads: dict[str, str] = {}
+    for item in legacy["files"]:
+        digest = item["sha256"]
+        if digest in legacy_receipts:
+            continue
+        path = legacy_stage / "payloads" / f"{digest}.txt"
+        identifier = f"old-{digest}"
+        legacy_receipts[digest] = {"id": identifier, "file": str(path)}
+        old_reads[identifier] = str(path)
+    legacy_receipts_file = tmp_path / "legacy-receipts.json"
+    legacy_receipts_file.write_text(json.dumps(legacy_receipts))
+    legacy_manifest = tmp_path / "legacy-manifest.json"
+    gws.prepare(legacy_stage, legacy_receipts_file, legacy_manifest)
+    legacy_maps = tmp_path / "legacy-maps.json"
+    legacy_maps.write_text(json.dumps(old_reads))
+    assert gws.verify(legacy_manifest, legacy_maps)["file_count"] > 0
+
+    rows: list[dict[str, str]] = [{
+        "name": "workspace-20261019T000000Z.json",
+        "id": "legacy-manifest",
+        "manifest": str(legacy_manifest),
+        "readbacks": str(legacy_maps),
+    }]
+    previous: dict[str, _ObjectReceipt] | None = None
+    protected: set[str] = set()
+    for second in range(4):
+        generation = f"20261020T00000{second}Z"
+        manifest, maps, previous, _ = _commit(ws, tmp_path, generation, previous)
+        for receipt in previous.values():
+            protected.update(receipt["readbacks"])
+        rows.append({
+            "name": f"workspace-{generation}.json",
+            "id": f"new-manifest-{second}",
+            "manifest": str(manifest),
+            "readbacks": str(maps),
+        })
+    manifest_list = tmp_path / "mixed-generations.json"
+    manifest_list.write_text(json.dumps(rows))
+    plan = gws.retention(manifest_list)
+    assert set(plan["retain"]) == {
+        "new-manifest-1", "new-manifest-2", "new-manifest-3"
+    }
+    assert {"legacy-manifest", "new-manifest-0"} <= set(plan["delete"])
+    assert not protected.intersection(plan["delete"])
