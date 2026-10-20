@@ -199,7 +199,10 @@ def prepare(snapshot: Path, head_ref: Path, destination: Path) -> dict[str, typi
     if not isinstance(draft, dict):
         raise gws.GwsError("invalid staged archive")
     record = typing.cast("dict[str, typing.Any]", draft)
-    if set(record) != {"format", "generation", "archive", "count"} or record["format"] != FORMAT:
+    if (
+        set(record) != {"format", "generation", "archive", "count"}
+        or record["format"] != FORMAT
+    ):
         raise gws.GwsError("invalid staged archive")
     manifest = {**record, "head": _ref(_load_json(head_ref, MAX_CHUNK_TEXT))}
     content = gws._json_bytes(manifest)
