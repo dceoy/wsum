@@ -1,5 +1,6 @@
 """Archive text-chain transport tests without Google credentials."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,8 @@ def _workspace(tmp_path: Path) -> Path:
     )
     original = workspace / "internal/state/snapshots/abc.txt"
     original.write_bytes(b"\xef\xbb\xbfbaseline\r\n")
-    os.utime(original, ns=(1_700_000_000_123_456_789,) * 2)
+    stamp = 1_700_000_000_123_456_789
+    os.utime(original, ns=(stamp, stamp))
     # Incompressible ASCII forces multiple chunks without binary source files.
     (workspace / "internal/state/noise.txt").write_text(
         os.urandom(55_000).hex(), encoding="ascii"
@@ -130,11 +132,11 @@ def test_archive_invalid_chain_index_is_rejected(tmp_path: Path) -> None:
     head = json.loads(manifest.read_text())["head"]["id"]
     body = json.loads(ids[head].read_text())
     body["index"] = 1
-    content = gws._json_bytes(body)
+    content = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
     ids[head].write_bytes(content)
     value = json.loads(manifest.read_text())
-    value["head"]["sha256"] = gws._digest(content)
+    value["head"]["sha256"] = hashlib.sha256(content).hexdigest()
     value["head"]["size"] = len(content)
-    manifest.write_bytes(gws._json_bytes(value))
+    manifest.write_bytes(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
     with pytest.raises(gws.GwsError, match="structure"):
         gws.verify(manifest, readbacks)
