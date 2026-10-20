@@ -107,6 +107,10 @@ leave extra files without invalidating an already verified commit.
 Do not bypass environment-denied HTTP 403 with main-agent fetch. Keep resolved
 context, credentials and tokens out of persisted state.
 
+## Redundant checkpoint elimination
+
+On every core persistence handoff, use the GWS helper `checkpoint-needed` with the current workspace and the most recent verified committed manifest. Only skip creation of a new generation when it returns `{"changed": false}`. This also covers read-only calls that did not produce recovery writes. Always checkpoint a fresh workspace with no committed manifest, and stop on comparison errors. This optimization does not remove pending reviews, reports, evidence, or any persisted input/output files.
+
 ## Offline verification and live follow-up
 
 `tests/test_gws.py` covers current JSON checkpoints,
