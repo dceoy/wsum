@@ -5599,7 +5599,7 @@ def test_distinct_urls_with_colliding_ids_fail(
         (
             (
                 "Second,https://vendor.example/updates,,,API,2,true\n"
-                "First,https://vendor.example/updates,,,,First,1,true\n"
+                "First,https://vendor.example/updates,,,First,1,true\n"
             ),
             ["Second", "First"],
         ),
