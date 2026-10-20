@@ -77,7 +77,10 @@ def _commit(
                     "sha256": meta["sha256"],
                 })
             )
-        objects[digest] = {"head": json.loads(nxt.read_text()), "readbacks": readbacks}
+        objects[digest] = {
+            "head": cast("_ChunkRef", json.loads(nxt.read_text())),
+            "readbacks": readbacks,
+        }
     receipts = tmp / ("receipts-" + generation + ".json")
     # Only entries referenced by this checkpoint; old objects are still reusable.
     wanted = {item["sha256"] for item in draft["files"] if "object" in item}
