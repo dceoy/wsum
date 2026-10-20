@@ -52,6 +52,8 @@ ignore = [
   "f-string-in-exception",  # contextual user-facing errors
   "undocumented-public-function",  # CLI helpers have descriptive names
   "print",  # JSON CLI output
+  "import-outside-top-level",  # avoid circular helper import
+  "too-many-statements",  # enlarged CLI dispatcher
 ]
 "skills/web-update-report-gws/scripts/gws_archive.py" = [
   "implicit-namespace-package",  # executable skill helper, not an import package
@@ -66,6 +68,11 @@ ignore = [
   "f-string-in-exception",  # contextual user-facing errors
   "undocumented-public-function",  # CLI helpers have descriptive names
   "import-private-name",  # private validation helpers intentionally shared
+  "any-type",  # JSON schema boundary
+  "private-member-access",  # common validation helpers
+  "multiple-with-statements",  # tar and gzip context scopes
+  "magic-value-comparison",  # UTF-8 controls
+  "literal-membership",  # UTF-8 control exceptions
 ]
 "skills/web-update-monitor/scripts/workspace.py" = [
   "complex-structure",  # explicit filesystem safety branches stay visible
