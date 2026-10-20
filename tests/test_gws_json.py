@@ -233,7 +233,6 @@ def test_retention_preserves_shared_object_ids_and_legacy_restore(
     assert not protected.intersection(plan["delete"])
 
 
-
 def test_reuse_checkpoint_skips_unchanged_chunk_downloads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -241,9 +240,7 @@ def test_reuse_checkpoint_skips_unchanged_chunk_downloads(
     ws = _workspace(tmp_path)
     first, old_reads, previous, _ = _commit(ws, tmp_path, "20261020T000000Z")
     (ws / "internal/gws/delivery.json").write_text(
-        '{"reports":{"20261020T000000Z-abcdef01":"'
-        + "0" * 64
-        + '"},"version":1}'
+        '{"reports":{"20261020T000000Z-abcdef01":"' + "0" * 64 + '"},"version":1}'
     )
     staged = tmp_path / "stage-reused"
     draft = gws.json_pack(ws, staged, "20261020T000001Z")

@@ -10,9 +10,9 @@ import base64
 import binascii
 import csv
 import gzip
-import io
 import hashlib
 import importlib.util
+import io
 import json
 import operator
 import os
@@ -738,9 +738,7 @@ JSON_MAX_COMPRESSED = JSON_CHUNK_CHARS * JSON_MAX_CHUNKS
 
 
 def _json_load(path: Path, limit: int = MAX_MANIFEST) -> typing.Any:
-    return json.loads(
-        _text_bytes(path, limit), object_pairs_hook=_unique_object
-    )
+    return json.loads(_text_bytes(path, limit), object_pairs_hook=_unique_object)
 
 
 def _json_reference(raw: object) -> dict[str, typing.Any]:
@@ -845,7 +843,9 @@ def _json_state(path: Path, *, draft: bool = False) -> dict[str, typing.Any]:
     return state
 
 
-def json_pack(workspace: Path, snapshot: Path, generation: str) -> dict[str, typing.Any]:
+def json_pack(
+    workspace: Path, snapshot: Path, generation: str
+) -> dict[str, typing.Any]:
     """Stage small state JSON and unique immutable compressed text objects."""
     _timestamp(generation)
     if snapshot.exists() or snapshot.is_symlink():
@@ -1062,7 +1062,9 @@ def _json_check_commit_receipts(
     return {"new_objects": new_count, "reused_objects": reused_count}
 
 
-def json_prepare(snapshot: Path, receipts: Path, destination: Path) -> dict[str, typing.Any]:
+def json_prepare(
+    snapshot: Path, receipts: Path, destination: Path
+) -> dict[str, typing.Any]:
     """Create a bounded state manifest from new readbacks or verified old refs."""
     state = _json_state(snapshot / "draft.json", draft=True)
     counts = _json_check_commit_receipts(
@@ -1137,7 +1139,9 @@ def json_verify(manifest: Path, readbacks: Path) -> dict[str, typing.Any]:
     }
 
 
-def json_restore(manifest: Path, readbacks: Path, workspace: Path) -> dict[str, typing.Any]:
+def json_restore(
+    manifest: Path, readbacks: Path, workspace: Path
+) -> dict[str, typing.Any]:
     """Restore a complete workspace atomically from a committed JSON generation."""
     state, contents, _ = _json_verified(manifest, readbacks)
     if workspace.exists() or workspace.is_symlink():

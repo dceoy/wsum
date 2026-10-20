@@ -472,6 +472,7 @@ truncate or convert state into a monolithic archive.
    Re-list; require this manifest to be uniquely newest before
    acknowledging durability. Use `verify --readbacks` only for **full**
    remote inspection/restore, not on every ordinary checkpoint.
+
 6. **Separate maintenance, not part of each state mutation.**
    Periodically or on explicit cleanup, fully download and verify all
    remaining generations. Pass the `{name,id,manifest,readbacks}`
