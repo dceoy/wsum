@@ -52,6 +52,8 @@ ignore = [
   "f-string-in-exception",  # contextual user-facing errors
   "undocumented-public-function",  # CLI helpers have descriptive names
   "print",  # JSON CLI output
+  "too-many-statements",  # deterministic CLI dispatcher
+  "any-type",  # validated JSON manifests
 ]
 "skills/web-update-monitor/scripts/workspace.py" = [
   "complex-structure",  # explicit filesystem safety branches stay visible

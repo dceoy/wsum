@@ -36,59 +36,68 @@ and full used range for Sheets input. No manual A1 range is needed.
 
 ## Text persistence operations
 
-Use the existing authorized Google connector and local Python only. No extra
-Drive API/CLI, credentials, Apps Script, service or infrastructure is needed.
-Tool names vary: follow the agent-facing create/read/list/delete contract in
-[the skill](../skills/web-update-report-gws/SKILL.md#google-drive-connector-base64-contract-cowork-compatible).
-Cowork does **not** materialize connector bytes to local files. Its
-`download_file_content` returns Base64 and `create_file` accepts
-`base64Content`. Use the skill's model-mediated `transfer-encode` /
-`transfer-decode` bridge. Compute the upload size/SHA-256 from the **local
-original**, relay opaque Base64 and verify the separately downloaded exact-ID
-bytes. A self-comparison of two model-rendered copies is not verification.
-Never use changing `read_file_content` prose, preview, truncated content
-or Docs conversion for immutable state.
+Use the existing authorized Google connector plus local Python only. No
+Cloud Run, extra Drive API credentials, Apps Script or server is needed.
+See the [skill](../skills/web-update-report-gws/SKILL.md#google-drive-connector-text-transport-cowork-compatible).
 
-1. Resolve optional context, the parent and its immutable
-   `wsum-text.binding.json`. Start initial setup with a fresh dedicated folder;
-   verify both child IDs. Never recreate missing managed resources.
-2. Base64-download the newest `workspace-*.json` manifest and every payload
-   by exact ID, and decode to fresh local scratch files. Validate filename/generation, safe paths, sizes and SHA-256, then restore to
-   a new local directory. Validate the required delivery ledger.
-3. For Drive CSV, decode the full Base64 field and compare its decoded length
-   with original `fileSize` metadata; then validate all rows through core CSV
-   parsing. Without source checksum, equal-length alteration is unprovable.
-   Prefer Sheets cell-value reads when appropriate, never previews.
-4. Project and validate the current targets table, then invoke `web-update-report`
-   to resume, monitor, research material changes and finalize through the core API.
-   Supply the required synchronous persistence handoff: after every `pending`
-   (including list/detail recovery), `check`, `ingest`, `discard`, and `finalize`,
-   pause local work until the wrapper verifies a snapshot. Error returns also
-   require checkpointing; a failed checkpoint stops the workflow. `pack` stages exact UTF-8
-   payloads; unsupported binary/control content fails explicitly.
-5. `transfer-encode` each **local original** payload, pass `base64Content` into
-   connector create, then Base64-download the returned ID and `transfer-decode`
-   with its original size/SHA-256. `prepare` validates read-back receipts.
-   Re-list and check the expected active identity **immediately before**
-   creating the manifest last.
-6. Decode the exact-ID manifest Base64 against the **prepared original**
-   manifest size/SHA-256, then run `verify` for all payloads. Re-list to confirm the self-commit is newest
-   and unique before updating expected identity or reporting durability.
-7. Retain three verified generations using `retention`. Revalidate the listing,
-   delete obsolete manifests first, confirm their absence, then delete only
-   payloads unreferenced by remaining manifests. Stop cleanup on uncertainty;
-   leave unknown/orphan files alone.
-8. Refresh public pending state and persist possible recovery before delivery.
-   Deliver canonical Markdown only after that run’s pending reviews clear;
-   any blocked recovery entry defers all delivery. Use the Base64
-   bridge to verify exact-ID report bytes against the local original digest;
-   only then record the ledger and persist it. If ledger persistence fails,
-   restore committed state and reuse/verify the same exact report filename
-   on retry. Never report that failed ledger as durable.
+New checkpoints use **small immutable JSON state** (`wsum-json-1`)
+containing inline short text and content-addressed references to
+large/snapshot objects. Objects are gzip-compressed and Base64-encoded
+**as text**, split into bounded hash-linked JSON text chunks. Unlike
+the old approach, **unchanged objects are reused across generations**.
+The entire Workspace is not tarred or re-uploaded on every operation.
 
-Only one writer may run per workspace. Listing guards detect stale sessions
-but provide no atomic lock. Ambiguous creates require exact-name reconciliation
-with exact-ID byte checks; never blindly retry or delete a previous generation.
+The upload path for the JSON checkpoint and all new chunks is
+`transfer-text` → `create_file.textContent` with MIME type
+`text/plain` and Google-native conversion disabled. It does **not**
+upload using `base64Content`. The connector's download response remains
+Base64-wrapped, so use `transfer-decode` against the independent source
+file size and SHA-256 to validate every exact-ID readback. Existing
+`wsum-text-1` per-file snapshots still restore through their legacy
+readback mapping.
+
+1. Resolve the bound output folder and immutable
+   `wsum-text.binding.json`. Require full, paginated listing and verify
+   the newest checkpoint, all external chunk chains, and the local
+   delivery ledger before any new monitoring work.
+2. Project current Google Sheets or CSV input and run
+   `web-update-report` with the synchronous checkpoint handoff after
+   every `pending`, `check`, `ingest`, `discard` and `finalize`
+   transition. Include failure and recovery paths.
+3. Run `next-generation` and `json-pack`. New small file contents go
+   inline into the small JSON state document. Large page snapshots
+   become separate SHA-256-addressed objects.
+4. For an unchanged object hash, inherit the head reference from a
+   **previously exact-ID-verified committed state manifest** without
+   redownloading all old chunks at every checkpoint. Build an object
+   receipt `{"head":...,"previous_manifest":"/scratch/verified-old.json"}`.
+   For newly uploaded objects use `json-link` **from last chunk to first**,
+   `textContent` and exact-ID readbacks of every new chunk; their receipts
+   use `{"head":...,"readbacks":{id:path,...}}`.
+5. Build receipts keyed by object content SHA-256. Run `json-prepare`
+   to verify fresh object chunks and to bind unchanged objects to the
+   previously committed manifest and the staged source digest.
+   Revalidate the expected active manifest immediately before commit.
+6. Upload the final `workspace-<generation>.json` by `textContent`
+   **last**. Download and validate its exact bytes, then run
+   `json-verify-commit --manifest ... --receipts ...` and re-list to
+   confirm it is uniquely newest. Use full `verify --readbacks ...`
+   for restore, not for ordinary checkpoints.
+7. Run full three-generation retention in a **separate maintenance
+   operation**, not after every core mutation. After downloading and
+   validating complete references for all generations, delete discarded
+   manifests first, then only unreferenced object chunks. Shared
+   objects referenced by retained generations must remain untouched.
+   If full verification exceeds connector limits, safely skip cleanup.
+8. Publish completed Markdown report files only after pending reviews
+   clear, with the original exact-ID readback/ledger procedure.
+   Persist ledger changes in another small JSON checkpoint.
+
+A single state document is bounded at 64 KiB; chunk size is 12 KiB
+of encoded object data. These are not connector guarantees. The transfer
+remains model-mediated; incomplete connector output or inability to read
+a chunk fails closed. Do not copy full state into the final assistant
+response. One writer per workspace; timestamp/listing checks are not locks.
 
 ## Failure handling
 
@@ -102,7 +111,9 @@ context, credentials and tokens out of persisted state.
 
 ## Offline verification and live follow-up
 
-`tests/test_gws.py` uses a small fake Drive text store for deterministic packing,
+`tests/test_gws.py` covers legacy transport, JSON checkpoints,
+deduplicated objects and corrupt readbacks. The tests use
+local synthetic files for deterministic packing,
 exact hash checks, fresh-workspace restore, repeated commits, three-generation
 retention and injected failures. No Google credentials are used.
 

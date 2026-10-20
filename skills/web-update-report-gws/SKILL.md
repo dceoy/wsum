@@ -11,50 +11,49 @@ Use this Google Workspace entrypoint with two required resources: one targets ta
 
 `web-update-report` owns monitor → materiality → research → finalize using `web-update-monitor` and its own research procedure. This wrapper owns only Google input/context resolution, workspace transport, synchronous persistence handoffs, completion checks, and idempotent delivery. Keep Google integration outside both local skills and introduce no second semantic journal, research state, or report queue.
 
-## Google Drive connector Base64 contract (Cowork-compatible)
+## Google Drive connector text transport (Cowork-compatible)
 
-Use **only the existing authorized Google connector and local Python**.
-Cowork's `download_file_content` returns a Base64 field in the model-visible
-tool result, not a local file. `create_file` / `update_file` accept
-`base64Content` but do not upload from a local path. The transfer is thus
-**model-mediated**. Do not assume automatic lossless file materialization.
+Use only the existing authorized Google Drive connector and local Python.
+The **committed state** is a small, immutable UTF-8 JSON document
+(`wsum-json-1`); changed or large website snapshots are **separate immutable
+content-addressed objects**. Unchanged objects are reused across generations.
+Never send a single compressed Workspace archive or SQLite database through
+Claude. There is no new Drive API credential, CLI, Cloud Run or Apps Script.
 
-- Resolve exact Drive IDs; list all direct children with complete pagination,
-  IDs, parent IDs, names and MIME types. Never infer a file from a preview.
-- For downloads of non-Google-native files, use the exact-ID connector's
-  **Base64 content**, not `read_file_content`'s changing natural-language
-  representation. Relay only the exact Base64 field, unmodified, into a new
-  scratch `.b64` file outside the workspace; do not copy its prose/JSON wrapper.
-  Decode it with `transfer-decode` below.
-- For uploads, call `transfer-encode` on the **original local file** and relay
-  only its `base64Content` field into `create_file`/`update_file`.
-  Download the resulting ID and run `transfer-decode` with the **original**
-  local size and SHA-256. Then apply the existing `prepare`/`verify` checks;
-  create the immutable manifest **last**.
-- When restoring a committed payload, validate against its SHA-256 recorded in
-  the manifest, not a hash computed from the model's reconstruction. Verify
-  schema, file IDs, parent, size and path as before.
-- The model may relay Base64 as opaque data, but must never interpret, edit,
-  normalize, summarize or reconstruct it. Copy/transmission errors must
-  **fail closed** via strict Base64, size and digest checks. Do not include
-  raw state in final messages. Delete temporary Base64 files after use.
-- Keep exact-ID folder/file create, list, download, update and delete semantics.
-  If a tool argument/result or model context cannot carry the **complete**
-  Base64 field (large payloads, truncation, unsupported types), stop without
-  claiming durability. The local format's 64 MiB limit does not imply the
-  model-mediated transport can handle 64 MiB.
+- Use connector `create_file.textContent` to upload the exact UTF-8 bytes
+  returned by `gws.py transfer-text`. Set
+  `contentMimeType: text/plain` and `disableConversionToGoogleType: true`.
+  Do **not** send `base64Content` when uploading new state or object chunks.
+- Large objects are compressed deterministically using gzip and Base64-encoded
+  as **ASCII text**, then divided into 12 KiB text fragments. Each chunk is a
+  small JSON text file with `index`, `data` and `next`; the latter references
+  the already-verified next chunk by exact Drive ID, size and SHA-256.
+  Upload **tail first**. This is an encoding inside a plain-text file,
+  not a binary `base64Content` connector upload.
+- The connector's `download_file_content` still responds with Base64 bytes
+  even for plain text. Relay its **complete** Base64 field into a scratch
+  file outside the workspace and run `transfer-decode` using the **local
+  original** size and SHA-256. Never trust prose previews, truncated fields,
+  or model-reconstructed data. Save decrypted credentials nowhere.
+- The last upload in each generation is `workspace-<generation>.json`.
+  Download and verify it by exact ID; validate new object readbacks and
+  inherited references from a previously verified committed manifest
+  before acknowledging durability. Stop on any missing ID, checksum or
+  complete-listing failure; never silently revert to an older generation.
+- Model-mediated transfer/context limits **still apply** even to text. The
+  64 KiB state document and 12 KiB object fragments are local upper bounds,
+  **not guarantees** that the particular Claude connector call succeeds.
+  Large objects can require many calls. Stop explicitly rather than losing
+  state; use a direct Drive API transport only if separately authorized.
 
-**Drive CSV limitation:** the reported metadata exposes `fileSize` but no
-source checksum. The downloaded Base64 can be decoded, size-checked and fully
-validated by the core CSV parser, but equal-length alteration cannot be
-cryptographically detected. Do **not** claim source-byte authentication.
-Prefer Google Sheets cell-value reads when avoiding CSV Base64 transfer is
-important. If exact original-CSV provenance is mandatory, fail closed until a
-trusted source checksum or a file-backed byte transport becomes available.
+The existing legacy `wsum-text-1` format remains restorable.
+CSV inputs and delivered Markdown report bytes retain their existing
+`transfer-encode` / `base64Content` bridge until migrated separately.
 
-This bridge needs no separate Drive API, CLI, infrastructure or credentials.
-**Live Cowork/Routines compatibility remains unverified.** Model relay and
-connector tool size limits are explicit residual risks.
+**Drive CSV provenance:** file metadata usually supplies original size but
+not a trusted SHA-256, so equal-length source corruption is not detectable.
+Prefer Google Sheets cell reads where possible. Live connector transfer
+compatibility must be verified before production use.
 
 ## Optional common context (run-wide)
 
@@ -120,7 +119,7 @@ Call `web-update-report-gws` once per run. Resolve the installed `web-update-rep
 
 1. Resolve and validate optional common context before any workspace mutation. Restore and validate the immutable Drive folder binding, newest verified text snapshot, and delivery ledger; initialize only for a genuinely fresh output folder. Acquire and validate the current selected CSV/Spreadsheet, projecting it to `internal/gws/targets.csv`. Persist initialization/projection before invoking local monitoring; never use an old projection when current input fails.
 2. **Invoke `web-update-report`**, supplying the restored `WORKSPACE`, validated `TARGETS_CSV`, complete resolved inline context if present, output language/instructions, and the **required synchronous persistence handoff** below. It reconciles/resumes pending reviews, checks targets, recovers website HTTP 403 through monitor ingest, judges materiality, researches material updates, and finalizes once per URL. Follow that skill rather than running a parallel monitoring loop here.
-3. **Persist during the invocation.** After every core `pending` (list/detail), `check`, `ingest`, `discard`, and `finalize`, receive control and run **Persist the complete cross-run workspace** below. Acknowledge success and return control only after the new snapshot verifies and the expected active identity is updated. Even pending inspection can recover writes; checkpoint error returns too. If persistence fails, stop local orchestration and delivery. Do not wait until the local skill returns to snapshot its changes.
+3. **Persist during the invocation.** After every core `pending` (list/detail), `check`, `ingest`, `discard`, and `finalize`, receive control and run **Persist JSON state and immutable content-addressed objects** below. Acknowledge success and return control only after the new snapshot verifies and the expected active identity is updated. Even pending inspection can recover writes; checkpoint error returns too. If persistence fails, stop local orchestration and delivery. Do not wait until the local skill returns to snapshot its changes.
 4. **Verify completion independently.** After the local workflow returns, refresh public pending state with the current targets projection and persist this command's possible recovery writes through the same handoff. Defer any report whose run ID remains pending; any `blocked` recovery entry with unknown run ID defers all delivery. Local completion does not establish Drive durability.
 5. **Publish completed runs only.** Enumerate canonical `output/report/<run-id>.md` files, including undelivered historical runs, and follow the exact-name lookup, read-back verification, and delivery ledger procedure below. Persist after recording delivery. Do not enrich, edit, or overwrite a previously delivered canonical report because later research becomes available.
 
@@ -151,12 +150,17 @@ The composite's deterministic work is implemented by
 remain the agent's responsibility. Resolve `GWS_SKILL_DIR` from the installed
 composite and `WEB_UPDATE_MONITOR_SKILL_DIR` from installed core skill discovery.
 
-Download the newest manifest and every referenced payload by exact Drive ID,
-then use the Base64 bridge below to decode them to fresh scratch paths.
-Save the manifest to `$MANIFEST` and a local JSON map of payload
-ID to decoded file path to `$READBACKS` (for example,
-`{"DrivePayloadID":"/scratch/readback.txt"}`). Validate the manifest generation
-against its Drive filename, then restore to a **nonexistent** workspace:
+Download the newest committed JSON manifest by exact Drive ID. For
+`wsum-json-1`, load small state fields directly from that JSON. For every
+external object, traverse its verified hash-linked text chunks by exact ID,
+decode the connector's returned Base64 envelopes into scratch text files, and
+construct a JSON readbacks map keyed by **object content SHA-256**:
+
+`{"<object-sha256>":{"head":{"id":"...","size":123,"sha256":"..."},"readbacks":{"<chunk-ID>":"/scratch/chunk.txt"}}}`
+
+For `wsum-text-1`, retain the historical mapping of payload Drive IDs to
+scratch paths. Verify manifest generation against filename. Restore into a
+**nonexistent** workspace:
 
 ```bash
 python "$GWS_SKILL_DIR/scripts/gws.py" verify --manifest "$MANIFEST" --readbacks "$READBACKS"
@@ -313,128 +317,179 @@ empty bound workspace. An interrupted setup requires explicit reconciliation;
 stop rather than silently adopting partial state. Keep the binding outside
 snapshot retention and scope all operations to the verified IDs.
 
-## Persist the complete cross-run workspace
+## Persist JSON state and immutable content-addressed objects
 
-A generation consists of immutable text payloads plus one immutable manifest
-named `workspace-YYYYMMDDTHHMMSSZ.json`. Payloads use names
-`payload-<generation>-<sha256>.txt`; identical content within one generation
-shares a payload. Each generation uploads its own payloads, simplifying cleanup.
-There is no mutable pointer file.
+Each generation is **one compact JSON checkpoint**, named
+`workspace-YYYYMMDDTHHMMSSZ.json`. It includes inline text for small
+`output/` and `internal/` files and content-hash references for larger
+files. `internal/state/snapshots/` entries are **always** external,
+regardless of length. The JSON is the state source of truth, not a SQLite
+binary or tarball. Content objects are immutable, deduplicated within a
+generation and reused across generations by SHA-256.
 
-Canonical compact JSON has sorted keys and ASCII escapes. Manifest shape:
+Example (shortened IDs/hashes are only illustrative):
 
 ```json
 {
-  "format": "wsum-text-1",
-  "generation": "20261009T000000Z",
+  "format": "wsum-json-1",
+  "generation": "20261020T000000Z",
   "files": [
     {
-      "path": "internal/state/example.txt",
-      "size": 4,
-      "sha256": "<64 lowercase hex>",
-      "id": "<exact Drive file ID>"
+      "path": "internal/gws/delivery.json",
+      "size": 26,
+      "sha256": "<sha256>",
+      "text": "{\"reports\":{},\"version\":1}"
+    },
+    {
+      "path": "internal/state/snapshots/page.txt",
+      "size": 102400,
+      "sha256": "<sha256>",
+      "mtime_ns": 1700000000123456789,
+      "object": {
+        "chunks": 4,
+        "head": { "id": "<Drive-ID>", "size": 12000, "sha256": "<sha256>" }
+      }
     }
   ]
 }
 ```
 
-`pack` sorts paths and preserves exact supported UTF-8 bytes, including CRLF,
-BOM, non-ASCII text and absent final newlines. It rejects invalid UTF-8 and
-control characters other than tab/CR/LF; binary entries fail explicitly.
-Snapshot all regular files under `output/` and `internal/`, excluding only
-hidden atomic temporary files. Do not change local workspace formats.
-Limits: 2,000 files, 64 MiB per payload, 256 MiB total, 2 MiB manifest.
-Empty directories are not stored; both roots are recreated on restore.
-
-Records for files under `internal/state/snapshots/` additionally carry an optional
-integer `mtime_ns` in the range `0..2^63-1`. It preserves the snapshot promotion
-identity used by observation timestamps; it is never a source for displayed
-historical dates. Restore applies the exact stamp and verifies readback before
-installing the workspace, failing if the filesystem rounds it. Older manifests
-without the field remain supported; older helpers that reject extra manifest
-fields must be upgraded to read newly packed snapshots.
+The helper enforces safe file paths, exact UTF-8 bytes and hashes, 2,000
+workspace files, 64 MiB per source file, 256 MiB workspace total,
+64 KiB JSON checkpoint, 1,024-byte inline threshold, 4,096 chunks per
+object, and 16 KiB linked-chunk text. Its gzip stream is reproducible,
+and `mtime_ns` is preserved exactly for promoted baselines. If the state
+JSON becomes too large, stop with an explicit error; do not silently
+truncate or convert state into a monolithic archive.
 
 ### Restore
 
-List the complete bound workspace folder. Validate timestamped manifest names
-strictly and require one ID per name. Select the newest by filename timestamp,
-not modification time. Verify its exact-ID manifest, filename/generation match,
-and every referenced payload's parent/type, byte length and SHA-256. Save an
-invocation-local expected `{name,id}` identity. Restore through the helpers to
-a new workspace, then validate the delivery ledger and project current targets.
-A missing or corrupt newest generation stops execution without silently using
-an older generation or resetting the baseline. Only explicit initial setup may
-use an empty folder and expected JSON `null`.
+1. Verify immutable parent binding and complete workspace-folder listing.
+   Select newest manifest by generation filename (not Drive modification
+   time); reject duplicate names and missing exact IDs.
+2. Download/verify the manifest via complete Base64 response. For new
+   `wsum-json-1`, parse its inline state and exact external-object head
+   references. For each object SHA, download the chain of all chunks,
+   in ascending index order, by exact ID; each JSON chunk's `next`
+   provides the next verified reference. Build `READBACKS` as described
+   above. Reject duplicate IDs, malformed links, missing chunks, hashes
+   or unsafe content. Do not use Drive previews.
+3. Run `gws.py verify` followed by `restore`. The helper validates all
+   references, decompresses with an output bound, reconstructs byte-exact
+   UTF-8 files, verifies hashes and restores promoted `mtime_ns` exactly.
+   A broken newest checkpoint must fail closed, not silently fall back.
+4. For legacy `wsum-text-1`, use its original per-file readback mapping.
 
-### Persist after every workspace mutation
+### Persist after every state mutation
 
-1. Freeze local workspace writes during packing. Re-list all workspace files
-   as `[{"name":"workspace-...json","id":"..."}, ...]`, including payload
-   records. Keep the restored/last self-committed identity in a separate JSON
-   file; never derive the expectation from the new listing.
-2. Derive a monotonic generation and stage the complete workspace:
+1. Freeze workspace writes and re-list the bound workspace folder.
+   Save the complete exact-ID listing as `LISTING`, and keep the previously
+   restored/committed identity in `EXPECTED` (JSON `{"name":"...","id":"..."}`
+   or `null` for genuine first-run initialization). Generate a unique,
+   monotonic timestamp before invoking the packer:
 
    ```bash
    python "$GWS_SKILL_DIR/scripts/gws.py" next-generation \
      --snapshots-json "$LISTING" --expected-snapshot-json "$EXPECTED"
-   python "$GWS_SKILL_DIR/scripts/gws.py" pack \
-     --workspace "$WORKSPACE" --generation "$GENERATION" --snapshot "$STAGED"
    ```
 
-   Use the returned generation. The guard compares active name/ID and chooses
-   `max(now, newest + 1 second)`; it rejects duplicate manifest names.
-
-3. For each unique digest in `draft.json`, `transfer-encode` its staged
-   `payloads/<sha256>.txt`, create immutable text using the returned
-   `base64Content`, and download by returned Drive ID. Run `transfer-decode`
-   with the original local size/SHA-256. Save receipts mapping digest to
-   `{"id":"DriveID","file":"/scratch/exact-id-readback.txt"}`.
-4. Verify all receipts and emit the final manifest locally:
+   Capture the command's returned JSON `generation` field into
+   `GENERATION` (not the whole stdout JSON). Then stage:
 
    ```bash
-   python "$GWS_SKILL_DIR/scripts/gws.py" prepare \
-     --snapshot "$STAGED" --receipts "$RECEIPTS" --manifest "$PREPARED_MANIFEST"
+   python "$GWS_SKILL_DIR/scripts/gws.py" json-pack \
+     --workspace "$WORKSPACE" --snapshot "$STAGED" \
+     --generation "$GENERATION"
    ```
 
-5. **Immediately before manifest creation**, re-list and run `next-generation`
-   again against the unchanged expected identity. On mismatch, stop without
-   publishing or deleting anything. Use the originally allocated generation.
-   `transfer-encode` and create the prepared manifest **last**, under its final
-   immutable filename.
-6. Download that manifest's Base64 by its returned ID and `transfer-decode`
-   with the **prepared local** size/SHA-256. Compare decoded size and SHA-256
-   with `prepare` output, confirm its filename/generation, and run `verify`
-   using complete exact-ID payload read-backs. Re-list and require the newest
-   identity to be this self-commit, with no duplicate manifest names. Only now
-   report durability and update the invocation-local expected identity.
-7. Verify all generations from a complete listing before cleanup. Save a JSON
-   array of records containing `name`, `id`, `manifest` (local read-back path)
-   and `readbacks` (local mapping-file path), then run:
+2. From `draft.json`, identify each unique external-object SHA-256.
+   For an unchanged object already recorded in the **locally retained,
+   previously exact-ID-verified committed manifest**, reuse the exact
+   `head` and `chunks` reference without downloading its chunk chain.
+   The helper validates that the content SHA-256, original length, chunk
+   count and head agree with the prior committed manifest. Never reuse
+   a reference supplied solely by name/search results or an unverified
+   older manifest. Preserve the prior manifest readback path as evidence.
+   This assumes prior verified objects have not been overwritten remotely;
+   full remote verification is required again at restore and maintenance.
+3. For a new object, its staged fragments are under
+   `$STAGED/objects/<sha256>/<four-digit-index>.txt`.
+   Initialize scratch `NEXT_JSON` to literal `null`. For index
+   `chunks-1` down to `0`, run:
 
    ```bash
-   python "$GWS_SKILL_DIR/scripts/gws.py" retention --generations "$GENERATIONS"
+   python "$GWS_SKILL_DIR/scripts/gws.py" json-link \
+     --fragment "$FRAGMENT" --next-json "$NEXT_JSON" \
+     --index "$INDEX" --output "$CHUNK"
+   python "$GWS_SKILL_DIR/scripts/gws.py" transfer-text --file "$CHUNK"
    ```
 
-   The helper returns `retain` and `delete` IDs, retaining the three newest
-   verified generations. Revalidate the listing and active identity before
-   deletion. Delete obsolete manifests first; re-list to confirm those exact
-   IDs are absent and remaining manifests unchanged, then delete only payload
-   IDs in the plan that no remaining manifest references. Unknown/orphan files
-   are left untouched. Incomplete listing, unreadable manifest or uncertain
-   delete stops cleanup. Cleanup failure can leave extra files and does not
-   invalidate a verified commit.
+   Upload the returned `textContent` as `text/plain` with Google
+   conversion **disabled**; choose immutable file names
+   `object-<sha256>-<index>.txt`. Immediately download the returned
+   exact ID and validate with `transfer-decode` against the original
+   `size`/`sha256` from `json-link`. Only then overwrite scratch
+   `NEXT_JSON` with the verified `{id,size,sha256}` of that chunk.
 
-An ambiguous create must be reconciled by complete exact-name listing and
-exact-ID read-back matching the staged bytes. Never blindly retry a create.
-Failed payload/manifest writes or verification leave previous committed
-generations untouched; do not call failed local changes durable. A failed
-manifest read-back can leave an unverifiable newest manifest: stop and surface
-it on the next run. No automatic recovery guesses are made.
+4. For each external-object SHA-256, construct exactly one receipt mode:
 
-Require **one non-overlapping writer** per workspace. The two listing guards
-detect stale sessions; they are not a lock or atomic compare-and-swap. Concurrent
-writers are unsupported. Do not promise prevention of a race after the final
-listing check.
+   - **New object:** `{"head":<head-ref>,"readbacks":{DriveID:localDecodedFile,...}}`.
+     The files must be exact-ID downloads of every newly created chunk.
+   - **Reused object:** `{"head":<head-ref>,"previous_manifest":"/scratch/previous.json"}`.
+     This path must identify a previously restored/verified committed
+     manifest, already checked by its exact Drive ID. The helper checks
+     that the inherited content hash, size, chunk count and head match;
+     it does not re-download its chunk chain on a normal checkpoint.
+
+   Write `RECEIPTS` JSON keyed by source content SHA-256, including all
+   referenced objects, with no duplicate or unexpected keys.
+   Run:
+
+   ```bash
+   python "$GWS_SKILL_DIR/scripts/gws.py" json-prepare \
+     --snapshot "$STAGED" --receipts "$RECEIPTS" \
+     --manifest "$PREPARED_MANIFEST"
+   ```
+
+   This validates new objects against all their readbacks, and reused
+   objects against verified prior manifests and exact staged local hashes.
+   It emits the small final state JSON without re-downloading unchanged
+   chunks.
+
+5. Re-list the folder and run `next-generation` against the **unchanged
+   previous expected** identity just before writing the manifest. Stop
+   on stale identity. Upload `PREPARED_MANIFEST` with `transfer-text`
+   to its immutable `workspace-<generation>.json` name **last**.
+   Download the manifest by exact ID and verify original size/SHA-256.
+   Then verify its **new object readbacks and inherited committed refs**
+   without re-fetching unchanged chunks:
+
+   ```bash
+   python "$GWS_SKILL_DIR/scripts/gws.py" json-verify-commit \
+     --manifest "$MANIFEST_READBACK" --receipts "$RECEIPTS"
+   ```
+
+   Re-list; require this manifest to be uniquely newest before
+   acknowledging durability. Use `verify --readbacks` only for **full**
+   remote inspection/restore, not on every ordinary checkpoint.
+
+6. **Separate maintenance, not part of each state mutation.**
+   Periodically or on explicit cleanup, fully download and verify all
+   remaining generations. Pass the `{name,id,manifest,readbacks}`
+   record for **every** generation to
+   `gws.py retention --generations "$GENERATIONS"`.
+   Retain the newest three generations, delete discarded manifest IDs
+   **first**, then only unreferenced object chunk IDs. Shared objects
+   referenced by retained generations remain protected. Re-list and
+   revalidate the active identity before cleanup; never delete unknown
+   files. If a complete verified listing is too large for the connector,
+   skip cleanup safely rather than compromising an existing generation.
+
+A failed write leaves previously committed state valid; incomplete
+objects remain unreferenced and may be reconciled separately. An
+ambiguous Drive create requires exact-name listing and exact-ID
+verification, not blind retry. Two writers are unsupported; listing
+checks do not provide atomic compare-and-swap.
 
 ## Resolve installed dependencies
 
