@@ -61,18 +61,21 @@ def _state(path: Path, *, draft: bool = False) -> dict[str, typing.Any]:
     if not isinstance(raw, dict):
         raise gws.GwsError("invalid JSON state")
     state = typing.cast("dict[str, typing.Any]", raw)
+    files: object = state.get("files")
     if (
         set(state) != {"format", "generation", "files"}
         or state["format"] != FORMAT
         or not isinstance(state["generation"], str)
-        or not isinstance(state["files"], list)
-        or len(state["files"]) > gws.MAX_FILES
+        or not isinstance(files, list)
     ):
         raise gws.GwsError("invalid JSON state header")
+    entries = typing.cast("list[object]", files)
+    if len(entries) > gws.MAX_FILES:
+        raise gws.GwsError("too many JSON state files")
     gws._timestamp(state["generation"])
     names: set[str] = set()
     total = 0
-    for raw_item in state["files"]:
+    for raw_item in entries:
         if not isinstance(raw_item, dict):
             raise gws.GwsError("invalid JSON state file")
         item = typing.cast("dict[str, typing.Any]", raw_item)
@@ -284,11 +287,11 @@ def _object_bytes(
     return content, seen
 
 
-def _receipts(path: Path) -> dict[str, dict[str, typing.Any]]:
+def _receipts(path: Path) -> dict[str, object]:
     raw = _load(path)
     if not isinstance(raw, dict):
         raise gws.GwsError("object receipts must be a map")
-    return typing.cast("dict[str, dict[str, typing.Any]]", raw)
+    return typing.cast("dict[str, object]", raw)
 
 
 def prepare(snapshot: Path, receipts: Path, destination: Path) -> dict[str, typing.Any]:
@@ -301,8 +304,11 @@ def prepare(snapshot: Path, receipts: Path, destination: Path) -> dict[str, typi
     for item in state["files"]:
         if "object" not in item:
             continue
-        receipt = uploads[item["sha256"]]
-        if not isinstance(receipt, dict) or set(receipt) != {"head", "readbacks"}:
+        raw_receipt = uploads[item["sha256"]]
+        if not isinstance(raw_receipt, dict):
+            raise gws.GwsError("invalid object receipt")
+        receipt = typing.cast("dict[str, typing.Any]", raw_receipt)
+        if set(receipt) != {"head", "readbacks"}:
             raise gws.GwsError("invalid object receipt")
         item["object"]["head"] = _reference(receipt["head"])
         content, _ = _object_bytes(item, receipt)
@@ -334,8 +340,11 @@ def _verified(
         if "text" in item:
             contents[item["path"]] = item["text"].encode("utf-8")
         else:
-            receipt = all_maps[item["sha256"]]
-            if not isinstance(receipt, dict) or set(receipt) != {"head", "readbacks"}:
+            raw_receipt = all_maps[item["sha256"]]
+            if not isinstance(raw_receipt, dict):
+                raise gws.GwsError("invalid object readback")
+            receipt = typing.cast("dict[str, typing.Any]", raw_receipt)
+            if set(receipt) != {"head", "readbacks"}:
                 raise gws.GwsError("invalid object readback")
             if _reference(receipt["head"]) != item["object"]["head"]:
                 raise gws.GwsError("object reference changed after commit")
