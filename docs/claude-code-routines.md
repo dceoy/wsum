@@ -111,6 +111,10 @@ context, credentials and tokens out of persisted state.
 
 On every core persistence handoff, use the GWS helper `checkpoint-needed` with the current workspace and the most recent verified committed manifest. Only skip creation of a new generation when it returns `{"changed": false}` **and** a fresh Drive folder listing passes the existing `next-generation` active-identity check against the expected committed manifest (discard the proposed generation). This also covers read-only calls that did not produce recovery writes. Always checkpoint a fresh workspace with no committed manifest, and stop on comparison errors. This optimization does not remove pending reviews, reports, evidence, or any persisted input/output files.
 
+## Reusing verified content objects during staging
+
+On a changed workspace, pass the last exact-ID-verified committed manifest to `json-pack --previous-manifest`; omit it for a fresh workspace. Previously committed large objects are content-hashed but are not recompressed into redundant local fragments. New objects still follow the original chunk upload and verification flow; the committed JSON checkpoint schema is unchanged.
+
 ## Offline verification and live follow-up
 
 `tests/test_gws.py` covers current JSON checkpoints,
