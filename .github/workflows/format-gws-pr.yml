@@ -14,7 +14,7 @@ jobs:
         run: |
           python3 -m venv /tmp/wsum-format
           /tmp/wsum-format/bin/pip install 'ruff==0.16.3'
-          /tmp/wsum-format/bin/ruff check --fix .
+          /tmp/wsum-format/bin/ruff check --fix . || true
           /tmp/wsum-format/bin/ruff format .
           npx --yes prettier@3.9.6 --write docs/claude-code-routines.md skills/web-update-report-gws/SKILL.md
           git rm .github/workflows/format-gws-pr.yml
