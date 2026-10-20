@@ -3,10 +3,12 @@
 import base64
 import hashlib
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
+from typing import TypedDict, cast
 
 import gws
 import pytest
@@ -962,3 +964,326 @@ def test_restore_rejects_inexact_snapshot_mtime(
     with pytest.raises(gws.GwsError, match="identity precision"):
         gws.restore(manifest, readbacks, destination)
     assert not destination.exists()
+
+
+class _ChunkRef(TypedDict):
+    id: str
+    size: int
+    sha256: str
+
+
+class _ObjectReceipt(TypedDict):
+    head: _ChunkRef
+    readbacks: dict[str, str]
+
+
+def _json_workspace(tmp: Path) -> Path:
+    ws = tmp / "workspace"
+    (ws / "output/report").mkdir(parents=True)
+    (ws / "internal/state/snapshots").mkdir(parents=True)
+    (ws / "internal/gws").mkdir(parents=True)
+    (ws / "internal/gws/delivery.json").write_text(
+        '{"reports":{},"version":1}', encoding="utf-8"
+    )
+    (ws / "output/report/a.md").write_bytes(b"# Heading\r\n")
+    original = ws / "internal/state/snapshots/source.txt"
+    original.write_bytes(os.urandom(72_000).hex().encode())
+    stamp = 1_700_000_000_123_456_789
+    os.utime(original, ns=(stamp, stamp))
+    return ws
+
+
+def _json_commit(
+    ws: Path,
+    tmp: Path,
+    generation: str,
+    previous: dict[str, _ObjectReceipt] | None = None,
+) -> tuple[Path, Path, dict[str, _ObjectReceipt], Path]:
+    """Simulate exact-ID textContent uploads and verified readbacks.
+
+    Returns:
+        Manifest path, readback map path, object receipts, and staged files.
+    """
+    staged = tmp / ("stage-" + generation)
+    draft = gws.json_pack(ws, staged, generation)
+    assert draft["format"] == "wsum-json-1"
+    objects: dict[str, _ObjectReceipt] = dict(previous or {})
+    for item in draft["files"]:
+        if "object" not in item or item["sha256"] in objects:
+            continue
+        digest = item["sha256"]
+        count = item["object"]["chunks"]
+        nxt = tmp / ("next-" + digest + ".json")
+        nxt.write_text("null")
+        readbacks: dict[str, str] = {}
+        for index in reversed(range(count)):
+            chunk_path = tmp / f"{generation}-{digest}-{index}.txt"
+            meta = gws.json_link(
+                staged / "objects" / digest / f"{index:04d}.txt", nxt, index, chunk_path
+            )
+            relay = gws.transfer_text(chunk_path)
+            assert relay["textContent"] == chunk_path.read_text()
+            assert "base64Content" not in relay
+            file_id = f"id-{generation}-{digest[:8]}-{index}"
+            readbacks[file_id] = str(chunk_path)
+            nxt.write_text(
+                json.dumps({
+                    "id": file_id,
+                    "size": meta["size"],
+                    "sha256": meta["sha256"],
+                })
+            )
+        objects[digest] = {
+            "head": cast("_ChunkRef", json.loads(nxt.read_text())),
+            "readbacks": readbacks,
+        }
+    receipts = tmp / ("receipts-" + generation + ".json")
+    # Only entries referenced by this checkpoint; old objects are still reusable.
+    wanted = {item["sha256"] for item in draft["files"] if "object" in item}
+    current = {digest: objects[digest] for digest in wanted}
+    receipts.write_text(json.dumps(current))
+    manifest = tmp / ("manifest-" + generation + ".json")
+    gws.json_prepare(staged, receipts, manifest)
+    assert gws.verify(manifest, receipts)["generation"] == generation
+    return manifest, receipts, current, staged
+
+
+def test_small_json_state_with_external_snapshots_restores_exact_bytes(
+    tmp_path: Path,
+) -> None:
+    ws = _json_workspace(tmp_path)
+    generation = "20261020T000000Z"
+    first, maps, _, stage = _json_commit(ws, tmp_path, generation)
+    state = json.loads(first.read_text())
+    assert first.stat().st_size < gws.JSON_MAX_STATE_BYTES
+    assert "text" in next(x for x in state["files"] if x["path"].endswith("a.md"))
+    assert "object" in next(
+        x for x in state["files"] if x["path"].endswith("source.txt")
+    )
+    other = tmp_path / "second-stage"
+    gws.json_pack(ws, other, generation)
+    assert (stage / "draft.json").read_bytes() == (other / "draft.json").read_bytes()
+    restored = tmp_path / "restored"
+    gws.restore(first, maps, restored)
+    for path in ws.rglob("*"):
+        if path.is_file():
+            copied = restored / path.relative_to(ws)
+            assert copied.read_bytes() == path.read_bytes()
+            if "snapshots" in path.parts:
+                assert copied.stat().st_mtime_ns == path.stat().st_mtime_ns
+
+
+def test_reuse_unchanged_objects_between_generations(tmp_path: Path) -> None:
+    ws = _json_workspace(tmp_path)
+    a, _, old, _ = _json_commit(ws, tmp_path, "20261020T000000Z")
+    # Only the inline current-state file changed, object head IDs remain identical.
+    (ws / "internal/gws/delivery.json").write_text(
+        '{"reports":{"run":"abc"},"version":1}'
+    )
+    b, b_map, new, _ = _json_commit(ws, tmp_path, "20261020T000001Z", old)
+    assert {v["head"]["id"] for v in old.values()} == {
+        v["head"]["id"] for v in new.values()
+    }
+    assert gws.verify(b, b_map)["generation"] == "20261020T000001Z"
+    rows: list[dict[str, str]] = []
+    for i, (manifest, maps) in enumerate((
+        (a, tmp_path / "receipts-20261020T000000Z.json"),
+        (b, b_map),
+    )):
+        generation = json.loads(manifest.read_text())["generation"]
+        rows.append({
+            "name": f"workspace-{generation}.json",
+            "id": f"manifest-{i}",
+            "manifest": str(manifest),
+            "readbacks": str(maps),
+        })
+    rows_path = tmp_path / "rows.json"
+    rows_path.write_text(json.dumps(rows))
+    plan = gws.retention(rows_path)
+    assert set(plan["retain"]) == {"manifest-0", "manifest-1"}
+    assert plan["delete"] == []
+
+
+def test_changed_or_missing_readback_fails_without_restore(tmp_path: Path) -> None:
+    ws = _json_workspace(tmp_path)
+    manifest, maps, receipts, _ = _json_commit(ws, tmp_path, "20261020T000000Z")
+    first = next(iter(receipts.values()))
+    path = Path(next(iter(first["readbacks"].values())))
+    expected = path.read_bytes()
+    path.write_bytes(expected[:-1])
+    with pytest.raises(gws.GwsError, match="readback mismatch"):
+        gws.restore(manifest, maps, tmp_path / "should-not-exist")
+    assert not (tmp_path / "should-not-exist").exists()
+
+
+def test_oversized_state_fails_closed(tmp_path: Path) -> None:
+    ws = _json_workspace(tmp_path)
+    folder = ws / "internal/state"
+    for index in range(1800):
+        (folder / f"{index:04d}.json").write_text('{"x":"y"}')
+    with pytest.raises(gws.GwsError, match="JSON exceeds connector"):
+        gws.json_pack(ws, tmp_path / "too-large", "20261020T000000Z")
+    assert not (tmp_path / "too-large").exists()
+
+
+def _legacy_commit(ws: Path, tmp_path: Path) -> tuple[Path, Path]:
+    """Stage and verify a legacy per-file generation for migration tests.
+
+    Returns:
+        The legacy manifest and its exact-ID payload readback map.
+    """
+    legacy_stage = tmp_path / "legacy-stage"
+    legacy = gws.pack(ws, legacy_stage, "20261019T000000Z")
+    legacy_receipts: dict[str, dict[str, str]] = {}
+    old_reads: dict[str, str] = {}
+    for item in legacy["files"]:
+        digest = item["sha256"]
+        if digest in legacy_receipts:
+            continue
+        path = legacy_stage / "payloads" / f"{digest}.txt"
+        identifier = f"old-{digest}"
+        legacy_receipts[digest] = {"id": identifier, "file": str(path)}
+        old_reads[identifier] = str(path)
+    legacy_receipts_file = tmp_path / "legacy-receipts.json"
+    legacy_receipts_file.write_text(json.dumps(legacy_receipts))
+    legacy_manifest = tmp_path / "legacy-manifest.json"
+    gws.prepare(legacy_stage, legacy_receipts_file, legacy_manifest)
+    legacy_maps = tmp_path / "legacy-maps.json"
+    legacy_maps.write_text(json.dumps(old_reads))
+    assert gws.verify(legacy_manifest, legacy_maps)["file_count"] > 0
+
+    return legacy_manifest, legacy_maps
+
+
+def test_retention_preserves_shared_object_ids_and_legacy_restore(
+    tmp_path: Path,
+) -> None:
+    ws = _json_workspace(tmp_path)
+    legacy_manifest, legacy_maps = _legacy_commit(ws, tmp_path)
+    rows: list[dict[str, str]] = [
+        {
+            "name": "workspace-20261019T000000Z.json",
+            "id": "legacy-manifest",
+            "manifest": str(legacy_manifest),
+            "readbacks": str(legacy_maps),
+        }
+    ]
+    previous: dict[str, _ObjectReceipt] | None = None
+    protected: set[str] = set()
+    for second in range(4):
+        generation = f"20261020T00000{second}Z"
+        manifest, maps, previous, _ = _json_commit(ws, tmp_path, generation, previous)
+        for receipt in previous.values():
+            protected.update(receipt["readbacks"])
+        rows.append({
+            "name": f"workspace-{generation}.json",
+            "id": f"new-manifest-{second}",
+            "manifest": str(manifest),
+            "readbacks": str(maps),
+        })
+    manifest_list = tmp_path / "mixed-generations.json"
+    manifest_list.write_text(json.dumps(rows))
+    plan = gws.retention(manifest_list)
+    assert set(plan["retain"]) == {"new-manifest-1", "new-manifest-2", "new-manifest-3"}
+    assert {"legacy-manifest", "new-manifest-0"} <= set(plan["delete"])
+    assert not protected.intersection(plan["delete"])
+
+
+def test_reuse_checkpoint_skips_unchanged_chunk_downloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only changed objects need exact-ID chunk reads on a checkpoint."""
+    ws = _json_workspace(tmp_path)
+    first, old_reads, previous, _ = _json_commit(ws, tmp_path, "20261020T000000Z")
+    (ws / "internal/gws/delivery.json").write_text(
+        '{"reports":{"20261020T000000Z-abcdef01":"' + "0" * 64 + '"},"version":1}'
+    )
+    staged = tmp_path / "stage-reused"
+    draft = gws.json_pack(ws, staged, "20261020T000001Z")
+    receipts = {
+        item["sha256"]: {
+            "head": previous[item["sha256"]]["head"],
+            "previous_manifest": str(first),
+        }
+        for item in draft["files"]
+        if "object" in item
+    }
+    receipts_path = tmp_path / "reused-receipts.json"
+    receipts_path.write_text(json.dumps(receipts))
+    second = tmp_path / "reused-manifest.json"
+
+    def forbid_chunk_reads(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("unchanged objects must not require chunk readbacks")
+
+    monkeypatch.setattr(gws, "_json_object_bytes", forbid_chunk_reads)
+    counts = gws.json_prepare(staged, receipts_path, second)
+    assert counts["new_objects"] == 0
+    assert counts["reused_objects"] == len(receipts)
+    check = gws.json_verify_commit(second, receipts_path)
+    assert check["reused_objects"] == len(receipts)
+
+    # Full restore still needs the previous exact-ID readbacks.
+    monkeypatch.undo()
+    restored = tmp_path / "reused-restored"
+    assert gws.restore(second, old_reads, restored)["generation"] == "20261020T000001Z"
+    assert (restored / "internal/state/snapshots/source.txt").read_bytes() == (
+        ws / "internal/state/snapshots/source.txt"
+    ).read_bytes()
+
+
+def test_reuse_rejects_unproven_reference(tmp_path: Path) -> None:
+    """Reject an object head that was not present in the previous commit."""
+    ws = _json_workspace(tmp_path)
+    first, _, previous, _ = _json_commit(ws, tmp_path, "20261020T000000Z")
+    stage = tmp_path / "stage-untrusted"
+    draft = gws.json_pack(ws, stage, "20261020T000001Z")
+    receipts = {
+        item["sha256"]: {
+            "head": {
+                **previous[item["sha256"]]["head"],
+                "id": "unrelated-id",
+            },
+            "previous_manifest": str(first),
+        }
+        for item in draft["files"]
+        if "object" in item
+    }
+    file = tmp_path / "untrusted-receipts.json"
+    file.write_text(json.dumps(receipts))
+    with pytest.raises(gws.GwsError, match="not in prior verified"):
+        gws.json_prepare(stage, file, tmp_path / "should-not-commit.json")
+
+
+def test_inline_state_rejects_control_bytes_even_if_digest_matches(
+    tmp_path: Path,
+) -> None:
+    """An attacker-supplied inline NUL must fail before workspace restore."""
+    ws = _json_workspace(tmp_path)
+    manifest, maps, _, _ = _json_commit(ws, tmp_path, "20261020T000000Z")
+    state = json.loads(manifest.read_text())
+    inline = next(item for item in state["files"] if "text" in item)
+    bad = "x" + chr(0)
+    inline["text"] = bad
+    data = bad.encode()
+    inline["size"] = len(data)
+    inline["sha256"] = hashlib.sha256(data).hexdigest()
+    altered = tmp_path / "altered-manifest.json"
+    altered.write_text(json.dumps(state))
+    with pytest.raises(gws.GwsError, match="inline state mismatch"):
+        gws.verify(altered, maps)
+    assert not (tmp_path / "untrusted-restore").exists()
+
+
+def test_commit_verify_rejects_replaced_head(tmp_path: Path) -> None:
+    """Lightweight post-upload validation must bind to the prepared reference."""
+    ws = _json_workspace(tmp_path)
+    manifest, receipts_path, receipts, _ = _json_commit(ws, tmp_path, "20261020T000000Z")
+    forged = json.loads(manifest.read_text())
+    entry = next(item for item in forged["files"] if "object" in item)
+    original = receipts[entry["sha256"]]["head"]["id"]
+    entry["object"]["head"]["id"] = "attacker-controlled-id"
+    assert original != entry["object"]["head"]["id"]
+    altered = tmp_path / "altered-head-manifest.json"
+    altered.write_text(json.dumps(forged))
+    with pytest.raises(gws.GwsError, match="reference changed"):
+        gws.json_verify_commit(altered, receipts_path)

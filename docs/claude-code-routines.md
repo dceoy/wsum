@@ -111,8 +111,8 @@ context, credentials and tokens out of persisted state.
 
 ## Offline verification and live follow-up
 
-`tests/test_gws.py` covers legacy transport and `tests/test_gws_json.py` covers
-JSON checkpoints, deduplicated objects and corrupt readbacks. The tests use
+`tests/test_gws.py` covers legacy transport, JSON checkpoints,
+deduplicated objects and corrupt readbacks. The tests use
 local synthetic files for deterministic packing,
 exact hash checks, fresh-workspace restore, repeated commits, three-generation
 retention and injected failures. No Google credentials are used.
