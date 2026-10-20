@@ -337,6 +337,20 @@ def test_project_atomic_with_core_validation(
     )
     assert gws.project(source, dest, skill) == 1
     assert '"A, B"' in dest.read_text()
+    assert dest.read_text().splitlines()[0] == (
+        "name,url,publisher,category,keywords,priority,enabled"
+    )
+    source.write_text(
+        json.dumps({
+            "values": [
+                ["name", "url", "criteria", "keywords"],
+                ["A", "https://example.com", "legacy", "API"],
+            ]
+        })
+    )
+    assert gws.project(source, dest, skill) == 1
+    assert "legacy" not in dest.read_text()
+    assert "API" in dest.read_text()
     original = dest.read_bytes()
     source.write_text(
         json.dumps({"values": [["url", "name"], ["https://example.com", "invalid"]]})

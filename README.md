@@ -42,7 +42,7 @@ Workspace: /absolute/path/to/workspace
 Context source: /absolute/path/to/context.md
 ```
 
-Alternatively use `Common context:` with inline text instead of `Context source:`; do not supply both. An explicit context overrides the default `context.md`. The CSV and workspace remain independent paths. The skill validates input, creates a missing workspace root safely, resumes pending reviews, and writes reports under `output/report/` inside the selected workspace. **The first successful check establishes baselines; it does not produce a change report.** Subsequent material changes can produce one report per check run. No Google tools are required.
+Only one external `Context source:` is supported (a local Markdown file); inline `Common context:` is no longer an input. An explicit source overrides the default `context.md`. The CSV and workspace remain independent paths. The skill validates input, creates a missing workspace root safely, resumes pending reviews, and writes reports under `output/report/` inside the selected workspace. **The first successful check establishes baselines; it does not produce a change report.** Subsequent material changes can produce one report per check run. No Google tools are required.
 
 ### Google Workspace reporting (optional)
 
@@ -54,7 +54,7 @@ Targets: <LOCAL_CSV_OR_DRIVE_CSV_OR_GOOGLE_SHEET>
 Output: <EXISTING_DEDICATED_DRIVE_FOLDER>
 ```
 
-The wrapper restores small JSON checkpoints and content-addressed page objects, validates the current target table, invokes the local workflow, checkpoints core operations, and delivers **completed** Markdown reports through Drive. Unchanged large objects are reused across checkpoints, and only new objects are chunked for textContent transport. Optional context can be inline or an explicit Google Doc/Drive Markdown `Context source:`; local Markdown paths are **not** supported by this wrapper.
+The wrapper restores small JSON checkpoints and content-addressed page objects, validates the current target table, invokes the local workflow, checkpoints core operations, and delivers **completed** Markdown reports through Drive. Unchanged large objects are reused across checkpoints, and only new objects are chunked for textContent transport. Optional context is one explicit Google Doc/Drive Markdown `Context source:`; inline context and local Markdown paths are **not** supported by this wrapper.
 
 See the [GWS Skill](skills/web-update-report-gws/SKILL.md) and [Claude Code Routines runbook](docs/claude-code-routines.md) for folder binding, JSON state/Drive textContent transport, exact-byte verification, migration from legacy snapshots, recovery, and limits. **Live Cowork/Routines connector round trips remain unverified**; offline connector tests are not an operational guarantee.
 
@@ -75,15 +75,15 @@ flowchart LR
     GWS -->|"Verified delivery"| DRIVE["Drive Markdown report"]
 ```
 
-A new URL establishes its baseline without research. Each subsequent changed URL has one pending review; repeated CSV interests for the same URL share a fetch. The monitor persists candidate evidence and recovery state, while the agent evaluates current criteria and newly linked documents. Material updates receive research; non-material changes advance the baseline without a report. The GWS wrapper persists each core transition and withholds delivery while reviews remain pending.
+A new URL establishes its baseline without research. Each subsequent changed URL has one pending review; repeated CSV interests for the same URL share a fetch. The monitor persists candidate evidence and recovery state, while the agent evaluates semantic keywords, the optional single run-wide context, and newly linked documents. Material updates receive research; non-material changes advance the baseline without a report. The GWS wrapper persists each core transition and withholds delivery while reviews remain pending.
 
 ## Targets and workspace
 
-Provide a UTF-8 CSV. Only `name` and `url` are required; optional columns are `publisher`, `category`, `keywords`, `criteria`, `priority`, and `enabled`. For example:
+Provide a UTF-8 CSV. Only `name` and `url` are required; optional columns are `publisher`, `category`, `keywords`, `priority`, and `enabled`. For example:
 
 ```csv
-name,url,criteria,enabled
-API updates,https://example.com/releases,Report breaking API changes,true
+name,url,keywords,enabled
+API updates,https://example.com/releases,breaking API changes,true
 Pricing updates,https://example.com/releases,Report pricing changes,true
 ```
 

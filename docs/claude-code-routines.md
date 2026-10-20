@@ -12,9 +12,9 @@ Provide two resources:
 - **Targets:** a local CSV, Drive CSV URL/ID, or Google Spreadsheet URL/ID.
 - **Output:** one existing Google Drive folder URL/ID dedicated to the workspace.
 
-Optionally provide either `Common context:` (inline) or `Context source:`
-(one Google Doc or Drive Markdown file URL/ID). Both together are invalid;
-common context is not required.
+Optionally provide exactly one `Context source:` pointing to a Google Doc or
+Drive Markdown file URL/ID. Inline `Common context:` and multiple sources
+are unsupported; context is not required.
 
 The runtime needs Python 3.11+ with `pypdf`, local scratch space, the
 installed skills, authenticated Drive access, Sheets cell reads for

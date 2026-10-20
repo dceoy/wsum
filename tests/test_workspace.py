@@ -28,7 +28,7 @@ _RUN_ID = "20261001T000000Z-deadbeef"
 
 
 def _write_targets(path: Path, rows: str) -> None:
-    path.write_text(f"name,url,criteria,enabled\n{rows}", encoding="utf-8")
+    path.write_text(f"name,url,keywords,enabled\n{rows}", encoding="utf-8")
 
 
 def _changed_result(
@@ -79,8 +79,7 @@ def _write_review_transaction(
                 "name": "Example",
                 "publisher": "",
                 "category": "",
-                "keywords": "",
-                "criteria": "pricing",
+                "keywords": "pricing",
                 "priority": None,
                 "enabled": True,
             }
@@ -101,7 +100,7 @@ def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) ->
 
     assert [target["action"] for target in targets] == ["monitor", "skip_disabled"]
     assert (
-        cast("list[dict[str, object]]", targets[0]["interests"])[0]["criteria"]
+        cast("list[dict[str, object]]", targets[0]["interests"])[0]["keywords"]
         == "pricing"
     )
     assert "fetch_mode" not in targets[0]
@@ -118,26 +117,26 @@ def test_load_targets_normalizes_csv_and_generates_stable_ids(tmp_path: Path) ->
 @pytest.mark.parametrize(
     ("header", "rows", "message"),
     [
-        ("name,criteria\n", "Example,pricing\n", "requires name and url"),
+        ("name,keywords\n", "Example,pricing\n", "requires name and url"),
         (
-            "name,url,watch_focus\n",
+            "name,url,criteria\n",
             "Example,https://example.com/,pricing\n",
             "unsupported",
         ),
         (
-            "name,url,criteria,enabled\n",
+            "name,url,keywords,enabled\n",
             "Example,https://example.com/,,yes\n",
             "enabled must be true or false",
         ),
         (
-            "name,url,criteria,enabled\n",
+            "name,url,keywords,enabled\n",
             ",https://example.com/,,true\n",
             "name must be non-empty",
         ),
     ],
     ids=[
         "missing-required-column",
-        "removed-watch-focus",
+        "removed-criteria",
         "invalid-enabled",
         "empty-name",
     ],
@@ -210,8 +209,7 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
                 "name": "Example",
                 "publisher": "",
                 "category": "",
-                "keywords": "",
-                "criteria": "pricing",
+                "keywords": "pricing",
                 "priority": None,
                 "enabled": True,
             }
@@ -223,7 +221,7 @@ def test_handle_monitor_result_records_changed_candidate(tmp_path: Path) -> None
     assert result["action"] == "review"
     assert len(str(result["revision"])) == 32
     assert (
-        cast("list[dict[str, object]]", result["interests"])[0]["criteria"] == "pricing"
+        cast("list[dict[str, object]]", result["interests"])[0]["keywords"] == "pricing"
     )
     pending = json.loads((state / "pending" / "example" / "state.json").read_text())
     assert pending["target_id"] == "example"
@@ -376,8 +374,7 @@ def test_finalize_rejects_stale_review_revision(tmp_path: Path) -> None:
                 "name": "Example",
                 "publisher": "",
                 "category": "",
-                "keywords": "",
-                "criteria": "pricing",
+                "keywords": "pricing",
                 "priority": None,
                 "enabled": True,
             }
@@ -1198,8 +1195,7 @@ def test_monitor_update_failure_keeps_previous_review_finalizable(
                 "name": "Example",
                 "publisher": "",
                 "category": "",
-                "keywords": "",
-                "criteria": "pricing",
+                "keywords": "pricing",
                 "priority": None,
                 "enabled": True,
             }
@@ -1271,8 +1267,7 @@ def test_staging_cleanup_failure_does_not_commit_monitor_result(
                 "name": "Example",
                 "publisher": "",
                 "category": "",
-                "keywords": "",
-                "criteria": "pricing",
+                "keywords": "pricing",
                 "priority": None,
                 "enabled": True,
             }
@@ -1805,8 +1800,7 @@ def test_handle_monitor_result_rejects_non_string_diff(tmp_path: Path) -> None:
                 "name": "Example",
                 "publisher": "",
                 "category": "",
-                "keywords": "",
-                "criteria": "pricing",
+                "keywords": "pricing",
                 "priority": None,
                 "enabled": True,
             }
@@ -1918,8 +1912,7 @@ def test_pending_reviews_grouped_without_targets_uses_persisted_context(
                 "name": "Persisted",
                 "publisher": "",
                 "category": "",
-                "keywords": "",
-                "criteria": "pricing",
+                "keywords": "pricing",
                 "priority": None,
                 "enabled": True,
             }
@@ -1937,7 +1930,7 @@ def test_pending_reviews_grouped_without_targets_uses_persisted_context(
     assert review["name"] == "Persisted"
     assert review["url"] == "https://example.com/"
     assert (
-        cast("list[dict[str, object]]", review["interests"])[0]["criteria"] == "pricing"
+        cast("list[dict[str, object]]", review["interests"])[0]["keywords"] == "pricing"
     )
     assert review["diff"] == "persisted diff"
 
@@ -2443,8 +2436,7 @@ def _pending_payload(**changes: object) -> dict[str, object]:
                 "name": "Example",
                 "publisher": "",
                 "category": "",
-                "keywords": "",
-                "criteria": "pricing",
+                "keywords": "pricing",
                 "priority": None,
                 "enabled": True,
             }
@@ -5301,7 +5293,7 @@ def test_link_review_validation_rejects_invalid_persisted_context(
         workspace._validate_link_review(value)
 
 
-_ENRICHED_HEADER = "name,url,publisher,category,keywords,criteria,priority,enabled\n"
+_ENRICHED_HEADER = "name,url,publisher,category,keywords,priority,enabled\n"
 
 
 def _interest(name: object = "Example", **changes: object) -> dict[str, object]:
@@ -5310,7 +5302,6 @@ def _interest(name: object = "Example", **changes: object) -> dict[str, object]:
         "publisher": "",
         "category": "",
         "keywords": "",
-        "criteria": "",
         "priority": None,
         "enabled": True,
     }
@@ -5321,10 +5312,9 @@ def _interest(name: object = "Example", **changes: object) -> dict[str, object]:
 def _create_interest_review(tmp_path: Path) -> tuple[str, Path, Path, Path]:
     (tmp_path / "targets.csv").write_text(
         _ENRICHED_HEADER
-        + "First,https://vendor.example/updates,Vendor,Product,plans,Limits,01,true\n"
+        + "First,https://vendor.example/updates,Vendor,Product,plans,01,true\n"
         + "Second,https://vendor.example/updates,Vendor,Product,API,"
-        "Breaking changes,2,true\n"
-        + "Disabled,https://vendor.example/updates,,,,,3,false\n",
+        "2,true\n" + "Disabled,https://vendor.example/updates,,,,3,false\n",
         encoding="utf-8",
     )
     target = load_targets(tmp_path / "targets.csv")[0]
@@ -5354,39 +5344,38 @@ def _create_interest_review(tmp_path: Path) -> tuple[str, Path, Path, Path]:
         ("name,url\n Example , https://example.com/ \n", _interest()),
         (
             (
-                "url,enabled,name,criteria\n"
+                "url,enabled,name,keywords\n"
                 "https://example.com/, TrUe ,Example, pricing \n"
             ),
-            _interest(criteria="pricing"),
+            _interest(keywords="pricing"),
         ),
         (
             (
-                "\ufeffname,url,criteria,priority,enabled\n"
+                "\ufeffname,url,keywords,priority,enabled\n"
                 "Example,https://example.com/, pricing ,0002, FALSE \n"
             ),
-            _interest(criteria="pricing", priority=2, enabled=False),
+            _interest(keywords="pricing", priority=2, enabled=False),
         ),
         (_ENRICHED_HEADER + "Example,https://example.com/\n", _interest()),
         (
             (
-                "name,url,publisher,category,keywords,criteria,priority\n"
+                "name,url,publisher,category,keywords,priority\n"
                 "Example,https://example.com/, Publisher , Category ,"
-                '"a, b / c","first\nsecond",1\n'
+                '"a, b / c\nfirst\nsecond",1\n'
             ),
             _interest(
                 publisher="Publisher",
                 category="Category",
-                keywords="a, b / c",
-                criteria="first\nsecond",
+                keywords="a, b / c\nfirst\nsecond",
                 priority=1,
             ),
         ),
         (
             (
-                "name,url,keywords,criteria\n"
-                "\n,,,\nExample,https://example.com/,,mentions 同上 and 〃\n"
+                "name,url,keywords\n"
+                "\n,,\nExample,https://example.com/,mentions 同上 and 〃\n"
             ),
-            _interest(criteria="mentions 同上 and 〃"),
+            _interest(keywords="mentions 同上 and 〃"),
         ),
     ],
     ids=[
@@ -5441,9 +5430,7 @@ def test_invalid_priority_in_later_disabled_row_prevents_mutation(
     ] == ["First", "Second"]
 
 
-@pytest.mark.parametrize(
-    "field", ["name", "url", "publisher", "category", "keywords", "criteria"]
-)
+@pytest.mark.parametrize("field", ["name", "url", "publisher", "category", "keywords"])
 @pytest.mark.parametrize("token", ['"', "〃", "同上", "同左"])
 def test_ditto_cells_rejected_with_record_and_field(
     tmp_path: Path, field: str, token: str
@@ -5463,7 +5450,7 @@ def test_ditto_cells_rejected_with_record_and_field(
 @pytest.mark.parametrize(
     ("csv_text", "message"),
     [
-        ("name,url,watch_focus\nExample,https://example.com/,pricing\n", "unsupported"),
+        ("name,url,criteria\nExample,https://example.com/,pricing\n", "unsupported"),
         ("name,url,target_id\nExample,https://example.com/,custom\n", "unsupported"),
         ("name,url\nExample\n", "row 2: url"),
         ('name,url,keywords\nExample,https://example.com/,"unterminated', "CSV record"),
@@ -5471,7 +5458,7 @@ def test_ditto_cells_rejected_with_record_and_field(
         ("name,url\n", "no targets"),
     ],
     ids=[
-        "removed-column",
+        "removed-criteria-column",
         "supplied-id",
         "missing-url",
         "malformed-quote",
@@ -5485,7 +5472,7 @@ def test_enriched_csv_errors(tmp_path: Path, csv_text: str, message: str) -> Non
         load_targets(tmp_path / "targets.csv")
 
 
-@pytest.mark.parametrize("field", ["keywords", "criteria"])
+@pytest.mark.parametrize("field", ["keywords", "publisher"])
 def test_large_csv_text_and_serialized_expansion(tmp_path: Path, field: str) -> None:
     text = "〃x" * 160_000
     (tmp_path / "targets.csv").write_text(
@@ -5553,7 +5540,7 @@ def test_repeated_urls_preserve_order_and_display(
     tmp_path: Path, enabled: bool
 ) -> None:
     (tmp_path / "targets.csv").write_text(
-        "name,url,criteria,enabled\nFirst,https://example.com/,first,false\n"
+        "name,url,keywords,enabled\nFirst,https://example.com/,first,false\n"
         "Other,https://other.example/,,false\n"
         f"Second, https://example.com/ ,second,{str(enabled).lower()}\n"
         f"Second,https://example.com/,second,{str(enabled).lower()}\n",
@@ -5565,9 +5552,9 @@ def test_repeated_urls_preserve_order_and_display(
         "https://other.example/",
     ]
     assert targets[0]["interests"] == [
-        _interest("First", criteria="first", enabled=False),
-        _interest("Second", criteria="second", enabled=enabled),
-        _interest("Second", criteria="second", enabled=enabled),
+        _interest("First", keywords="first", enabled=False),
+        _interest("Second", keywords="second", enabled=enabled),
+        _interest("Second", keywords="second", enabled=enabled),
     ]
     assert targets[0]["name"] == ("Second" if enabled else "First")
     assert targets[0]["enabled"] is enabled
@@ -5589,27 +5576,27 @@ def test_distinct_urls_with_colliding_ids_fail(
     [
         (
             (
-                "First,https://vendor.example/updates,,,,New rules,5,true\n"
-                "Second,https://vendor.example/updates,,,,API,2,true\nThird,https://vendor.example/updates,,,,Third,3,true\n"
+                "First,https://vendor.example/updates,,,New rules,5,true\n"
+                "Second,https://vendor.example/updates,,,API,2,true\nThird,https://vendor.example/updates,,,Third,3,true\n"
             ),
             ["First", "Second", "Third"],
         ),
         (
-            "Edited,https://vendor.example/updates,New,Other,new hints,Edited,4,true\n",
+            "Edited,https://vendor.example/updates,New,Other,new hints,4,true\n",
             ["Edited"],
         ),
-        ("Second,https://vendor.example/updates,,,,API,2,true\n", ["Second"]),
+        ("Second,https://vendor.example/updates,,,API,2,true\n", ["Second"]),
         (
             (
-                "First,https://vendor.example/updates,,,,First,1,false\n"
-                "Second,https://vendor.example/updates,,,,API,2,true\n"
+                "First,https://vendor.example/updates,,,First,1,false\n"
+                "Second,https://vendor.example/updates,,,API,2,true\n"
             ),
             ["Second"],
         ),
         (
             (
-                "Second,https://vendor.example/updates,,,,API,2,true\n"
-                "First,https://vendor.example/updates,,,,First,1,true\n"
+                "Second,https://vendor.example/updates,,,API,2,true\n"
+                "First,https://vendor.example/updates,,,First,1,true\n"
             ),
             ["Second", "First"],
         ),
@@ -5663,8 +5650,8 @@ def test_metadata_changes_replace_context_without_rewriting_transaction(
 @pytest.mark.parametrize(
     "rows",
     [
-        "Other,https://other.example/,,,,,,false\n",
-        "Disabled,https://vendor.example/updates,,,,,,false\n",
+        "Other,https://other.example/,,,,,false\n",
+        "Disabled,https://vendor.example/updates,,,,,false\n",
     ],
     ids=["removed", "all-disabled"],
 )
@@ -5727,10 +5714,11 @@ def test_unavailable_configuration_keeps_saved_review_and_direct_finalize(
         [None],
         [{}],
         [_interest(extra="x")],
+        [_interest(criteria="unsupported")],
         [_interest(name=1)],
         [_interest(name="")],
         [_interest(publisher=None)],
-        [_interest(criteria=" untrimmed ")],
+        [_interest(keywords=" untrimmed ")],
         [_interest(enabled=1)],
         [_interest(priority=True)],
         [_interest(priority=0)],
@@ -5744,6 +5732,7 @@ def test_unavailable_configuration_keeps_saved_review_and_direct_finalize(
         "null-item",
         "missing-keys",
         "extra-keys",
+        "removed-criteria",
         "name-type",
         "empty-name",
         "text-type",
@@ -5844,10 +5833,10 @@ def test_shared_url_fetch_and_finalization_use_one_transaction_and_section(
 ) -> None:
     (tmp_path / "targets.csv").write_text(
         _ENRICHED_HEADER
-        + "Plans,https://vendor.example/updates,Vendor,Product,plans,Limits,1,true\n"
-        + "API,https://vendor.example/updates,Vendor,Product,API,Breaking,2,true\n"
-        + "Disabled,https://vendor.example/updates,,,,,,false\n"
-        + "Other,https://other.example/,,,,,,false\n",
+        + "Plans,https://vendor.example/updates,Vendor,Product,plans,1,true\n"
+        + "API,https://vendor.example/updates,Vendor,Product,API,2,true\n"
+        + "Disabled,https://vendor.example/updates,,,,,false\n"
+        + "Other,https://other.example/,,,,,false\n",
         encoding="utf-8",
     )
     parent = b"old\n"
@@ -5876,7 +5865,6 @@ def test_shared_url_fetch_and_finalization_use_one_transaction_and_section(
             publisher="Vendor",
             category="Product",
             keywords="plans",
-            criteria="Limits",
             priority=1,
         ),
         _interest(
@@ -5884,7 +5872,6 @@ def test_shared_url_fetch_and_finalization_use_one_transaction_and_section(
             publisher="Vendor",
             category="Product",
             keywords="API",
-            criteria="Breaking",
             priority=2,
         ),
     ]
@@ -5918,7 +5905,7 @@ def test_enriched_replacement_recovery_keeps_both_revision_choices(
         **previous,
         "revision": "b" * 32,
         "name": "Replacement",
-        "interests": [_interest("Replacement", criteria="new rules")],
+        "interests": [_interest("Replacement", keywords="new rules")],
     }
     workspace._write_recovery_record(state, undo)
     workspace._write_pending_file(metadata, replacement)
