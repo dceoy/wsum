@@ -1077,6 +1077,8 @@ def test_small_json_state_with_external_snapshots_restores_exact_bytes(
     other = tmp_path / "second-stage"
     gws.json_pack(ws, other, generation)
     assert (stage / "draft.json").read_bytes() == (other / "draft.json").read_bytes()
+    assert not list(stage.glob("objects/*/source.txt"))
+    assert not list(other.glob("objects/*/source.txt"))
     restored = tmp_path / "restored"
     gws.restore(first, maps, restored)
     for path in ws.rglob("*"):
@@ -1085,6 +1087,36 @@ def test_small_json_state_with_external_snapshots_restores_exact_bytes(
             assert copied.read_bytes() == path.read_bytes()
             if "snapshots" in path.parts:
                 assert copied.stat().st_mtime_ns == path.stat().st_mtime_ns
+
+
+def test_json_prepare_rejects_corrupt_staged_chunks(tmp_path: Path) -> None:
+    """A corrupt compressed staging fragment cannot be committed as new or reused."""
+    ws = _json_workspace(tmp_path)
+    first, receipts, previous, stage = _json_commit(
+        ws, tmp_path, "20261020T000000Z"
+    )
+    chunk = next(stage.glob("objects/*/0000.txt"))
+    chunk.write_text("AAAA", encoding="ascii")
+    with pytest.raises(gws.GwsError, match="compressed object|SHA-256 mismatch"):
+        gws.json_prepare(stage, receipts, tmp_path / "invalid-new.json")
+    assert not (tmp_path / "invalid-new.json").exists()
+
+    reused = tmp_path / "reused-stage"
+    draft = gws.json_pack(ws, reused, "20261020T000001Z")
+    reused_receipts = {
+        item["sha256"]: {
+            "head": previous[item["sha256"]]["head"],
+            "previous_manifest": str(first),
+        }
+        for item in draft["files"]
+        if "object" in item
+    }
+    reused_file = tmp_path / "reused-receipts.json"
+    reused_file.write_text(json.dumps(reused_receipts))
+    next(reused.glob("objects/*/0000.txt")).write_text("AAAA", encoding="ascii")
+    with pytest.raises(gws.GwsError, match="compressed object|SHA-256 mismatch"):
+        gws.json_prepare(reused, reused_file, tmp_path / "invalid-reused.json")
+    assert not (tmp_path / "invalid-reused.json").exists()
 
 
 def test_reuse_unchanged_objects_between_generations(tmp_path: Path) -> None:

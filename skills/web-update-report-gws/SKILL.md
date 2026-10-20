@@ -409,7 +409,7 @@ truncate or convert state into a monolithic archive.
    older manifest. Preserve the prior manifest readback path as evidence.
    This assumes prior verified objects have not been overwritten remotely;
    full remote verification is required again at restore and maintenance.
-3. For a new object, its staged fragments are under
+3. For a new object, only compressed Base64 fragments are staged (no redundant uncompressed `source.txt`); its staged fragments are under
    `$STAGED/objects/<sha256>/<four-digit-index>.txt`.
    Initialize scratch `NEXT_JSON` to literal `null`. For index
    `chunks-1` down to `0`, run:

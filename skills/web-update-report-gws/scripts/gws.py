@@ -596,6 +596,40 @@ def verify(manifest: Path, readbacks: Path) -> dict[str, typing.Any]:
     }
 
 
+def _restore_workspace(
+    value: dict[str, typing.Any],
+    contents: dict[str, bytes],
+    destination: Path,
+    *,
+    operation: str,
+    precision_error: str,
+) -> dict[str, typing.Any]:
+    """Atomically restore verified legacy or current-format workspace files."""
+    if destination.exists() or destination.is_symlink():
+        raise GwsError(f"{operation} destination must not exist")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f".tmp-{operation}-", dir=destination.parent))
+    try:
+        for root in ("output", "internal"):
+            (stage / root).mkdir()
+        for item in value["files"]:
+            path = stage / item["path"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents[item["path"]])
+            if "mtime_ns" in item:
+                stamp = item["mtime_ns"]
+                os.utime(path, ns=(stamp, stamp))
+                if path.stat().st_mtime_ns != stamp:
+                    raise GwsError(precision_error)
+        if destination.exists() or destination.is_symlink():
+            raise GwsError(f"{operation} destination already exists")
+        stage.rename(destination)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+    return {"generation": value["generation"], "file_count": len(contents)}
+
+
 def restore(
     manifest: Path, readbacks: Path, destination: Path
 ) -> dict[str, typing.Any]:
@@ -603,34 +637,13 @@ def restore(
     if _manifest_format(manifest) == JSON_FORMAT:
         return json_restore(manifest, readbacks, destination)
     value, contents = _verified_payloads(manifest, readbacks)
-    if destination.exists() or destination.is_symlink():
-        raise GwsError("restore destination must not exist")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".tmp-restore-", dir=destination.parent))
-    try:
-        for root in ("output", "internal"):
-            (stage / root).mkdir()
-        for name, content in contents.items():
-            path = stage / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content)
-        for item in value["files"]:
-            if "mtime_ns" in item:
-                path = stage / item["path"]
-                stamp = item["mtime_ns"]
-                os.utime(path, ns=(stamp, stamp))
-                if path.stat().st_mtime_ns != stamp:
-                    raise GwsError(
-                        "restored snapshot identity precision is unsupported"
-                    )
-        if destination.exists() or destination.is_symlink():
-            raise GwsError("restore destination already exists")
-        stage.rename(destination)
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
-    return {"generation": value["generation"], "file_count": len(contents)}
-
+    return _restore_workspace(
+        value,
+        contents,
+        destination,
+        operation="restore",
+        precision_error="restored snapshot identity precision is unsupported",
+    )
 
 def retention(generations: Path) -> dict[str, list[str]]:
     """Plan deletion only after verifying all generations in a complete listing.
@@ -878,7 +891,6 @@ def json_pack(
                 object_dir = stage / "objects" / digest
                 if not object_dir.exists():
                     object_dir.mkdir()
-                    (object_dir / "source.txt").write_bytes(content)
                     encoded = base64.b64encode(gzip.compress(content, mtime=0)).decode(
                         "ascii"
                     )
@@ -932,6 +944,40 @@ def json_link(
     return {"size": len(encoded), "sha256": _digest(encoded)}
 
 
+def _decode_compressed_object(
+    encoded: str, item: dict[str, typing.Any]
+) -> bytes:
+    """Decode one size- and digest-bounded immutable object."""
+    if len(encoded) > JSON_MAX_COMPRESSED:
+        raise GwsError("compressed object exceeds size bound")
+    try:
+        compressed = base64.b64decode(encoded, validate=True)
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as zipped:
+            content = zipped.read(item["size"] + 1)
+            if zipped.read(1):
+                raise GwsError("oversized decompressed object")
+    except (OSError, EOFError, ValueError, binascii.Error) as exc:
+        raise GwsError("invalid compressed object") from exc
+    if len(content) != item["size"] or _digest(content) != item["sha256"]:
+        raise GwsError("external object size or SHA-256 mismatch")
+    content.decode("utf-8")
+    if any(byte < CONTROL_LIMIT and byte not in {9, 10, 13} for byte in content):
+        raise GwsError("unsupported control content")
+    return content
+
+
+def _staged_object_bytes(snapshot: Path, item: dict[str, typing.Any]) -> bytes:
+    """Reconstruct staged content from its compressed chunks, without raw copies."""
+    encoded = "".join(
+        _text_bytes(
+            snapshot / "objects" / item["sha256"] / f"{index:04d}.txt",
+            JSON_CHUNK_CHARS,
+        ).decode("ascii")
+        for index in range(item["object"]["chunks"])
+    )
+    return _decode_compressed_object(encoded, item)
+
+
 def _json_object_bytes(
     item: dict[str, typing.Any],
     receipt: dict[str, typing.Any],
@@ -976,23 +1022,7 @@ def _json_object_bytes(
             raise GwsError("extra object chunk after final index")
     if set(paths) != seen:
         raise GwsError("unexpected object chunk readbacks")
-    encoded = "".join(data)
-    if len(encoded) > JSON_MAX_COMPRESSED:
-        raise GwsError("compressed object exceeds size bound")
-    try:
-        compressed = base64.b64decode(encoded, validate=True)
-        with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as zipped:
-            content = zipped.read(item["size"] + 1)
-            if zipped.read(1):
-                raise GwsError("oversized decompressed object")
-    except (OSError, EOFError, ValueError, binascii.Error) as exc:
-        raise GwsError("invalid compressed object") from exc
-    if len(content) != item["size"] or _digest(content) != item["sha256"]:
-        raise GwsError("external object size or SHA-256 mismatch")
-    content.decode("utf-8")
-    if any(byte < CONTROL_LIMIT and byte not in {9, 10, 13} for byte in content):
-        raise GwsError("unsupported control content")
-    return content, seen
+    return _decode_compressed_object("".join(data), item), seen
 
 
 def _json_receipts(path: Path) -> dict[str, object]:
@@ -1027,12 +1057,8 @@ def _json_check_commit_receipts(
         item["object"]["head"] = head
         if set(receipt) == {"head", "readbacks"}:
             content, _ = _json_object_bytes(item, receipt)
-            if snapshot is not None:
-                source = _text_bytes(
-                    snapshot / "objects" / item["sha256"] / "source.txt"
-                )
-                if source != content:
-                    raise GwsError("staged object changed during transfer")
+            if snapshot is not None and _staged_object_bytes(snapshot, item) != content:
+                raise GwsError("staged object changed during transfer")
             new_count += 1
         elif set(receipt) == {"head", "previous_manifest"}:
             previous_path = receipt["previous_manifest"]
@@ -1050,11 +1076,7 @@ def _json_check_commit_receipts(
             if not match:
                 raise GwsError("reused object is not in prior verified manifest")
             if snapshot is not None:
-                source = _text_bytes(
-                    snapshot / "objects" / item["sha256"] / "source.txt"
-                )
-                if len(source) != item["size"] or _digest(source) != item["sha256"]:
-                    raise GwsError("staged reused object changed")
+                _staged_object_bytes(snapshot, item)
             reused_count += 1
         else:
             raise GwsError("invalid object receipt mode")
@@ -1143,30 +1165,13 @@ def json_restore(
 ) -> dict[str, typing.Any]:
     """Restore a complete workspace atomically from a committed JSON generation."""
     state, contents, _ = _json_verified(manifest, readbacks)
-    if workspace.exists() or workspace.is_symlink():
-        raise GwsError("json_restore destination must not exist")
-    workspace.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(dir=workspace.parent, prefix=".tmp-json_restore-"))
-    try:
-        for root in ("output", "internal"):
-            (stage / root).mkdir()
-        for item in state["files"]:
-            dest = stage / item["path"]
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(contents[item["path"]])
-            if "mtime_ns" in item:
-                stamp = item["mtime_ns"]
-                os.utime(dest, ns=(stamp, stamp))
-                if dest.stat().st_mtime_ns != stamp:
-                    raise GwsError("restored snapshot mtime precision mismatch")
-        if workspace.exists() or workspace.is_symlink():
-            raise GwsError("json_restore destination already exists")
-        stage.rename(workspace)
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
-    return {"generation": state["generation"], "file_count": len(contents)}
-
+    return _restore_workspace(
+        state,
+        contents,
+        workspace,
+        operation="json_restore",
+        precision_error="restored snapshot mtime precision mismatch",
+    )
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
