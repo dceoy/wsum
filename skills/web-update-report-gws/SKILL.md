@@ -145,19 +145,19 @@ scheduling. See [the Routines guide](../../docs/claude-code-routines.md).
 ## Deterministic local helpers
 
 The composite's deterministic work is implemented by
-`scripts/gws.py` and `scripts/gws_json.py` (Python standard library only); Google connector calls
+`scripts/gws.py` (Python standard library only); Google connector calls
 remain the agent's responsibility. Resolve `GWS_SKILL_DIR` from the installed
 composite and `WEB_UPDATE_MONITOR_SKILL_DIR` from installed core skill discovery.
 
 Download the newest committed JSON manifest by exact Drive ID. For
-§wsum-json-1§, load small state fields directly from that JSON. For every
+`wsum-json-1`, load small state fields directly from that JSON. For every
 external object, traverse its verified hash-linked text chunks by exact ID,
 decode the connector's returned Base64 envelopes into scratch text files, and
 construct a JSON readbacks map keyed by **object content SHA-256**:
 
-§{"<object-sha256>":{"head":{"id":"...","size":123,"sha256":"..."},"readbacks":{"<chunk-ID>":"/scratch/chunk.txt"}}}§
+`{"<object-sha256>":{"head":{"id":"...","size":123,"sha256":"..."},"readbacks":{"<chunk-ID>":"/scratch/chunk.txt"}}}`
 
-For §wsum-text-1§, retain the historical mapping of payload Drive IDs to
+For `wsum-text-1`, retain the historical mapping of payload Drive IDs to
 scratch paths. Verify manifest generation against filename. Restore into a
 **nonexistent** workspace:
 
@@ -319,9 +319,9 @@ snapshot retention and scope all operations to the verified IDs.
 ## Persist JSON state and immutable content-addressed objects
 
 Each generation is **one compact JSON checkpoint**, named
-§workspace-YYYYMMDDTHHMMSSZ.json§. It includes inline text for small
-§output/§ and §internal/§ files and content-hash references for larger
-files. §internal/state/snapshots/§ entries are **always** external,
+`workspace-YYYYMMDDTHHMMSSZ.json`. It includes inline text for small
+`output/` and `internal/` files and content-hash references for larger
+files. `internal/state/snapshots/` entries are **always** external,
 regardless of length. The JSON is the state source of truth, not a SQLite
 binary or tarball. Content objects are immutable, deduplicated within a
 generation and reused across generations by SHA-256.
@@ -357,7 +357,7 @@ The helper enforces safe file paths, exact UTF-8 bytes and hashes, 2,000
 workspace files, 64 MiB per source file, 256 MiB workspace total,
 64 KiB JSON checkpoint, 1,024-byte inline threshold, 4,096 chunks per
 object, and 16 KiB linked-chunk text. Its gzip stream is reproducible,
-and §mtime_ns§ is preserved exactly for promoted baselines. If the state
+and `mtime_ns` is preserved exactly for promoted baselines. If the state
 JSON becomes too large, stop with an explicit error; do not silently
 truncate or convert state into a monolithic archive.
 
@@ -367,23 +367,23 @@ truncate or convert state into a monolithic archive.
    Select newest manifest by generation filename (not Drive modification
    time); reject duplicate names and missing exact IDs.
 2. Download/verify the manifest via complete Base64 response. For new
-   §wsum-json-1§, parse its inline state and exact external-object head
+   `wsum-json-1`, parse its inline state and exact external-object head
    references. For each object SHA, download the chain of all chunks,
-   in ascending index order, by exact ID; each JSON chunk's §next§
-   provides the next verified reference. Build §READBACKS§ as described
+   in ascending index order, by exact ID; each JSON chunk's `next`
+   provides the next verified reference. Build `READBACKS` as described
    above. Reject duplicate IDs, malformed links, missing chunks, hashes
    or unsafe content. Do not use Drive previews.
-3. Run §gws.py verify§ followed by §restore§. The helper validates all
+3. Run `gws.py verify` followed by `restore`. The helper validates all
    references, decompresses with an output bound, reconstructs byte-exact
-   UTF-8 files, verifies hashes and restores promoted §mtime_ns§ exactly.
+   UTF-8 files, verifies hashes and restores promoted `mtime_ns` exactly.
    A broken newest checkpoint must fail closed, not silently fall back.
-4. For legacy §wsum-text-1§, use its original per-file readback mapping.
+4. For legacy `wsum-text-1`, use its original per-file readback mapping.
 
 ### Persist after every state mutation
 
 1. Freeze workspace writes and re-list the bound workspace folder.
-   Run §next-generation§ against the previously committed
-   §{name,id}§ identity and stage the new JSON state:
+   Run `next-generation` against the previously committed
+   `{name,id}` identity and stage the new JSON state:
 
    ```bash
    python "$GWS_SKILL_DIR/scripts/gws.py" json-pack \
@@ -391,14 +391,14 @@ truncate or convert state into a monolithic archive.
      --generation "$GENERATION"
    ```
 
-2. From §draft.json§, identify each unique external-object SHA-256.
+2. From `draft.json`, identify each unique external-object SHA-256.
    If a previously verified generation references that exact content
    hash, **reuse its complete exact-ID chunk chain**, after verifying
    that it still exists and matches. No new upload is needed.
 3. For a new object, its staged fragments are under
-   §$STAGED/objects/<sha256>/<four-digit-index>.txt§.
-   Initialize scratch §NEXT_JSON§ to literal §null§. For index
-   §chunks-1§ down to §0§, run:
+   `$STAGED/objects/<sha256>/<four-digit-index>.txt`.
+   Initialize scratch `NEXT_JSON` to literal `null`. For index
+   `chunks-1` down to `0`, run:
 
    ```bash
    python "$GWS_SKILL_DIR/scripts/gws.py" json-link \
@@ -407,17 +407,17 @@ truncate or convert state into a monolithic archive.
    python "$GWS_SKILL_DIR/scripts/gws.py" transfer-text --file "$CHUNK"
    ```
 
-   Upload the returned §textContent§ as §text/plain§ with Google
+   Upload the returned `textContent` as `text/plain` with Google
    conversion **disabled**; choose immutable file names
-   §object-<sha256>-<index>.txt§. Immediately download the returned
-   exact ID and validate with §transfer-decode§ against the original
-   §size§/§sha256§ from §json-link§. Only then overwrite scratch
-   §NEXT_JSON§ with the verified §{id,size,sha256}§ of that chunk.
+   `object-<sha256>-<index>.txt`. Immediately download the returned
+   exact ID and validate with `transfer-decode` against the original
+   `size`/`sha256` from `json-link`. Only then overwrite scratch
+   `NEXT_JSON` with the verified `{id,size,sha256}` of that chunk.
 
 4. For each object SHA (new or reused), construct a receipt with
-   §{"head":<head-ref>,"readbacks":{DriveID:localDecodedFile,...}}§.
+   `{"head":<head-ref>,"readbacks":{DriveID:localDecodedFile,...}}`.
    Validate every existing reference by exact-ID download. Write a
-   §RECEIPTS§ JSON map from content SHA-256 to the complete receipt.
+   `RECEIPTS` JSON map from content SHA-256 to the complete receipt.
    Run:
 
    ```bash

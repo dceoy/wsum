@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import TypedDict, cast
 
 import gws
-import gws_json
 import pytest
 
 
@@ -49,7 +48,7 @@ def _commit(
         Manifest path, readback map path, object receipts, and staged files.
     """
     staged = tmp / ("stage-" + generation)
-    draft = gws_json.pack(ws, staged, generation)
+    draft = gws.pack(ws, staged, generation)
     assert draft["format"] == "wsum-json-1"
     objects: dict[str, _ObjectReceipt] = dict(previous or {})
     for item in draft["files"]:
@@ -62,7 +61,7 @@ def _commit(
         readbacks: dict[str, str] = {}
         for index in reversed(range(count)):
             chunk_path = tmp / f"{generation}-{digest}-{index}.txt"
-            meta = gws_json.link(
+            meta = gws.link(
                 staged / "objects" / digest / f"{index:04d}.txt", nxt, index, chunk_path
             )
             relay = gws.transfer_text(chunk_path)
@@ -87,8 +86,8 @@ def _commit(
     current = {digest: objects[digest] for digest in wanted}
     receipts.write_text(json.dumps(current))
     manifest = tmp / ("manifest-" + generation + ".json")
-    gws_json.prepare(staged, receipts, manifest)
-    assert gws_json.verify(manifest, receipts)["generation"] == generation
+    gws.prepare(staged, receipts, manifest)
+    assert gws.verify(manifest, receipts)["generation"] == generation
     return manifest, receipts, current, staged
 
 
@@ -99,13 +98,13 @@ def test_small_json_state_with_external_snapshots_restores_exact_bytes(
     generation = "20261020T000000Z"
     first, maps, _, stage = _commit(ws, tmp_path, generation)
     state = json.loads(first.read_text())
-    assert first.stat().st_size < gws_json.MAX_STATE_BYTES
+    assert first.stat().st_size < gws.JSON_MAX_STATE_BYTES
     assert "text" in next(x for x in state["files"] if x["path"].endswith("a.md"))
     assert "object" in next(
         x for x in state["files"] if x["path"].endswith("source.txt")
     )
     other = tmp_path / "second-stage"
-    gws_json.pack(ws, other, generation)
+    gws.pack(ws, other, generation)
     assert (stage / "draft.json").read_bytes() == (other / "draft.json").read_bytes()
     restored = tmp_path / "restored"
     gws.restore(first, maps, restored)
@@ -166,7 +165,7 @@ def test_oversized_state_fails_closed(tmp_path: Path) -> None:
     for index in range(1800):
         (folder / f"{index:04d}.json").write_text('{"x":"y"}')
     with pytest.raises(gws.GwsError, match="JSON exceeds connector"):
-        gws_json.pack(ws, tmp_path / "too-large", "20261020T000000Z")
+        gws.pack(ws, tmp_path / "too-large", "20261020T000000Z")
     assert not (tmp_path / "too-large").exists()
 
 
