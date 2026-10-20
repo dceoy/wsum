@@ -21,7 +21,8 @@ from pathlib import Path
 
 import gws
 
-# pyright: reportPrivateUsage=false  # shared validation layer lives in gws.py
+# Shared validation helpers are intentionally reused across the two GWS modules.
+# pyright: reportPrivateUsage=false
 
 FORMAT = "wsum-archive-1"
 CHUNK_BYTES = 24 * 1024
@@ -231,10 +232,11 @@ def _archive_bytes(
     for index in range(value["count"]):
         ref = _ref(current)
         file_id = ref["id"]
-        if file_id in seen or not isinstance(paths.get(file_id), str):
+        readback = paths.get(file_id)
+        if file_id in seen or not isinstance(readback, str):
             raise gws.GwsError("missing, repeated or cyclic archive chunk")
         seen.add(file_id)
-        content = gws._text_bytes(Path(paths[file_id]), MAX_CHUNK_TEXT)
+        content = gws._text_bytes(Path(readback), MAX_CHUNK_TEXT)
         if len(content) != ref["size"] or _hash(content) != ref["sha256"]:
             raise gws.GwsError("archive chunk readback hash mismatch")
         raw_record = json.loads(content, object_pairs_hook=gws._unique_object)
@@ -288,14 +290,17 @@ def _validated_files(archive: bytes) -> dict[str, tuple[bytes, int | None]]:
             index_stream = tar.extractfile(first)
             if index_stream is None:
                 raise gws.GwsError("unreadable archive workspace index")
-            entries = json.loads(
+            raw_entries: object = json.loads(
                 index_stream.read(), object_pairs_hook=gws._unique_object
             )
-            if not isinstance(entries, list) or len(entries) > gws.MAX_FILES:
+            if not isinstance(raw_entries, list):
+                raise gws.GwsError("invalid archive workspace index")
+            entries = typing.cast("list[object]", raw_entries)
+            if len(entries) > gws.MAX_FILES:
                 raise gws.GwsError("invalid archive workspace index")
             expected: dict[str, dict[str, typing.Any]] = {}
             total = 0
-            for raw_value in typing.cast("list[object]", entries):
+            for raw_value in entries:
                 if not isinstance(raw_value, dict):
                     raise gws.GwsError("invalid archive file metadata")
                 value = typing.cast("dict[str, typing.Any]", raw_value)
