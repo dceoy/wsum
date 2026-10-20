@@ -67,22 +67,28 @@ readback mapping.
 3. Run `next-generation` and `json-pack`. New small file contents go
    inline into the small JSON state document. Large page snapshots
    become separate SHA-256-addressed objects.
-4. For an unchanged object hash, reuse its previously verified Drive
-   chunk IDs after complete readback validation. For new objects,
-   use `json-link` **from last chunk to first**, upload each plain
-   text chunk with `textContent`, download by exact returned Drive ID,
-   verify bytes, and record the SHA-256/size reference.
-5. Build receipts by object content SHA-256, containing the verified
-   head reference and complete exact-ID readback map. Run `json-prepare`
-   to re-verify source content against its external object chain.
+4. For an unchanged object hash, inherit the head reference from a
+   **previously exact-ID-verified committed state manifest** without
+   redownloading all old chunks at every checkpoint. Build an object
+   receipt `{"head":...,"previous_manifest":"/scratch/verified-old.json"}`.
+   For newly uploaded objects use `json-link` **from last chunk to first**,
+   `textContent` and exact-ID readbacks of every new chunk; their receipts
+   use `{"head":...,"readbacks":{id:path,...}}`.
+5. Build receipts keyed by object content SHA-256. Run `json-prepare`
+   to verify fresh object chunks and to bind unchanged objects to the
+   previously committed manifest and the staged source digest.
    Revalidate the expected active manifest immediately before commit.
 6. Upload the final `workspace-<generation>.json` by `textContent`
-   **last**. Independently download and validate its bytes; run
-   `verify` and re-list to confirm it is newest. Only then report
-   the local state transition as durable.
-7. Retain three latest verified generations. Delete discarded
+   **last**. Download and validate its exact bytes, then run
+   `json-verify-commit --manifest ... --receipts ...` and re-list to
+   confirm it is uniquely newest. Use full `verify --readbacks ...`
+   for restore, not for ordinary checkpoints.
+7. Run full three-generation retention in a **separate maintenance
+   operation**, not after every core mutation. After downloading and
+   validating complete references for all generations, delete discarded
    manifests first, then only unreferenced object chunks. Shared
    objects referenced by retained generations must remain untouched.
+   If full verification exceeds connector limits, safely skip cleanup.
 8. Publish completed Markdown report files only after pending reviews
    clear, with the original exact-ID readback/ledger procedure.
    Persist ledger changes in another small JSON checkpoint.
