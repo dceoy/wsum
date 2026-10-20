@@ -170,10 +170,8 @@ def test_oversized_state_fails_closed(tmp_path: Path) -> None:
     assert not (tmp_path / "too-large").exists()
 
 
-def test_retention_preserves_shared_object_ids_and_legacy_restore(
-    tmp_path: Path,
-) -> None:
-    ws = _workspace(tmp_path)
+def _legacy_commit(ws: Path, tmp_path: Path) -> tuple[Path, Path]:
+    """Stage and verify a legacy per-file generation for migration tests."""
     legacy_stage = tmp_path / "legacy-stage"
     legacy = gws.pack(ws, legacy_stage, "20261019T000000Z")
     legacy_receipts: dict[str, dict[str, str]] = {}
@@ -194,6 +192,14 @@ def test_retention_preserves_shared_object_ids_and_legacy_restore(
     legacy_maps.write_text(json.dumps(old_reads))
     assert gws.verify(legacy_manifest, legacy_maps)["file_count"] > 0
 
+    return legacy_manifest, legacy_maps
+
+
+def test_retention_preserves_shared_object_ids_and_legacy_restore(
+    tmp_path: Path,
+) -> None:
+    ws = _workspace(tmp_path)
+    legacy_manifest, legacy_maps = _legacy_commit(ws, tmp_path)
     rows: list[dict[str, str]] = [{
         "name": "workspace-20261019T000000Z.json",
         "id": "legacy-manifest",
