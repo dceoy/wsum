@@ -649,6 +649,23 @@ def checkpoint_needed(workspace: Path, manifest: Path) -> dict[str, bool]:
     return {"changed": False}
 
 
+def _stage_object_chunks(path: Path, content: bytes) -> int:
+    """Stage compressed immutable chunks once per distinct content digest."""
+    if path.exists():
+        return len(list(path.glob("[0-9][0-9][0-9][0-9].txt")))
+    path.mkdir()
+    encoded = base64.b64encode(gzip.compress(content, mtime=0)).decode("ascii")
+    fragments = [
+        encoded[index : index + JSON_CHUNK_CHARS]
+        for index in range(0, len(encoded), JSON_CHUNK_CHARS)
+    ]
+    if not 1 <= len(fragments) <= JSON_MAX_CHUNKS:
+        raise GwsError("object exceeds chunk limit")
+    for index, part in enumerate(fragments):
+        (path / f"{index:04d}.txt").write_text(part, encoding="ascii")
+    return len(fragments)
+
+
 def json_pack(
     workspace: Path,
     snapshot: Path,
@@ -697,25 +714,9 @@ def json_pack(
                 item["text"] = content.decode("utf-8")
             else:
                 object_dir = stage / "objects" / digest
-                if (digest, len(content)) in reusable:
-                    count = reusable[(digest, len(content))]
-                else:
-                    if not object_dir.exists():
-                        object_dir.mkdir()
-                        encoded = base64.b64encode(
-                            gzip.compress(content, mtime=0)
-                        ).decode("ascii")
-                        fragments = [
-                            encoded[i : i + JSON_CHUNK_CHARS]
-                            for i in range(0, len(encoded), JSON_CHUNK_CHARS)
-                        ]
-                        if not 1 <= len(fragments) <= JSON_MAX_CHUNKS:
-                            raise GwsError("object exceeds chunk limit")
-                        for index, part in enumerate(fragments):
-                            (object_dir / f"{index:04d}.txt").write_text(
-                                part, encoding="ascii"
-                            )
-                    count = len(list(object_dir.glob("[0-9][0-9][0-9][0-9].txt")))
+                count = reusable.get((digest, len(content)))
+                if count is None:
+                    count = _stage_object_chunks(object_dir, content)
                 item["object"] = {"chunks": count}
             files.append(item)
         state = {"format": JSON_FORMAT, "generation": generation, "files": files}
