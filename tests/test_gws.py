@@ -1012,9 +1012,7 @@ def test_json_pack_omits_reused_large_object_fragments(tmp_path: Path) -> None:
     ws = _json_workspace(tmp_path)
     previous, _, receipts, _ = _json_commit(ws, tmp_path, GENERATION)
     stage = tmp_path / "reused-stage"
-    draft = gws.json_pack(
-        ws, stage, "20261009T000001Z", previous_manifest=previous
-    )
+    draft = gws.json_pack(ws, stage, "20261009T000001Z", previous_manifest=previous)
     assert not list((stage / "objects").iterdir())
 
     receipt_map = {
