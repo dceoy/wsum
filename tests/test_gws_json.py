@@ -49,7 +49,7 @@ def _commit(
         Manifest path, readback map path, object receipts, and staged files.
     """
     staged = tmp / ("stage-" + generation)
-    draft = gws.pack(ws, staged, generation)
+    draft = gws.json_pack(ws, staged, generation)
     assert draft["format"] == "wsum-json-1"
     objects: dict[str, _ObjectReceipt] = dict(previous or {})
     for item in draft["files"]:
@@ -62,7 +62,7 @@ def _commit(
         readbacks: dict[str, str] = {}
         for index in reversed(range(count)):
             chunk_path = tmp / f"{generation}-{digest}-{index}.txt"
-            meta = gws.link(
+            meta = gws.json_link(
                 staged / "objects" / digest / f"{index:04d}.txt", nxt, index, chunk_path
             )
             relay = gws.transfer_text(chunk_path)
@@ -87,7 +87,7 @@ def _commit(
     current = {digest: objects[digest] for digest in wanted}
     receipts.write_text(json.dumps(current))
     manifest = tmp / ("manifest-" + generation + ".json")
-    gws.prepare(staged, receipts, manifest)
+    gws.json_prepare(staged, receipts, manifest)
     assert gws.verify(manifest, receipts)["generation"] == generation
     return manifest, receipts, current, staged
 
@@ -105,7 +105,7 @@ def test_small_json_state_with_external_snapshots_restores_exact_bytes(
         x for x in state["files"] if x["path"].endswith("source.txt")
     )
     other = tmp_path / "second-stage"
-    gws.pack(ws, other, generation)
+    gws.json_pack(ws, other, generation)
     assert (stage / "draft.json").read_bytes() == (other / "draft.json").read_bytes()
     restored = tmp_path / "restored"
     gws.restore(first, maps, restored)
@@ -166,7 +166,7 @@ def test_oversized_state_fails_closed(tmp_path: Path) -> None:
     for index in range(1800):
         (folder / f"{index:04d}.json").write_text('{"x":"y"}')
     with pytest.raises(gws.GwsError, match="JSON exceeds connector"):
-        gws.pack(ws, tmp_path / "too-large", "20261020T000000Z")
+        gws.json_pack(ws, tmp_path / "too-large", "20261020T000000Z")
     assert not (tmp_path / "too-large").exists()
 
 
