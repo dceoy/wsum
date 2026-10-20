@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 _RUN_ID = "20261001T000000Z-deadbeef"
 _URL = "https://vendor.example/updates"
-_HEADER = "name,url,publisher,category,keywords,criteria,priority,enabled\n"
+_HEADER = "name,url,publisher,category,keywords,priority,enabled\n"
 _REPORT = "## Vendor\n\nPlans changed.\n"
 _DIFF = "--- previous\n+++ current\n-old\n+new"
 _DELETE = object()
@@ -63,9 +63,9 @@ def _targets(root: Path, rows: str | None = None) -> None:
         _HEADER
         + (
             rows
-            or f"Plans,{_URL},Vendor,Product,plans,Limits,1,true\n"
-            f"API,{_URL},Vendor,Product,API,Breaking,2,true\n"
-            f"Off,{_URL},,,,,3,false\n"
+            or f"Plans,{_URL},Vendor,Product,plans,1,true\n"
+            f"API,{_URL},Vendor,Product,API,2,true\n"
+            f"Off,{_URL},,,,3,false\n"
         ),
         encoding="utf-8",
     )
@@ -634,8 +634,8 @@ def test_adopting_archive_without_pending_state_is_rejected(tmp_path: Path) -> N
 
 
 _INACTIVE_CSV = {
-    "disabled": _HEADER + f"Off,{_URL},,,,,1,false\n",
-    "removed": _HEADER + "Other,https://other.example/,,,,,1,true\n",
+    "disabled": _HEADER + f"Off,{_URL},,,,1,false\n",
+    "removed": _HEADER + "Other,https://other.example/,,,,1,true\n",
     "invalid": "name\nx\n",
     "missing-csv": None,
 }
