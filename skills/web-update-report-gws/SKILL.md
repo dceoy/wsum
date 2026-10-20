@@ -116,7 +116,7 @@ Call `web-update-report-gws` once per run. Resolve the installed `web-update-rep
 
 1. Resolve and validate optional common context before any workspace mutation. Restore and validate the immutable Drive folder binding, newest verified text snapshot, and delivery ledger; initialize only for a genuinely fresh output folder. Acquire and validate the current selected CSV/Spreadsheet, projecting it to `internal/gws/targets.csv`. Persist initialization/projection before invoking local monitoring; never use an old projection when current input fails.
 2. **Invoke `web-update-report`**, supplying the restored `WORKSPACE`, validated `TARGETS_CSV`, complete internally resolved context if present, output language/instructions, and the **required synchronous persistence handoff** below. It reconciles/resumes pending reviews, checks targets, recovers website HTTP 403 through monitor ingest, judges materiality, researches material updates, and finalizes once per URL. Follow that skill rather than running a parallel monitoring loop here.
-3. **Persist during the invocation.** After every core `pending` (list/detail), `check`, `ingest`, `discard`, and `finalize`, receive control and run **Persist JSON state and immutable content-addressed objects** below. Acknowledge success and return control only after the new snapshot verifies and the expected active identity is updated. Even pending inspection can recover writes; checkpoint error returns too. If persistence fails, stop local orchestration and delivery. Do not wait until the local skill returns to snapshot its changes.
+3. **Persist during the invocation.** After every core `pending` (list/detail), `check`, `ingest`, `discard`, and `finalize`, receive control and compare the workspace against the last verified committed manifest using `checkpoint-needed` below. If identical, acknowledge without creating another generation. Otherwise run **Persist JSON state and immutable content-addressed objects** below, and acknowledge only after the new snapshot verifies and the expected active identity is updated. Even pending inspection can recover writes; check error returns too. If comparison or persistence fails, stop local orchestration and delivery. Do not wait until the local skill returns to snapshot its changes.
 4. **Verify completion independently.** After the local workflow returns, refresh public pending state with the current targets projection and persist this command's possible recovery writes through the same handoff. Defer any report whose run ID remains pending; any `blocked` recovery entry with unknown run ID defers all delivery. Local completion does not establish Drive durability.
 5. **Publish completed runs only.** Enumerate canonical `output/report/<run-id>.md` files, including undelivered historical runs, and follow the exact-name lookup, read-back verification, and delivery ledger procedure below. Persist after recording delivery. Do not enrich, edit, or overwrite a previously delivered canonical report because later research becomes available.
 
@@ -376,6 +376,16 @@ truncate or convert state into a monolithic archive.
    A broken newest checkpoint must fail closed, not silently fall back.
 
 ### Persist after every state mutation
+
+For every core handoff, compare against the most recent locally retained, exact-ID-verified committed manifest before allocating a new generation:
+
+```bash
+python "$GWS_SKILL_DIR/scripts/gws.py" checkpoint-needed \
+  --workspace "$WORKSPACE" --manifest "$COMMITTED_MANIFEST"
+```
+
+If the returned `changed` is `false`, the committed state already covers all durable workspace bytes and baseline mtimes; acknowledge the handoff without staging, uploading, or advancing the expected manifest identity. If `changed` is `true`, complete the checkpoint procedure below. When initializing a workspace without a committed manifest, always checkpoint. Never use a draft, unverified, or merely listed manifest for this comparison. A comparison error is a persistence failure, not permission to skip it.
+
 
 1. Freeze workspace writes and re-list the bound workspace folder.
    Save the complete exact-ID listing as `LISTING`, and keep the previously
