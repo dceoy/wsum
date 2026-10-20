@@ -204,12 +204,14 @@ def test_retention_preserves_shared_object_ids_and_legacy_restore(
 ) -> None:
     ws = _workspace(tmp_path)
     legacy_manifest, legacy_maps = _legacy_commit(ws, tmp_path)
-    rows: list[dict[str, str]] = [{
-        "name": "workspace-20261019T000000Z.json",
-        "id": "legacy-manifest",
-        "manifest": str(legacy_manifest),
-        "readbacks": str(legacy_maps),
-    }]
+    rows: list[dict[str, str]] = [
+        {
+            "name": "workspace-20261019T000000Z.json",
+            "id": "legacy-manifest",
+            "manifest": str(legacy_manifest),
+            "readbacks": str(legacy_maps),
+        }
+    ]
     previous: dict[str, _ObjectReceipt] | None = None
     protected: set[str] = set()
     for second in range(4):
@@ -226,8 +228,6 @@ def test_retention_preserves_shared_object_ids_and_legacy_restore(
     manifest_list = tmp_path / "mixed-generations.json"
     manifest_list.write_text(json.dumps(rows))
     plan = gws.retention(manifest_list)
-    assert set(plan["retain"]) == {
-        "new-manifest-1", "new-manifest-2", "new-manifest-3"
-    }
+    assert set(plan["retain"]) == {"new-manifest-1", "new-manifest-2", "new-manifest-3"}
     assert {"legacy-manifest", "new-manifest-0"} <= set(plan["delete"])
     assert not protected.intersection(plan["delete"])
