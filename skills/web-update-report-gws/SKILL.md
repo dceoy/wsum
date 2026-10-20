@@ -403,8 +403,14 @@ If the returned `changed` is `false`, the committed state already covers all dur
    ```bash
    python "$GWS_SKILL_DIR/scripts/gws.py" json-pack \
      --workspace "$WORKSPACE" --snapshot "$STAGED" \
-     --generation "$GENERATION"
+     --generation "$GENERATION" \
+     --previous-manifest "$COMMITTED_MANIFEST"
    ```
+
+   Pass `--previous-manifest` only when the current manifest was already
+   verified by exact-ID readback. Omit it for initial creation. Reused
+   objects are content-hashed but their compressed chunks are not staged
+   again. The committed checkpoint format remains unchanged.
 
 2. From `draft.json`, identify each unique external-object SHA-256.
    For an unchanged object already recorded in the **locally retained,
