@@ -3,10 +3,22 @@
 import json
 import os
 from pathlib import Path
+from typing import TypedDict, cast
 
 import gws
 import gws_json
 import pytest
+
+
+class _ChunkRef(TypedDict):
+    id: str
+    size: int
+    sha256: str
+
+
+class _ObjectReceipt(TypedDict):
+    head: _ChunkRef
+    readbacks: dict[str, str]
 
 
 def _workspace(tmp: Path) -> Path:
@@ -29,8 +41,8 @@ def _commit(
     ws: Path,
     tmp: Path,
     generation: str,
-    previous: dict[str, dict[str, object]] | None = None,
-) -> tuple[Path, Path, dict[str, dict[str, object]], Path]:
+    previous: dict[str, _ObjectReceipt] | None = None,
+) -> tuple[Path, Path, dict[str, _ObjectReceipt], Path]:
     """Simulate exact-ID textContent uploads and verified readbacks.
 
     Returns:
@@ -39,7 +51,7 @@ def _commit(
     staged = tmp / ("stage-" + generation)
     draft = gws_json.pack(ws, staged, generation)
     assert draft["format"] == "wsum-json-1"
-    objects: dict[str, dict[str, object]] = dict(previous or {})
+    objects: dict[str, _ObjectReceipt] = dict(previous or {})
     for item in draft["files"]:
         if "object" not in item or item["sha256"] in objects:
             continue
@@ -114,7 +126,7 @@ def test_reuse_unchanged_objects_between_generations(tmp_path: Path) -> None:
         v["head"]["id"] for v in new.values()
     }
     assert gws.verify(b, b_map)["generation"] == "20261020T000001Z"
-    rows = []
+    rows: list[dict[str, str]] = []
     for i, (manifest, maps) in enumerate((
         (a, tmp_path / "receipts-20261020T000000Z.json"),
         (b, b_map),
