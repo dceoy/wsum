@@ -945,9 +945,7 @@ def json_link(
     return {"size": len(encoded), "sha256": _digest(encoded)}
 
 
-def _decode_compressed_object(
-    encoded: str, item: dict[str, typing.Any]
-) -> bytes:
+def _decode_compressed_object(encoded: str, item: dict[str, typing.Any]) -> bytes:
     """Decode one size- and digest-bounded immutable object."""
     if len(encoded) > JSON_MAX_COMPRESSED:
         raise GwsError("compressed object exceeds size bound")

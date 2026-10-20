@@ -1092,9 +1092,7 @@ def test_small_json_state_with_external_snapshots_restores_exact_bytes(
 def test_json_prepare_rejects_corrupt_staged_chunks(tmp_path: Path) -> None:
     """A corrupt compressed staging fragment cannot be committed as new or reused."""
     ws = _json_workspace(tmp_path)
-    first, receipts, previous, stage = _json_commit(
-        ws, tmp_path, "20261020T000000Z"
-    )
+    first, receipts, previous, stage = _json_commit(ws, tmp_path, "20261020T000000Z")
     chunk = next(stage.glob("objects/*/0000.txt"))
     chunk.write_text("AAAA", encoding="ascii")
     with pytest.raises(gws.GwsError, match=r"compressed object|SHA-256 mismatch"):

@@ -409,7 +409,8 @@ truncate or convert state into a monolithic archive.
    older manifest. Preserve the prior manifest readback path as evidence.
    This assumes prior verified objects have not been overwritten remotely;
    full remote verification is required again at restore and maintenance.
-3. For a new object, only compressed Base64 fragments are staged (no redundant uncompressed `source.txt`); its staged fragments are under
+3. For a new object, stage only compressed Base64 fragments, not
+   redundant uncompressed `source.txt` copies. The fragments are under
    `$STAGED/objects/<sha256>/<four-digit-index>.txt`.
    Initialize scratch `NEXT_JSON` to literal `null`. For index
    `chunks-1` down to `0`, run:
@@ -481,6 +482,12 @@ truncate or convert state into a monolithic archive.
    revalidate the active identity before cleanup; never delete unknown
    files. If a complete verified listing is too large for the connector,
    skip cleanup safely rather than compromising an existing generation.
+
+After a successfully verified checkpoint, remove only that transaction's
+disposable local staging directory and upload scratch fragments. Retain
+exact-ID readbacks and prior manifest files for as long as subsequent
+verification, object reuse, or retention needs them. Do not remove a
+failed transaction's evidence before its recovery is resolved.
 
 A failed write leaves previously committed state valid; incomplete
 objects remain unreferenced and may be reconciled separately. An
