@@ -1277,7 +1277,9 @@ def test_inline_state_rejects_control_bytes_even_if_digest_matches(
 def test_commit_verify_rejects_replaced_head(tmp_path: Path) -> None:
     """Lightweight post-upload validation must bind to the prepared reference."""
     ws = _json_workspace(tmp_path)
-    manifest, receipts_path, receipts, _ = _json_commit(ws, tmp_path, "20261020T000000Z")
+    manifest, receipts_path, receipts, _ = _json_commit(
+        ws, tmp_path, "20261020T000000Z"
+    )
     forged = json.loads(manifest.read_text())
     entry = next(item for item in forged["files"] if "object" in item)
     original = receipts[entry["sha256"]]["head"]["id"]
