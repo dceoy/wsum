@@ -31,7 +31,11 @@ def _commit(
     generation: str,
     previous: dict[str, dict[str, object]] | None = None,
 ) -> tuple[Path, Path, dict[str, dict[str, object]], Path]:
-    """Simulate exact-ID textContent uploads and verified readbacks."""
+    """Simulate exact-ID textContent uploads and verified readbacks.
+
+    Returns:
+        Manifest path, readback map path, object receipts, and staged files.
+    """
     staged = tmp / ("stage-" + generation)
     draft = gws_json.pack(ws, staged, generation)
     assert draft["format"] == "wsum-json-1"
