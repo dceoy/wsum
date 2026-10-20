@@ -31,7 +31,6 @@ FIELDS = (
     "publisher",
     "category",
     "keywords",
-    "criteria",
     "priority",
     "enabled",
 )
