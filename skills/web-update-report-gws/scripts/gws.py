@@ -416,241 +416,11 @@ def _unique_object(pairs: list[tuple[str, typing.Any]]) -> dict[str, typing.Any]
     return result
 
 
-def _manifest(path: Path, *, draft: bool = False) -> dict[str, typing.Any]:
-    value: typing.Any = json.loads(
-        _text_bytes(path, MAX_MANIFEST), object_pairs_hook=_unique_object
-    )
-    if (
-        not isinstance(value, dict)
-        or set(typing.cast("dict[str, typing.Any]", value))
-        != {"format", "generation", "files"}
-        or value["format"] != "wsum-text-1"
-        or not isinstance(value["generation"], str)
-        or not isinstance(value["files"], list)
-        or len(typing.cast("list[typing.Any]", value["files"])) > MAX_FILES
-    ):
-        raise GwsError("invalid text manifest header")
-    value = typing.cast("dict[str, typing.Any]", value)
-    _timestamp(value["generation"])
-    names: set[str] = set()
-    total = 0
-    for raw_item in value["files"]:
-        if not isinstance(raw_item, dict):
-            raise GwsError("invalid manifest file record")
-        item = typing.cast("dict[str, typing.Any]", raw_item)
-        if (
-            set(item) - {"mtime_ns"}
-            != ({"path", "size", "sha256"} | (set() if draft else {"id"}))
-            or (
-                "mtime_ns" in item
-                and (
-                    type(item["mtime_ns"]) is not int
-                    or not 0 <= item["mtime_ns"] <= 2**63 - 1
-                )
-            )
-            or not isinstance(item["path"], str)
-            or not _safe_path(item["path"])
-            or item["path"] in names
-            or type(item["size"]) is not int
-            or not 0 <= item["size"] <= MAX_ENTRY
-            or not isinstance(item["sha256"], str)
-            or not SHA_RE.fullmatch(item["sha256"])
-            or (not draft and not _file_id(item["id"]))
-        ):
-            raise GwsError("invalid, unsafe or duplicate manifest file record")
-        names.add(item["path"])
-        total += item["size"]
-    if total > MAX_TOTAL or any(
-        ancestor in names
-        for name in names
-        for ancestor in (
-            "/".join(name.split("/")[:i]) for i in range(1, len(name.split("/")))
-        )
-    ):
-        raise GwsError("manifest size limit or conflicting paths")
-    return value
-
-
-def _check_payload(item: dict[str, typing.Any], path: Path) -> bytes:
-    content = _text_bytes(path)
-    if len(content) != item["size"] or _digest(content) != item["sha256"]:
-        raise GwsError(f"text size or SHA-256 mismatch: {item['path']}")
-    return content
-
-
-def pack(workspace: Path, snapshot: Path, generation: str) -> dict[str, typing.Any]:
-    """Stage exact UTF-8 payloads and a deterministic draft; no Drive IDs yet."""
-    _timestamp(generation)
-    if snapshot.exists() or snapshot.is_symlink():
-        raise GwsError("refusing to overwrite existing snapshot")
-    files: list[dict[str, typing.Any]] = []
-    snapshot.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".tmp-pack-", dir=snapshot.parent))
-    try:
-        (stage / "payloads").mkdir()
-        total = 0
-        for name, path in _workspace_files(workspace):
-            if not _safe_path(name):
-                raise GwsError("unsafe workspace path")
-            content = _text_bytes(path)
-            total += len(content)
-            if total > MAX_TOTAL:
-                raise GwsError("workspace size limit exceeded")
-            digest = _digest(content)
-            (stage / "payloads" / f"{digest}.txt").write_bytes(content)
-            item = {"path": name, "size": len(content), "sha256": digest}
-            if name.startswith("internal/state/snapshots/"):
-                item["mtime_ns"] = path.stat().st_mtime_ns
-            files.append(item)
-        manifest = {"format": "wsum-text-1", "generation": generation, "files": files}
-        (stage / "draft.json").write_bytes(_json_bytes(manifest))
-        _manifest(stage / "draft.json", draft=True)
-        stage.rename(snapshot)
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
-    return manifest
-
-
-def prepare(snapshot: Path, receipts: Path, destination: Path) -> dict[str, typing.Any]:
-    """Verify exact-ID payload read-backs before emitting the final manifest.
-
-    Receipts map each staged SHA-256 to {id, file}, where file is a local
-    exact-ID read-back. These are transport evidence supplied by the agent.
-    """
-    manifest = _manifest(snapshot / "draft.json", draft=True)
-    uploads: typing.Any = json.loads(receipts.read_bytes())
-    if not isinstance(uploads, dict):
-        raise GwsError("invalid receipts")
-    uploads = typing.cast("dict[str, typing.Any]", uploads)
-    if set(uploads) != {item["sha256"] for item in manifest["files"]}:
-        raise GwsError("incomplete payload receipts")
-    ids: set[str] = set()
-    for item in manifest["files"]:
-        raw_receipt = uploads[item["sha256"]]
-        if not isinstance(raw_receipt, dict):
-            raise GwsError("invalid payload receipt")
-        receipt = typing.cast("dict[str, typing.Any]", raw_receipt)
-        if (
-            set(receipt) != {"id", "file"}
-            or not _file_id(receipt["id"])
-            or not isinstance(receipt["file"], str)
-        ):
-            raise GwsError("invalid payload receipt")
-        _check_payload(item, snapshot / "payloads" / f"{item['sha256']}.txt")
-        _check_payload(item, Path(receipt["file"]))
-        item["id"] = receipt["id"]
-        ids.add(receipt["id"])
-    if len(ids) != len(uploads):
-        raise GwsError("distinct payloads require distinct Drive IDs")
-    if destination.exists() or destination.is_symlink():
-        raise GwsError("refusing to overwrite manifest")
-    content = _json_bytes(manifest)
-    if len(content) > MAX_MANIFEST:
-        raise GwsError("manifest size limit exceeded")
-    with destination.open("xb") as stream:
-        stream.write(content)
-    return {"size": len(content), "sha256": _digest(content)}
-
-
-def _verified_payloads(
-    manifest: Path, readbacks: Path
-) -> tuple[dict[str, typing.Any], dict[str, bytes]]:
-    value = _manifest(manifest)
-    paths: typing.Any = json.loads(readbacks.read_bytes())
-    if not isinstance(paths, dict):
-        raise GwsError("readbacks must map exact Drive IDs to local files")
-    paths = typing.cast("dict[str, typing.Any]", paths)
-    contents: dict[str, bytes] = {}
-    for item in value["files"]:
-        if not isinstance(paths.get(item["id"]), str):
-            raise GwsError("missing exact-ID payload read-back")
-        contents[item["path"]] = _check_payload(item, Path(paths[item["id"]]))
-    return value, contents
-
-
-def _manifest_format(path: Path) -> str:
-    """Read the untrusted header without yet trusting its contents."""
-    raw: object = json.loads(
-        _text_bytes(path, MAX_MANIFEST), object_pairs_hook=_unique_object
-    )
-    if not isinstance(raw, dict):
-        raise GwsError("invalid manifest header")
-    value = typing.cast("dict[str, typing.Any]", raw)
-    kind = value.get("format")
-    if not isinstance(kind, str):
-        raise GwsError("invalid manifest format")
-    return kind
-
-
-def verify(manifest: Path, readbacks: Path) -> dict[str, typing.Any]:
-    """Validate referenced objects or legacy payloads by exact Drive ID."""
-    if _manifest_format(manifest) == JSON_FORMAT:
-        return json_verify(manifest, readbacks)
-    value, _ = _verified_payloads(manifest, readbacks)
-    return {
-        "generation": value["generation"],
-        "file_count": len(value["files"]),
-        "size": manifest.stat().st_size,
-        "sha256": _digest(manifest.read_bytes()),
-    }
-
-
-def _restore_workspace(
-    value: dict[str, typing.Any],
-    contents: dict[str, bytes],
-    destination: Path,
-    *,
-    operation: str,
-    precision_error: str,
-) -> dict[str, typing.Any]:
-    """Atomically restore verified legacy or current-format workspace files."""
-    if destination.exists() or destination.is_symlink():
-        raise GwsError(f"{operation} destination must not exist")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=f".tmp-{operation}-", dir=destination.parent))
-    try:
-        for root in ("output", "internal"):
-            (stage / root).mkdir()
-        for item in value["files"]:
-            path = stage / item["path"]
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(contents[item["path"]])
-            if "mtime_ns" in item:
-                stamp = item["mtime_ns"]
-                os.utime(path, ns=(stamp, stamp))
-                if path.stat().st_mtime_ns != stamp:
-                    raise GwsError(precision_error)
-        if destination.exists() or destination.is_symlink():
-            raise GwsError(f"{operation} destination already exists")
-        stage.rename(destination)
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
-    return {"generation": value["generation"], "file_count": len(contents)}
-
-
-def restore(
-    manifest: Path, readbacks: Path, destination: Path
-) -> dict[str, typing.Any]:
-    """Install verified bytes into a new workspace, leaving failures uninstalled."""
-    if _manifest_format(manifest) == JSON_FORMAT:
-        return json_restore(manifest, readbacks, destination)
-    value, contents = _verified_payloads(manifest, readbacks)
-    return _restore_workspace(
-        value,
-        contents,
-        destination,
-        operation="restore",
-        precision_error="restored snapshot identity precision is unsupported",
-    )
-
-
 def retention(generations: Path) -> dict[str, list[str]]:
     """Plan deletion only after verifying all generations in a complete listing.
 
     Each record has name/id (manifest identity), manifest (local exact-ID
-    read-back), and readbacks (local JSON mapping payload IDs to read-backs).
+    read-back), and readbacks (exact-ID JSON object chunk receipts).
     The caller must revalidate the listing before deleting exact IDs.
     """
     records: typing.Any = json.loads(generations.read_bytes())
@@ -665,13 +435,8 @@ def retention(generations: Path) -> dict[str, list[str]]:
     next_generation(identities, datetime.now(UTC), _active(identities))
     payloads: dict[str, set[str]] = {}
     for row in records:
-        manifest_path = Path(row["manifest"])
-        if _manifest_format(manifest_path) == JSON_FORMAT:
-            value = json_verify(manifest_path, Path(row["readbacks"]))
-            protected_ids = set(value["ids"])
-        else:
-            value, _ = _verified_payloads(manifest_path, Path(row["readbacks"]))
-            protected_ids = {item["id"] for item in value["files"]}
+        value = verify(Path(row["manifest"]), Path(row["readbacks"]))
+        protected_ids = set(value["ids"])
         if row["name"] != f"workspace-{value['generation']}.json":
             raise GwsError("manifest filename and generation mismatch")
         payloads[row["id"]] = protected_ids
@@ -1147,7 +912,7 @@ def _json_verified(
     return state, contents, ids
 
 
-def json_verify(manifest: Path, readbacks: Path) -> dict[str, typing.Any]:
+def verify(manifest: Path, readbacks: Path) -> dict[str, typing.Any]:
     """Verify every referenced object and return exact protected Drive IDs."""
     state, contents, ids = _json_verified(manifest, readbacks)
     return {
@@ -1159,19 +924,34 @@ def json_verify(manifest: Path, readbacks: Path) -> dict[str, typing.Any]:
     }
 
 
-def json_restore(
+def restore(
     manifest: Path, readbacks: Path, workspace: Path
 ) -> dict[str, typing.Any]:
-    """Restore a complete workspace atomically from a committed JSON generation."""
+    """Restore a verified current-format workspace into a new directory."""
     state, contents, _ = _json_verified(manifest, readbacks)
-    return _restore_workspace(
-        state,
-        contents,
-        workspace,
-        operation="json_restore",
-        precision_error="restored snapshot mtime precision mismatch",
-    )
-
+    if workspace.exists() or workspace.is_symlink():
+        raise GwsError("restore destination must not exist")
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(dir=workspace.parent, prefix=".tmp-restore-"))
+    try:
+        for root in ("output", "internal"):
+            (stage / root).mkdir()
+        for item in state["files"]:
+            path = stage / item["path"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents[item["path"]])
+            if "mtime_ns" in item:
+                stamp = item["mtime_ns"]
+                os.utime(path, ns=(stamp, stamp))
+                if path.stat().st_mtime_ns != stamp:
+                    raise GwsError("restored snapshot mtime precision mismatch")
+        if workspace.exists() or workspace.is_symlink():
+            raise GwsError("restore destination already exists")
+        stage.rename(workspace)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+    return {"generation": state["generation"], "file_count": len(contents)}
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1202,10 +982,6 @@ def _parser() -> argparse.ArgumentParser:
     p = commands.add_parser("next-generation")
     p.add_argument("--snapshots-json", type=Path, required=True)
     p.add_argument("--expected-snapshot-json", type=Path, required=True)
-    p = commands.add_parser("pack")
-    p.add_argument("--workspace", type=Path, required=True)
-    p.add_argument("--snapshot", type=Path, required=True)
-    p.add_argument("--generation", required=True)
     p = commands.add_parser("json-pack")
     p.add_argument("--workspace", type=Path, required=True)
     p.add_argument("--snapshot", type=Path, required=True)
@@ -1222,10 +998,6 @@ def _parser() -> argparse.ArgumentParser:
     p = commands.add_parser("json-verify-commit")
     p.add_argument("--manifest", type=Path, required=True)
     p.add_argument("--receipts", type=Path, required=True)
-    p = commands.add_parser("prepare")
-    p.add_argument("--snapshot", type=Path, required=True)
-    p.add_argument("--receipts", type=Path, required=True)
-    p.add_argument("--manifest", type=Path, required=True)
     for command in ("verify", "restore"):
         p = commands.add_parser(command)
         p.add_argument("--manifest", type=Path, required=True)
@@ -1291,8 +1063,6 @@ def main() -> None:
                 "generation": generation,
                 "filename": f"workspace-{generation}.json",
             }
-        elif args.command == "pack":
-            result = pack(args.workspace, args.snapshot, args.generation)
         elif args.command == "json-pack":
             result = json_pack(args.workspace, args.snapshot, args.generation)
         elif args.command == "json-link":
@@ -1301,8 +1071,6 @@ def main() -> None:
             result = json_prepare(args.snapshot, args.receipts, args.manifest)
         elif args.command == "json-verify-commit":
             result = json_verify_commit(args.manifest, args.receipts)
-        elif args.command == "prepare":
-            result = prepare(args.snapshot, args.receipts, args.manifest)
         elif args.command == "verify":
             result = verify(args.manifest, args.readbacks)
         elif args.command == "restore":

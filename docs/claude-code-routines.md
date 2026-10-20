@@ -52,9 +52,7 @@ The upload path for the JSON checkpoint and all new chunks is
 `text/plain` and Google-native conversion disabled. It does **not**
 upload using `base64Content`. The connector's download response remains
 Base64-wrapped, so use `transfer-decode` against the independent source
-file size and SHA-256 to validate every exact-ID readback. Existing
-`wsum-text-1` per-file snapshots still restore through their legacy
-readback mapping.
+file size and SHA-256 to validate every exact-ID readback. Current snapshots require the `wsum-json-1` format; other formats are rejected.
 
 1. Resolve the bound output folder and immutable
    `wsum-text.binding.json`. Require full, paginated listing and verify
@@ -111,7 +109,7 @@ context, credentials and tokens out of persisted state.
 
 ## Offline verification and live follow-up
 
-`tests/test_gws.py` covers legacy transport, JSON checkpoints,
+`tests/test_gws.py` covers current JSON checkpoints,
 deduplicated objects and corrupt readbacks. The tests use
 local synthetic files for deterministic packing,
 exact hash checks, fresh-workspace restore, repeated commits, three-generation
