@@ -59,7 +59,7 @@ compatibility must be verified before production use.
 
 Only the targets CSV/Spreadsheet and output Drive folder are required. Context is optional: accept at most one `Context source:` with a Google Doc or Drive-hosted `.md` file ID/URL (not a local path). Reject inline `Common context:`, multiple sources, and local paths.
 
-With neither, keep the existing target-driven behavior. Reject both modes together; never infer a source from Drive filenames, monitored pages, or previous reports.
+Without a context source, retain target-driven behavior. Never infer a source from Drive filenames, monitored pages, or previous reports.
 
 ### Resolve supplied context
 
@@ -77,7 +77,7 @@ With neither, keep the existing target-driven behavior. Reject both modes togeth
 
 ### Apply supplied context
 
-Pass the **same complete text** as internal resolved context (not a public inline input) to `web-update-report`, which forwards it to every monitor materiality review (including resumed reviews) and to research for material updates. Do not forward the Google source reference or scratch path. It guides relevance and reporting but supplements the current `keywords`, adds or disables targets, changes fetch/traversal, or alters transaction state. When context is absent, invoke the local skill without context. Do not re-finalize previous reports.
+Pass the **same complete text** as internal resolved context (not a public inline input) to `web-update-report`, which forwards it to every monitor materiality review (including resumed reviews) and to research for material updates. Do not forward the Google source reference or scratch path. It supplements current `keywords` for relevance and reporting, but cannot add or disable targets, change fetching/traversal, or alter transaction state. When context is absent, invoke the local skill without context. Do not re-finalize previous reports.
 
 ## Architecture
 
@@ -115,7 +115,7 @@ The Drive workspaces folder retains three verified manifests and their text payl
 Call `web-update-report-gws` once per run. Resolve the installed `web-update-report` and `web-update-monitor` skills before starting; read the local orchestrator's instructions. Follow this resumable sequence:
 
 1. Resolve and validate optional common context before any workspace mutation. Restore and validate the immutable Drive folder binding, newest verified text snapshot, and delivery ledger; initialize only for a genuinely fresh output folder. Acquire and validate the current selected CSV/Spreadsheet, projecting it to `internal/gws/targets.csv`. Persist initialization/projection before invoking local monitoring; never use an old projection when current input fails.
-2. **Invoke `web-update-report`**, supplying the restored `WORKSPACE`, validated `TARGETS_CSV`, complete resolved inline context if present, output language/instructions, and the **required synchronous persistence handoff** below. It reconciles/resumes pending reviews, checks targets, recovers website HTTP 403 through monitor ingest, judges materiality, researches material updates, and finalizes once per URL. Follow that skill rather than running a parallel monitoring loop here.
+2. **Invoke `web-update-report`**, supplying the restored `WORKSPACE`, validated `TARGETS_CSV`, complete internally resolved context if present, output language/instructions, and the **required synchronous persistence handoff** below. It reconciles/resumes pending reviews, checks targets, recovers website HTTP 403 through monitor ingest, judges materiality, researches material updates, and finalizes once per URL. Follow that skill rather than running a parallel monitoring loop here.
 3. **Persist during the invocation.** After every core `pending` (list/detail), `check`, `ingest`, `discard`, and `finalize`, receive control and run **Persist JSON state and immutable content-addressed objects** below. Acknowledge success and return control only after the new snapshot verifies and the expected active identity is updated. Even pending inspection can recover writes; checkpoint error returns too. If persistence fails, stop local orchestration and delivery. Do not wait until the local skill returns to snapshot its changes.
 4. **Verify completion independently.** After the local workflow returns, refresh public pending state with the current targets projection and persist this command's possible recovery writes through the same handoff. Defer any report whose run ID remains pending; any `blocked` recovery entry with unknown run ID defers all delivery. Local completion does not establish Drive durability.
 5. **Publish completed runs only.** Enumerate canonical `output/report/<run-id>.md` files, including undelivered historical runs, and follow the exact-name lookup, read-back verification, and delivery ledger procedure below. Persist after recording delivery. Do not enrich, edit, or overwrite a previously delivered canonical report because later research becomes available.
