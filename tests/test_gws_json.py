@@ -1,5 +1,6 @@
 """JSON-state + content-addressed Drive object transport regression tests."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -308,12 +309,10 @@ def test_inline_state_rejects_control_bytes_even_if_digest_matches(
     manifest, maps, _, _ = _commit(ws, tmp_path, "20261020T000000Z")
     state = json.loads(manifest.read_text())
     inline = next(item for item in state["files"] if "text" in item)
-    bad = '{"control":"\\u0000"}'
+    bad = "x" + chr(0)
     inline["text"] = bad
     data = bad.encode()
     inline["size"] = len(data)
-    import hashlib
-
     inline["sha256"] = hashlib.sha256(data).hexdigest()
     altered = tmp_path / "altered-manifest.json"
     altered.write_text(json.dumps(state))
