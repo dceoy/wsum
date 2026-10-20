@@ -1,0 +1,25 @@
+name: Format JSON persistence PR
+on:
+  push:
+    branches:
+      - feat/gws-json-state-objects
+permissions:
+  contents: write
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Format, commit and self-remove
+        run: |
+          python3 -m venv /tmp/wsum-format
+          /tmp/wsum-format/bin/pip install 'ruff==0.16.3'
+          /tmp/wsum-format/bin/ruff check --fix . || true
+          /tmp/wsum-format/bin/ruff format .
+          npx --yes prettier@3.9.6 --write README.md docs/claude-code-routines.md skills/web-update-report-gws/SKILL.md
+          git rm .github/workflows/format-json-persistence-pr.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .
+          git commit -m 'style: format consolidated JSON persistence code and docs'
+          git push origin HEAD:feat/gws-json-state-objects
