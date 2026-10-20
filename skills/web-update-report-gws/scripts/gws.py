@@ -84,6 +84,12 @@ def transfer_encode(path: Path) -> dict[str, str | int]:
     }
 
 
+def transfer_text(path: Path) -> dict[str, str | int]:
+    """Expose plain UTF-8 bytes for Google Drive textContent uploads."""
+    content = _text_bytes(path)
+    return {"textContent": content.decode("utf-8"), "sha256": _digest(content), "size": len(content)}
+
+
 def transfer_decode(
     source: Path, destination: Path, size: int, sha256: str | None
 ) -> dict[str, str | int | bool]:
@@ -559,7 +565,11 @@ def _verified_payloads(
 
 
 def verify(manifest: Path, readbacks: Path) -> dict[str, typing.Any]:
-    """Validate every referenced payload; previews cannot establish provenance."""
+    """Validate verified archive chains and legacy text payloads."""
+    if _manifest_format(manifest) == "wsum-archive-1":
+        import gws_archive
+
+        return gws_archive.verify(manifest, readbacks)
     value, _ = _verified_payloads(manifest, readbacks)
     return {
         "generation": value["generation"],
@@ -573,6 +583,10 @@ def restore(
     manifest: Path, readbacks: Path, destination: Path
 ) -> dict[str, typing.Any]:
     """Install verified bytes into a new workspace, leaving failures uninstalled."""
+    if _manifest_format(manifest) == "wsum-archive-1":
+        import gws_archive
+
+        return gws_archive.restore(manifest, readbacks, destination)
     value, contents = _verified_payloads(manifest, readbacks)
     if destination.exists() or destination.is_symlink():
         raise GwsError("restore destination must not exist")
@@ -603,6 +617,14 @@ def restore(
     return {"generation": value["generation"], "file_count": len(contents)}
 
 
+def _manifest_format(path: Path) -> str:
+    """Identify the format without accepting an unchecked manifest as valid."""
+    value = json.loads(_text_bytes(path, MAX_MANIFEST), object_pairs_hook=_unique_object)
+    if not isinstance(value, dict) or not isinstance(value.get("format"), str):
+        raise GwsError("invalid manifest format")
+    return value["format"]
+
+
 def retention(generations: Path) -> dict[str, list[str]]:
     """Plan deletion only after verifying all generations in a complete listing.
 
@@ -622,10 +644,18 @@ def retention(generations: Path) -> dict[str, list[str]]:
     next_generation(identities, datetime.now(UTC), _active(identities))
     payloads: dict[str, set[str]] = {}
     for row in records:
-        value, _ = _verified_payloads(Path(row["manifest"]), Path(row["readbacks"]))
+        manifest = Path(row["manifest"])
+        if _manifest_format(manifest) == "wsum-archive-1":
+            import gws_archive
+
+            value = gws_archive.verify(manifest, Path(row["readbacks"]))
+            payload_ids = set(value["ids"])
+        else:
+            value, _ = _verified_payloads(manifest, Path(row["readbacks"]))
+            payload_ids = {item["id"] for item in value["files"]}
         if row["name"] != f"workspace-{value['generation']}.json":
             raise GwsError("manifest filename and generation mismatch")
-        payloads[row["id"]] = {item["id"] for item in value["files"]}
+        payloads[row["id"]] = payload_ids
     ordered = sorted(identities, key=operator.itemgetter("name"), reverse=True)
     retained = {row["id"] for row in ordered[:3]}
     discarded = {row["id"] for row in ordered[3:]}
@@ -697,6 +727,8 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     p = commands.add_parser("transfer-encode")
     p.add_argument("--file", type=Path, required=True)
+    p = commands.add_parser("transfer-text")
+    p.add_argument("--file", type=Path, required=True)
     p = commands.add_parser("transfer-decode")
     p.add_argument("--base64-file", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
@@ -723,6 +755,19 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--workspace", type=Path, required=True)
     p.add_argument("--snapshot", type=Path, required=True)
     p.add_argument("--generation", required=True)
+    p = commands.add_parser("archive-pack")
+    p.add_argument("--workspace", type=Path, required=True)
+    p.add_argument("--snapshot", type=Path, required=True)
+    p.add_argument("--generation", required=True)
+    p = commands.add_parser("archive-link")
+    p.add_argument("--fragment", type=Path, required=True)
+    p.add_argument("--next-json", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--index", type=int, required=True)
+    p = commands.add_parser("archive-prepare")
+    p.add_argument("--snapshot", type=Path, required=True)
+    p.add_argument("--head-json", type=Path, required=True)
+    p.add_argument("--manifest", type=Path, required=True)
     p = commands.add_parser("prepare")
     p.add_argument("--snapshot", type=Path, required=True)
     p.add_argument("--receipts", type=Path, required=True)
@@ -751,6 +796,8 @@ def main() -> None:
     try:
         if args.command == "transfer-encode":
             result = transfer_encode(args.file)
+        elif args.command == "transfer-text":
+            result = transfer_text(args.file)
         elif args.command == "transfer-decode":
             result = transfer_decode(
                 args.base64_file, args.output, args.size, args.sha256
@@ -792,6 +839,20 @@ def main() -> None:
             }
         elif args.command == "pack":
             result = pack(args.workspace, args.snapshot, args.generation)
+        elif args.command == "archive-pack":
+            import gws_archive
+
+            result = gws_archive.pack(args.workspace, args.snapshot, args.generation)
+        elif args.command == "archive-link":
+            import gws_archive
+
+            result = gws_archive.link(
+                args.fragment, args.next_json, args.output, args.index
+            )
+        elif args.command == "archive-prepare":
+            import gws_archive
+
+            result = gws_archive.prepare(args.snapshot, args.head_json, args.manifest)
         elif args.command == "prepare":
             result = prepare(args.snapshot, args.receipts, args.manifest)
         elif args.command == "verify":
