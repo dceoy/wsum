@@ -816,6 +816,10 @@ def _json_state(path: Path, *, draft: bool = False) -> dict[str, typing.Any]:
                 len(content) > JSON_INLINE_BYTES
                 or len(content) != item["size"]
                 or _digest(content) != item["sha256"]
+                or any(
+                    ord(char) < CONTROL_LIMIT and char not in "\t\r\n"
+                    for char in item["text"]
+                )
                 or item["path"].startswith("internal/state/snapshots/")
             ):
                 raise GwsError("inline state mismatch")
@@ -999,13 +1003,17 @@ def _json_receipts(path: Path) -> dict[str, object]:
     return typing.cast("dict[str, object]", raw)
 
 
-def json_prepare(snapshot: Path, receipts: Path, destination: Path) -> dict[str, typing.Any]:
-    """Validate new/reused objects before publishing the immutable state JSON."""
-    state = _json_state(snapshot / "draft.json", draft=True)
-    uploads = _json_receipts(receipts)
+def _json_check_commit_receipts(
+    state: dict[str, typing.Any],
+    uploads: dict[str, object],
+    snapshot: Path | None = None,
+) -> dict[str, int]:
+    """Authenticate new chunks or inherit a verified previous manifest reference."""
     wanted = {item["sha256"] for item in state["files"] if "object" in item}
     if set(uploads) != wanted:
         raise GwsError("missing or unexpected object receipts")
+    new_count = 0
+    reused_count = 0
     for item in state["files"]:
         if "object" not in item:
             continue
@@ -1013,13 +1021,53 @@ def json_prepare(snapshot: Path, receipts: Path, destination: Path) -> dict[str,
         if not isinstance(raw_receipt, dict):
             raise GwsError("invalid object receipt")
         receipt = typing.cast("dict[str, typing.Any]", raw_receipt)
-        if set(receipt) != {"head", "readbacks"}:
-            raise GwsError("invalid object receipt")
-        item["object"]["head"] = _json_reference(receipt["head"])
-        content, _ = _json_object_bytes(item, receipt)
-        source = snapshot / "objects" / item["sha256"] / "source.txt"
-        if _digest(_text_bytes(source)) != _digest(content):
-            raise GwsError("staged object changed during transfer")
+        head = _json_reference(receipt.get("head"))
+        previous_head = item["object"].get("head")
+        if previous_head is not None and previous_head != head:
+            raise GwsError("committed object reference changed")
+        item["object"]["head"] = head
+        if set(receipt) == {"head", "readbacks"}:
+            content, _ = _json_object_bytes(item, receipt)
+            if snapshot is not None:
+                source = _text_bytes(
+                    snapshot / "objects" / item["sha256"] / "source.txt"
+                )
+                if source != content:
+                    raise GwsError("staged object changed during transfer")
+            new_count += 1
+        elif set(receipt) == {"head", "previous_manifest"}:
+            previous_path = receipt["previous_manifest"]
+            if not isinstance(previous_path, str):
+                raise GwsError("invalid reused object source manifest")
+            previous = _json_state(Path(previous_path))
+            if previous["generation"] >= state["generation"]:
+                raise GwsError("reused object must predate the new generation")
+            match = any(
+                old["sha256"] == item["sha256"]
+                and old["size"] == item["size"]
+                and old.get("object") == item["object"]
+                for old in previous["files"]
+            )
+            if not match:
+                raise GwsError("reused object is not in prior verified manifest")
+            if snapshot is not None:
+                source = _text_bytes(
+                    snapshot / "objects" / item["sha256"] / "source.txt"
+                )
+                if len(source) != item["size"] or _digest(source) != item["sha256"]:
+                    raise GwsError("staged reused object changed")
+            reused_count += 1
+        else:
+            raise GwsError("invalid object receipt mode")
+    return {"new_objects": new_count, "reused_objects": reused_count}
+
+
+def json_prepare(snapshot: Path, receipts: Path, destination: Path) -> dict[str, typing.Any]:
+    """Create a bounded state manifest from new readbacks or verified old refs."""
+    state = _json_state(snapshot / "draft.json", draft=True)
+    counts = _json_check_commit_receipts(
+        state, _json_receipts(receipts), snapshot=snapshot
+    )
     if destination.exists() or destination.is_symlink():
         raise GwsError("refusing to overwrite state manifest")
     encoded = _json_bytes(state)
@@ -1028,7 +1076,25 @@ def json_prepare(snapshot: Path, receipts: Path, destination: Path) -> dict[str,
     with destination.open("xb") as output:
         output.write(encoded)
     _json_state(destination)
-    return {"sha256": _digest(encoded), "size": len(encoded)}
+    return {"sha256": _digest(encoded), "size": len(encoded), **counts}
+
+
+def json_verify_commit(manifest: Path, receipts: Path) -> dict[str, typing.Any]:
+    """Verify a just-uploaded manifest without redownloading reused objects.
+
+    The caller has already verified the manifest's exact-ID Drive readback
+    against the locally prepared bytes. Reused references must originate in
+    a previously downloaded, verified, and committed state manifest.
+    """
+    state = _json_state(manifest)
+    counts = _json_check_commit_receipts(state, _json_receipts(receipts))
+    return {
+        "generation": state["generation"],
+        "file_count": len(state["files"]),
+        "size": manifest.stat().st_size,
+        "sha256": _digest(manifest.read_bytes()),
+        **counts,
+    }
 
 
 def _json_verified(
@@ -1145,6 +1211,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--snapshot", type=Path, required=True)
     p.add_argument("--receipts", type=Path, required=True)
     p.add_argument("--manifest", type=Path, required=True)
+    p = commands.add_parser("json-verify-commit")
+    p.add_argument("--manifest", type=Path, required=True)
+    p.add_argument("--receipts", type=Path, required=True)
     p = commands.add_parser("prepare")
     p.add_argument("--snapshot", type=Path, required=True)
     p.add_argument("--receipts", type=Path, required=True)
@@ -1222,6 +1291,8 @@ def main() -> None:
             result = json_link(args.fragment, args.next_json, args.index, args.output)
         elif args.command == "json-prepare":
             result = json_prepare(args.snapshot, args.receipts, args.manifest)
+        elif args.command == "json-verify-commit":
+            result = json_verify_commit(args.manifest, args.receipts)
         elif args.command == "prepare":
             result = prepare(args.snapshot, args.receipts, args.manifest)
         elif args.command == "verify":
