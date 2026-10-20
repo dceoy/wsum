@@ -137,6 +137,8 @@ def test_archive_invalid_chain_index_is_rejected(tmp_path: Path) -> None:
     value = json.loads(manifest.read_text())
     value["head"]["sha256"] = hashlib.sha256(content).hexdigest()
     value["head"]["size"] = len(content)
-    manifest.write_bytes(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+    manifest.write_bytes(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    )
     with pytest.raises(gws.GwsError, match="structure"):
         gws.verify(manifest, readbacks)
