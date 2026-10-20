@@ -171,7 +171,11 @@ def test_oversized_state_fails_closed(tmp_path: Path) -> None:
 
 
 def _legacy_commit(ws: Path, tmp_path: Path) -> tuple[Path, Path]:
-    """Stage and verify a legacy per-file generation for migration tests."""
+    """Stage and verify a legacy per-file generation for migration tests.
+
+    Returns:
+        The legacy manifest and its exact-ID payload readback map.
+    """
     legacy_stage = tmp_path / "legacy-stage"
     legacy = gws.pack(ws, legacy_stage, "20261019T000000Z")
     legacy_receipts: dict[str, dict[str, str]] = {}
