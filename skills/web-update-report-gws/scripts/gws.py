@@ -84,6 +84,12 @@ def transfer_encode(path: Path) -> dict[str, str | int]:
     }
 
 
+def transfer_text(path: Path) -> dict[str, str | int]:
+    """Relay exact local UTF-8 contents to Drive create_file.textContent."""
+    content = _text_bytes(path)
+    return {"textContent": content.decode("utf-8"), "sha256": _digest(content), "size": len(content)}
+
+
 def transfer_decode(
     source: Path, destination: Path, size: int, sha256: str | None
 ) -> dict[str, str | int | bool]:
@@ -558,8 +564,26 @@ def _verified_payloads(
     return value, contents
 
 
+def _manifest_format(path: Path) -> str:
+    """Read the untrusted header without yet trusting its contents."""
+    raw: object = json.loads(
+        _text_bytes(path, MAX_MANIFEST), object_pairs_hook=_unique_object
+    )
+    if not isinstance(raw, dict):
+        raise GwsError("invalid manifest header")
+    value = typing.cast("dict[str, typing.Any]", raw)
+    kind = value.get("format")
+    if not isinstance(kind, str):
+        raise GwsError("invalid manifest format")
+    return kind
+
+
 def verify(manifest: Path, readbacks: Path) -> dict[str, typing.Any]:
-    """Validate every referenced payload; previews cannot establish provenance."""
+    """Validate referenced objects or legacy payloads by exact Drive ID."""
+    if _manifest_format(manifest) == "wsum-json-1":
+        import gws_json
+
+        return gws_json.verify(manifest, readbacks)
     value, _ = _verified_payloads(manifest, readbacks)
     return {
         "generation": value["generation"],
@@ -573,6 +597,10 @@ def restore(
     manifest: Path, readbacks: Path, destination: Path
 ) -> dict[str, typing.Any]:
     """Install verified bytes into a new workspace, leaving failures uninstalled."""
+    if _manifest_format(manifest) == "wsum-json-1":
+        import gws_json
+
+        return gws_json.restore(manifest, readbacks, destination)
     value, contents = _verified_payloads(manifest, readbacks)
     if destination.exists() or destination.is_symlink():
         raise GwsError("restore destination must not exist")
@@ -622,10 +650,18 @@ def retention(generations: Path) -> dict[str, list[str]]:
     next_generation(identities, datetime.now(UTC), _active(identities))
     payloads: dict[str, set[str]] = {}
     for row in records:
-        value, _ = _verified_payloads(Path(row["manifest"]), Path(row["readbacks"]))
+        manifest_path = Path(row["manifest"])
+        if _manifest_format(manifest_path) == "wsum-json-1":
+            import gws_json
+
+            value = gws_json.verify(manifest_path, Path(row["readbacks"]))
+            protected_ids = set(value["ids"])
+        else:
+            value, _ = _verified_payloads(manifest_path, Path(row["readbacks"]))
+            protected_ids = {item["id"] for item in value["files"]}
         if row["name"] != f"workspace-{value['generation']}.json":
             raise GwsError("manifest filename and generation mismatch")
-        payloads[row["id"]] = {item["id"] for item in value["files"]}
+        payloads[row["id"]] = protected_ids
     ordered = sorted(identities, key=operator.itemgetter("name"), reverse=True)
     retained = {row["id"] for row in ordered[:3]}
     discarded = {row["id"] for row in ordered[3:]}
@@ -697,6 +733,8 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     p = commands.add_parser("transfer-encode")
     p.add_argument("--file", type=Path, required=True)
+    p = commands.add_parser("transfer-text")
+    p.add_argument("--file", type=Path, required=True)
     p = commands.add_parser("transfer-decode")
     p.add_argument("--base64-file", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
@@ -723,6 +761,19 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--workspace", type=Path, required=True)
     p.add_argument("--snapshot", type=Path, required=True)
     p.add_argument("--generation", required=True)
+    p = commands.add_parser("json-pack")
+    p.add_argument("--workspace", type=Path, required=True)
+    p.add_argument("--snapshot", type=Path, required=True)
+    p.add_argument("--generation", required=True)
+    p = commands.add_parser("json-link")
+    p.add_argument("--fragment", type=Path, required=True)
+    p.add_argument("--next-json", type=Path, required=True)
+    p.add_argument("--index", type=int, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p = commands.add_parser("json-prepare")
+    p.add_argument("--snapshot", type=Path, required=True)
+    p.add_argument("--receipts", type=Path, required=True)
+    p.add_argument("--manifest", type=Path, required=True)
     p = commands.add_parser("prepare")
     p.add_argument("--snapshot", type=Path, required=True)
     p.add_argument("--receipts", type=Path, required=True)
@@ -751,6 +802,8 @@ def main() -> None:
     try:
         if args.command == "transfer-encode":
             result = transfer_encode(args.file)
+        elif args.command == "transfer-text":
+            result = transfer_text(args.file)
         elif args.command == "transfer-decode":
             result = transfer_decode(
                 args.base64_file, args.output, args.size, args.sha256
@@ -792,6 +845,18 @@ def main() -> None:
             }
         elif args.command == "pack":
             result = pack(args.workspace, args.snapshot, args.generation)
+        elif args.command == "json-pack":
+            import gws_json
+
+            result = gws_json.pack(args.workspace, args.snapshot, args.generation)
+        elif args.command == "json-link":
+            import gws_json
+
+            result = gws_json.link(args.fragment, args.next_json, args.index, args.output)
+        elif args.command == "json-prepare":
+            import gws_json
+
+            result = gws_json.prepare(args.snapshot, args.receipts, args.manifest)
         elif args.command == "prepare":
             result = prepare(args.snapshot, args.receipts, args.manifest)
         elif args.command == "verify":
