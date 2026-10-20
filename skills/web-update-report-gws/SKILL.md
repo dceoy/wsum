@@ -36,7 +36,8 @@ Claude. There is no new Drive API credential, CLI, Cloud Run or Apps Script.
   original** size and SHA-256. Never trust prose previews, truncated fields,
   or model-reconstructed data. Save decrypted credentials nowhere.
 - The last upload in each generation is `workspace-<generation>.json`.
-  Download and verify it by exact ID and verify all referenced objects
+  Download and verify it by exact ID; validate new object readbacks and
+  inherited references from a previously verified committed manifest
   before acknowledging durability. Stop on any missing ID, checksum or
   complete-listing failure; never silently revert to an older generation.
 - Model-mediated transfer/context limits **still apply** even to text. The
@@ -382,8 +383,18 @@ truncate or convert state into a monolithic archive.
 ### Persist after every state mutation
 
 1. Freeze workspace writes and re-list the bound workspace folder.
-   Run `next-generation` against the previously committed
-   `{name,id}` identity and stage the new JSON state:
+   Save the complete exact-ID listing as `LISTING`, and keep the previously
+   restored/committed identity in `EXPECTED` (JSON `{"name":"...","id":"..."}`
+   or `null` for genuine first-run initialization). Generate a unique,
+   monotonic timestamp before invoking the packer:
+
+   ```bash
+   python "$GWS_SKILL_DIR/scripts/gws.py" next-generation \
+     --snapshots-json "$LISTING" --expected-snapshot-json "$EXPECTED"
+   ```
+
+   Capture the command's returned JSON `generation` field into
+   `GENERATION` (not the whole stdout JSON). Then stage:
 
    ```bash
    python "$GWS_SKILL_DIR/scripts/gws.py" json-pack \
@@ -392,9 +403,15 @@ truncate or convert state into a monolithic archive.
    ```
 
 2. From `draft.json`, identify each unique external-object SHA-256.
-   If a previously verified generation references that exact content
-   hash, **reuse its complete exact-ID chunk chain**, after verifying
-   that it still exists and matches. No new upload is needed.
+   For an unchanged object already recorded in the **locally retained,
+   previously exact-ID-verified committed manifest**, reuse the exact
+   `head` and `chunks` reference without downloading its chunk chain.
+   The helper validates that the content SHA-256, original length, chunk
+   count and head agree with the prior committed manifest. Never reuse
+   a reference supplied solely by name/search results or an unverified
+   older manifest. Preserve the prior manifest readback path as evidence.
+   This assumes prior verified objects have not been overwritten remotely;
+   full remote verification is required again at restore and maintenance.
 3. For a new object, its staged fragments are under
    `$STAGED/objects/<sha256>/<four-digit-index>.txt`.
    Initialize scratch `NEXT_JSON` to literal `null`. For index
@@ -414,10 +431,18 @@ truncate or convert state into a monolithic archive.
    `size`/`sha256` from `json-link`. Only then overwrite scratch
    `NEXT_JSON` with the verified `{id,size,sha256}` of that chunk.
 
-4. For each object SHA (new or reused), construct a receipt with
-   `{"head":<head-ref>,"readbacks":{DriveID:localDecodedFile,...}}`.
-   Validate every existing reference by exact-ID download. Write a
-   `RECEIPTS` JSON map from content SHA-256 to the complete receipt.
+4. For each external-object SHA-256, construct exactly one receipt mode:
+
+   - **New object:** `{"head":<head-ref>,"readbacks":{DriveID:localDecodedFile,...}}`.
+     The files must be exact-ID downloads of every newly created chunk.
+   - **Reused object:** `{"head":<head-ref>,"previous_manifest":"/scratch/previous.json"}`.
+     This path must identify a previously restored/verified committed
+     manifest, already checked by its exact Drive ID. The helper checks
+     that the inherited content hash, size, chunk count and head match;
+     it does not re-download its chunk chain on a normal checkpoint.
+
+   Write `RECEIPTS` JSON keyed by source content SHA-256, including all
+   referenced objects, with no duplicate or unexpected keys.
    Run:
 
    ```bash
@@ -426,23 +451,38 @@ truncate or convert state into a monolithic archive.
      --manifest "$PREPARED_MANIFEST"
    ```
 
-   This verifies each source byte string against the entire compressed
-   object chain, and emits the small final state JSON.
+   This validates new objects against all their readbacks, and reused
+   objects against verified prior manifests and exact staged local hashes.
+   It emits the small final state JSON without re-downloading unchanged
+   chunks.
 
 5. Re-list the folder and run `next-generation` against the **unchanged
    previous expected** identity just before writing the manifest. Stop
    on stale identity. Upload `PREPARED_MANIFEST` with `transfer-text`
    to its immutable `workspace-<generation>.json` name **last**.
    Download the manifest by exact ID and verify original size/SHA-256.
-   Run `verify` with complete object readbacks and re-list; require
-   this manifest to be uniquely newest before acknowledging durability.
-6. Retain the three newest fully verified generations. Pass the
-   `{name,id,manifest,readbacks}` record for **every** generation to
-   `gws.py retention --generations "$GENERATIONS"`. Delete discarded
-   manifest IDs **first**, then unreferenced object chunk IDs; retained
-   manifests protect chunks even when shared across generations.
-   Re-list and revalidate the active identity before cleanup. Never
-   remove unknown/orphan files; never assume concurrent writers are safe.
+   Then verify its **new object readbacks and inherited committed refs**
+   without re-fetching unchanged chunks:
+
+   ```bash
+   python "$GWS_SKILL_DIR/scripts/gws.py" json-verify-commit \
+     --manifest "$MANIFEST_READBACK" --receipts "$RECEIPTS"
+   ```
+
+   Re-list; require this manifest to be uniquely newest before
+   acknowledging durability. Use `verify --readbacks` only for **full**
+   remote inspection/restore, not on every ordinary checkpoint.
+6. **Separate maintenance, not part of each state mutation.**
+   Periodically or on explicit cleanup, fully download and verify all
+   remaining generations. Pass the `{name,id,manifest,readbacks}`
+   record for **every** generation to
+   `gws.py retention --generations "$GENERATIONS"`.
+   Retain the newest three generations, delete discarded manifest IDs
+   **first**, then only unreferenced object chunk IDs. Shared objects
+   referenced by retained generations remain protected. Re-list and
+   revalidate the active identity before cleanup; never delete unknown
+   files. If a complete verified listing is too large for the connector,
+   skip cleanup safely rather than compromising an existing generation.
 
 A failed write leaves previously committed state valid; incomplete
 objects remain unreferenced and may be reconciled separately. An
