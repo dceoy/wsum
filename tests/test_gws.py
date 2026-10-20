@@ -1008,6 +1008,74 @@ def test_small_json_state_with_external_snapshots_restores_exact_bytes(
                 assert copied.stat().st_mtime_ns == path.stat().st_mtime_ns
 
 
+def test_checkpoint_needed_skips_unchanged_state_and_detects_mutations(
+    tmp_path: Path,
+) -> None:
+    ws = _json_workspace(tmp_path)
+    manifest, _, _, _ = _json_commit(ws, tmp_path, GENERATION)
+    assert gws.checkpoint_needed(ws, manifest) == {"changed": False}
+
+    # Staging files are excluded from checkpoints, just as in json_pack.
+    temporary = ws / "internal/gws/.tmp-staging"
+    temporary.write_text("discard me", encoding="utf-8")
+    assert gws.checkpoint_needed(ws, manifest) == {"changed": False}
+    temporary.unlink()
+
+    report = ws / "output/report/a.md"
+    original = report.read_bytes()
+    report.write_bytes(original.replace(b"Heading", b"Changed"))
+    assert gws.checkpoint_needed(ws, manifest) == {"changed": True}
+    report.write_bytes(original)
+    assert gws.checkpoint_needed(ws, manifest) == {"changed": False}
+
+    snapshot = ws / "internal/state/snapshots/source.txt"
+    stamp = snapshot.stat().st_mtime_ns
+    os.utime(snapshot, ns=(stamp + 1_000_000_000, stamp + 1_000_000_000))
+    assert gws.checkpoint_needed(ws, manifest) == {"changed": True}
+    os.utime(snapshot, ns=(stamp, stamp))
+    assert gws.checkpoint_needed(ws, manifest) == {"changed": False}
+
+    extra = ws / "internal/gws/added.json"
+    extra.write_text("{}", encoding="utf-8")
+    assert gws.checkpoint_needed(ws, manifest) == {"changed": True}
+    extra.unlink()
+    report.unlink()
+    assert gws.checkpoint_needed(ws, manifest) == {"changed": True}
+
+
+def test_checkpoint_needed_fails_closed_on_invalid_state(
+    tmp_path: Path,
+) -> None:
+    ws = _json_workspace(tmp_path)
+    manifest, _, _, _ = _json_commit(ws, tmp_path, GENERATION)
+    manifest.write_text("{}", encoding="utf-8")
+    with pytest.raises(gws.GwsError, match="invalid JSON state"):
+        gws.checkpoint_needed(ws, manifest)
+
+
+def test_checkpoint_needed_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ws = _json_workspace(tmp_path)
+    manifest, _, _, _ = _json_commit(ws, tmp_path, GENERATION)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gws.py",
+            "checkpoint-needed",
+            "--workspace",
+            str(ws),
+            "--manifest",
+            str(manifest),
+        ],
+    )
+    gws.main()
+    assert json.loads(capsys.readouterr().out) == {"changed": False}
+
+
 def test_json_prepare_rejects_corrupt_staged_chunks(tmp_path: Path) -> None:
     """A corrupt compressed staging fragment cannot be committed as new or reused."""
     ws = _json_workspace(tmp_path)
