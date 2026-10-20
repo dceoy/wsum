@@ -56,7 +56,7 @@ Output: <EXISTING_DEDICATED_DRIVE_FOLDER>
 
 The wrapper restores verified snapshots, validates the current target table, invokes the local workflow, checkpoints core operations, and delivers **completed** Markdown reports through Drive. Optional context can be inline or an explicit Google Doc/Drive Markdown `Context source:`; local Markdown paths are **not** supported by this wrapper.
 
-See the [GWS Skill](skills/web-update-report-gws/SKILL.md) and [Claude Code Routines runbook](docs/claude-code-routines.md) for folder binding, Base64 transport, exact-byte verification, recovery, and limits. **Live Cowork/Routines connector round trips remain unverified**; offline connector tests are not an operational guarantee.
+See the [GWS Skill](skills/web-update-report-gws/SKILL.md) and [Claude Code Routines runbook](docs/claude-code-routines.md) for folder binding, Base64 transport, exact-byte verification, recovery, and limits. New GWS snapshots are deterministic compressed archives transported as authenticated Base64 text chunk chains using the Drive connector's `textContent` field; older per-file snapshots can still be restored. Chunking avoids a single large upload but does not eliminate aggregate tool/context limits. **Live Cowork/Routines connector round trips remain unverified**; offline connector tests are not an operational guarantee.
 
 ## How it works
 
