@@ -230,3 +230,93 @@ def test_retention_preserves_shared_object_ids_and_legacy_restore(
     assert set(plan["retain"]) == {"new-manifest-1", "new-manifest-2", "new-manifest-3"}
     assert {"legacy-manifest", "new-manifest-0"} <= set(plan["delete"])
     assert not protected.intersection(plan["delete"])
+
+
+
+def test_reuse_checkpoint_skips_unchanged_chunk_downloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only changed objects need exact-ID chunk reads on a checkpoint."""
+    ws = _workspace(tmp_path)
+    first, old_reads, previous, _ = _commit(ws, tmp_path, "20261020T000000Z")
+    (ws / "internal/gws/delivery.json").write_text(
+        '{"reports":{"20261020T000000Z-abcdef01":"'
+        + "0" * 64
+        + '"},"version":1}'
+    )
+    staged = tmp_path / "stage-reused"
+    draft = gws.json_pack(ws, staged, "20261020T000001Z")
+    receipts = {
+        item["sha256"]: {
+            "head": previous[item["sha256"]]["head"],
+            "previous_manifest": str(first),
+        }
+        for item in draft["files"]
+        if "object" in item
+    }
+    receipts_path = tmp_path / "reused-receipts.json"
+    receipts_path.write_text(json.dumps(receipts))
+    second = tmp_path / "reused-manifest.json"
+
+    def forbid_chunk_reads(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("unchanged objects must not require chunk readbacks")
+
+    monkeypatch.setattr(gws, "_json_object_bytes", forbid_chunk_reads)
+    counts = gws.json_prepare(staged, receipts_path, second)
+    assert counts["new_objects"] == 0
+    assert counts["reused_objects"] == len(receipts)
+    check = gws.json_verify_commit(second, receipts_path)
+    assert check["reused_objects"] == len(receipts)
+
+    # Full restore still needs the previous exact-ID readbacks.
+    monkeypatch.undo()
+    restored = tmp_path / "reused-restored"
+    assert gws.restore(second, old_reads, restored)["generation"] == "20261020T000001Z"
+    assert (restored / "internal/state/snapshots/source.txt").read_bytes() == (
+        ws / "internal/state/snapshots/source.txt"
+    ).read_bytes()
+
+
+def test_reuse_rejects_unproven_reference(tmp_path: Path) -> None:
+    """Reject an object head that was not present in the previous commit."""
+    ws = _workspace(tmp_path)
+    first, _, previous, _ = _commit(ws, tmp_path, "20261020T000000Z")
+    stage = tmp_path / "stage-untrusted"
+    draft = gws.json_pack(ws, stage, "20261020T000001Z")
+    receipts = {
+        item["sha256"]: {
+            "head": {
+                **previous[item["sha256"]]["head"],
+                "id": "unrelated-id",
+            },
+            "previous_manifest": str(first),
+        }
+        for item in draft["files"]
+        if "object" in item
+    }
+    file = tmp_path / "untrusted-receipts.json"
+    file.write_text(json.dumps(receipts))
+    with pytest.raises(gws.GwsError, match="not in prior verified"):
+        gws.json_prepare(stage, file, tmp_path / "should-not-commit.json")
+
+
+def test_inline_state_rejects_control_bytes_even_if_digest_matches(
+    tmp_path: Path,
+) -> None:
+    """An attacker-supplied inline NUL must fail before workspace restore."""
+    ws = _workspace(tmp_path)
+    manifest, maps, _, _ = _commit(ws, tmp_path, "20261020T000000Z")
+    state = json.loads(manifest.read_text())
+    inline = next(item for item in state["files"] if "text" in item)
+    bad = '{"control":"\\u0000"}'
+    inline["text"] = bad
+    data = bad.encode()
+    inline["size"] = len(data)
+    import hashlib
+
+    inline["sha256"] = hashlib.sha256(data).hexdigest()
+    altered = tmp_path / "altered-manifest.json"
+    altered.write_text(json.dumps(state))
+    with pytest.raises(gws.GwsError, match="inline state mismatch"):
+        gws.verify(altered, maps)
+    assert not (tmp_path / "untrusted-restore").exists()
