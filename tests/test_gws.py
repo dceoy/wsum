@@ -1097,7 +1097,7 @@ def test_json_prepare_rejects_corrupt_staged_chunks(tmp_path: Path) -> None:
     )
     chunk = next(stage.glob("objects/*/0000.txt"))
     chunk.write_text("AAAA", encoding="ascii")
-    with pytest.raises(gws.GwsError, match="compressed object|SHA-256 mismatch"):
+    with pytest.raises(gws.GwsError, match=r"compressed object|SHA-256 mismatch"):
         gws.json_prepare(stage, receipts, tmp_path / "invalid-new.json")
     assert not (tmp_path / "invalid-new.json").exists()
 
@@ -1114,7 +1114,7 @@ def test_json_prepare_rejects_corrupt_staged_chunks(tmp_path: Path) -> None:
     reused_file = tmp_path / "reused-receipts.json"
     reused_file.write_text(json.dumps(reused_receipts))
     next(reused.glob("objects/*/0000.txt")).write_text("AAAA", encoding="ascii")
-    with pytest.raises(gws.GwsError, match="compressed object|SHA-256 mismatch"):
+    with pytest.raises(gws.GwsError, match=r"compressed object|SHA-256 mismatch"):
         gws.json_prepare(reused, reused_file, tmp_path / "invalid-reused.json")
     assert not (tmp_path / "invalid-reused.json").exists()
 

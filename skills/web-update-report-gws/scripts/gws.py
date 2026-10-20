@@ -645,6 +645,7 @@ def restore(
         precision_error="restored snapshot identity precision is unsupported",
     )
 
+
 def retention(generations: Path) -> dict[str, list[str]]:
     """Plan deletion only after verifying all generations in a complete listing.
 
@@ -1172,6 +1173,7 @@ def json_restore(
         operation="json_restore",
         precision_error="restored snapshot mtime precision mismatch",
     )
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
