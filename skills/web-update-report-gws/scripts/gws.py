@@ -87,7 +87,11 @@ def transfer_encode(path: Path) -> dict[str, str | int]:
 def transfer_text(path: Path) -> dict[str, str | int]:
     """Relay exact local UTF-8 contents to Drive create_file.textContent."""
     content = _text_bytes(path)
-    return {"textContent": content.decode("utf-8"), "sha256": _digest(content), "size": len(content)}
+    return {
+        "textContent": content.decode("utf-8"),
+        "sha256": _digest(content),
+        "size": len(content),
+    }
 
 
 def transfer_decode(
@@ -852,7 +856,9 @@ def main() -> None:
         elif args.command == "json-link":
             import gws_json
 
-            result = gws_json.link(args.fragment, args.next_json, args.index, args.output)
+            result = gws_json.link(
+                args.fragment, args.next_json, args.index, args.output
+            )
         elif args.command == "json-prepare":
             import gws_json
 

@@ -346,7 +346,7 @@ Example (shortened IDs/hashes are only illustrative):
       "mtime_ns": 1700000000123456789,
       "object": {
         "chunks": 4,
-        "head": {"id": "<Drive-ID>", "size": 12000, "sha256": "<sha256>"}
+        "head": { "id": "<Drive-ID>", "size": 12000, "sha256": "<sha256>" }
       }
     }
   ]
@@ -413,6 +413,7 @@ truncate or convert state into a monolithic archive.
    exact ID and validate with §transfer-decode§ against the original
    §size§/§sha256§ from §json-link§. Only then overwrite scratch
    §NEXT_JSON§ with the verified §{id,size,sha256}§ of that chunk.
+
 4. For each object SHA (new or reused), construct a receipt with
    §{"head":<head-ref>,"readbacks":{DriveID:localDecodedFile,...}}§.
    Validate every existing reference by exact-ID download. Write a
@@ -427,6 +428,7 @@ truncate or convert state into a monolithic archive.
 
    This verifies each source byte string against the entire compressed
    object chain, and emits the small final state JSON.
+
 5. Re-list the folder and run `next-generation` against the **unchanged
    previous expected** identity just before writing the manifest. Stop
    on stale identity. Upload `PREPARED_MANIFEST` with `transfer-text`

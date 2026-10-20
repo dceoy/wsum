@@ -47,20 +47,21 @@ def _commit(
         for index in reversed(range(count)):
             chunk_path = tmp / f"{generation}-{digest}-{index}.txt"
             meta = gws_json.link(
-                staged / "objects" / digest / f"{index:04d}.txt",
-                nxt, index, chunk_path
+                staged / "objects" / digest / f"{index:04d}.txt", nxt, index, chunk_path
             )
             relay = gws.transfer_text(chunk_path)
             assert relay["textContent"] == chunk_path.read_text()
             assert "base64Content" not in relay
             file_id = f"id-{generation}-{digest[:8]}-{index}"
             readbacks[file_id] = str(chunk_path)
-            nxt.write_text(json.dumps({
-                "id": file_id, "size": meta["size"], "sha256": meta["sha256"]
-            }))
-        objects[digest] = {
-            "head": json.loads(nxt.read_text()), "readbacks": readbacks
-        }
+            nxt.write_text(
+                json.dumps({
+                    "id": file_id,
+                    "size": meta["size"],
+                    "sha256": meta["sha256"],
+                })
+            )
+        objects[digest] = {"head": json.loads(nxt.read_text()), "readbacks": readbacks}
     receipts = tmp / ("receipts-" + generation + ".json")
     # Only entries referenced by this checkpoint; old objects are still reusable.
     wanted = {item["sha256"] for item in draft["files"] if "object" in item}
@@ -81,7 +82,9 @@ def test_small_json_state_with_external_snapshots_restores_exact_bytes(
     state = json.loads(first.read_text())
     assert first.stat().st_size < gws_json.MAX_STATE_BYTES
     assert "text" in next(x for x in state["files"] if x["path"].endswith("a.md"))
-    assert "object" in next(x for x in state["files"] if x["path"].endswith("source.txt"))
+    assert "object" in next(
+        x for x in state["files"] if x["path"].endswith("source.txt")
+    )
     other = tmp_path / "second-stage"
     gws_json.pack(ws, other, generation)
     assert (stage / "draft.json").read_bytes() == (other / "draft.json").read_bytes()
@@ -108,7 +111,10 @@ def test_reuse_unchanged_objects_between_generations(tmp_path: Path) -> None:
     }
     assert gws.verify(b, b_map)["generation"] == "20261020T000001Z"
     rows = []
-    for i, (manifest, maps) in enumerate(((a, tmp_path / "receipts-20261020T000000Z.json"), (b, b_map))):
+    for i, (manifest, maps) in enumerate((
+        (a, tmp_path / "receipts-20261020T000000Z.json"),
+        (b, b_map),
+    )):
         generation = json.loads(manifest.read_text())["generation"]
         rows.append({
             "name": f"workspace-{generation}.json",

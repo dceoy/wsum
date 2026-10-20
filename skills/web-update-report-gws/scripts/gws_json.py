@@ -77,8 +77,10 @@ def _state(path: Path, *, draft: bool = False) -> dict[str, typing.Any]:
             raise gws.GwsError("invalid JSON state file")
         item = typing.cast("dict[str, typing.Any]", raw_item)
         if (
-            set(item) - {"mtime_ns"} != {"path", "size", "sha256", "text"}
-            and set(item) - {"mtime_ns"} != {"path", "size", "sha256", "object"}
+            (
+                set(item) - {"mtime_ns"} != {"path", "size", "sha256", "text"}
+                and set(item) - {"mtime_ns"} != {"path", "size", "sha256", "object"}
+            )
             or not isinstance(item.get("path"), str)
             or not gws._safe_path(item["path"])
             or item["path"] in names
@@ -86,11 +88,14 @@ def _state(path: Path, *, draft: bool = False) -> dict[str, typing.Any]:
             or not 0 <= item["size"] <= gws.MAX_ENTRY
             or not isinstance(item.get("sha256"), str)
             or not gws.SHA_RE.fullmatch(item["sha256"])
-            or ("mtime_ns" in item and (
-                type(item["mtime_ns"]) is not int
-                or not 0 <= item["mtime_ns"] <= 2**63 - 1
-                or not item["path"].startswith("internal/state/snapshots/")
-            ))
+            or (
+                "mtime_ns" in item
+                and (
+                    type(item["mtime_ns"]) is not int
+                    or not 0 <= item["mtime_ns"] <= 2**63 - 1
+                    or not item["path"].startswith("internal/state/snapshots/")
+                )
+            )
         ):
             raise gws.GwsError("unsafe, duplicate or malformed JSON state file")
         names.add(item["path"])
@@ -148,7 +153,9 @@ def pack(workspace: Path, snapshot: Path, generation: str) -> dict[str, typing.A
                 raise gws.GwsError("workspace exceeds size limit")
             digest = gws._digest(content)
             item: dict[str, typing.Any] = {
-                "path": name, "size": len(content), "sha256": digest
+                "path": name,
+                "size": len(content),
+                "sha256": digest,
             }
             if name.startswith("internal/state/snapshots/"):
                 item["mtime_ns"] = path.stat().st_mtime_ns
@@ -171,7 +178,9 @@ def pack(workspace: Path, snapshot: Path, generation: str) -> dict[str, typing.A
                     if not 1 <= len(fragments) <= MAX_CHUNKS:
                         raise gws.GwsError("object exceeds chunk limit")
                     for index, part in enumerate(fragments):
-                        (object_dir / f"{index:04d}.txt").write_text(part, encoding="ascii")
+                        (object_dir / f"{index:04d}.txt").write_text(
+                            part, encoding="ascii"
+                        )
                 count = len(list(object_dir.glob("[0-9][0-9][0-9][0-9].txt")))
                 item["object"] = {"chunks": count}
             files.append(item)
@@ -188,12 +197,17 @@ def pack(workspace: Path, snapshot: Path, generation: str) -> dict[str, typing.A
             shutil.rmtree(stage)
 
 
-def link(fragment: Path, next_json: Path, index: int, output: Path) -> dict[str, typing.Any]:
+def link(
+    fragment: Path, next_json: Path, index: int, output: Path
+) -> dict[str, typing.Any]:
     """Build one immutable JSON text fragment, tail to head."""
     if index < 0 or output.exists() or output.is_symlink():
         raise gws.GwsError("invalid or existing linked chunk destination")
     data = gws._text_bytes(fragment, CHUNK_CHARS).decode("ascii")
-    if not data or not all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" for c in data):
+    if not data or not all(
+        c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+        for c in data
+    ):
         raise gws.GwsError("invalid encoded object fragment")
     successor = _load(next_json, MAX_LINK_BYTES)
     if successor is not None:
@@ -281,9 +295,7 @@ def prepare(snapshot: Path, receipts: Path, destination: Path) -> dict[str, typi
     """Validate new/reused objects before publishing the immutable state JSON."""
     state = _state(snapshot / "draft.json", draft=True)
     uploads = _receipts(receipts)
-    wanted = {
-        item["sha256"] for item in state["files"] if "object" in item
-    }
+    wanted = {item["sha256"] for item in state["files"] if "object" in item}
     if set(uploads) != wanted:
         raise gws.GwsError("missing or unexpected object receipts")
     for item in state["files"]:
@@ -313,9 +325,7 @@ def _verified(
 ) -> tuple[dict[str, typing.Any], dict[str, bytes], set[str]]:
     state = _state(manifest)
     all_maps = _receipts(readbacks)
-    wanted = {
-        item["sha256"] for item in state["files"] if "object" in item
-    }
+    wanted = {item["sha256"] for item in state["files"] if "object" in item}
     if set(all_maps) != wanted:
         raise gws.GwsError("incomplete object readback map")
     contents: dict[str, bytes] = {}
