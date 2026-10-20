@@ -621,6 +621,34 @@ def _json_state(path: Path, *, draft: bool = False) -> dict[str, typing.Any]:
     return state
 
 
+def checkpoint_needed(workspace: Path, manifest: Path) -> dict[str, bool]:
+    """Compare current workspace bytes and snapshot mtimes with committed state."""
+    committed = _json_state(manifest)
+    saved = {item["path"]: item for item in committed["files"]}
+    current = _workspace_files(workspace)
+    if len(current) != len(saved):
+        return {"changed": True}
+    total = 0
+    for name, path in current:
+        item = saved.get(name)
+        if item is None:
+            return {"changed": True}
+        content = _text_bytes(path)
+        total += len(content)
+        if total > MAX_TOTAL:
+            raise GwsError("workspace exceeds size limit")
+        if (
+            len(content) != item["size"]
+            or _digest(content) != item["sha256"]
+            or (
+                name.startswith("internal/state/snapshots/")
+                and path.stat().st_mtime_ns != item.get("mtime_ns")
+            )
+        ):
+            return {"changed": True}
+    return {"changed": False}
+
+
 def json_pack(
     workspace: Path, snapshot: Path, generation: str
 ) -> dict[str, typing.Any]:
@@ -981,6 +1009,9 @@ def _parser() -> argparse.ArgumentParser:
     p = commands.add_parser("next-generation")
     p.add_argument("--snapshots-json", type=Path, required=True)
     p.add_argument("--expected-snapshot-json", type=Path, required=True)
+    p = commands.add_parser("checkpoint-needed")
+    p.add_argument("--workspace", type=Path, required=True)
+    p.add_argument("--manifest", type=Path, required=True)
     p = commands.add_parser("json-pack")
     p.add_argument("--workspace", type=Path, required=True)
     p.add_argument("--snapshot", type=Path, required=True)
@@ -1062,6 +1093,8 @@ def main() -> None:
                 "generation": generation,
                 "filename": f"workspace-{generation}.json",
             }
+        elif args.command == "checkpoint-needed":
+            result = checkpoint_needed(args.workspace, args.manifest)
         elif args.command == "json-pack":
             result = json_pack(args.workspace, args.snapshot, args.generation)
         elif args.command == "json-link":
