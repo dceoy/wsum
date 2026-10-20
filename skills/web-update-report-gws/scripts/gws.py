@@ -626,9 +626,12 @@ def _manifest_format(path: Path) -> str:
     value = json.loads(
         _text_bytes(path, MAX_MANIFEST), object_pairs_hook=_unique_object
     )
-    if not isinstance(value, dict) or not isinstance(value.get("format"), str):
+    if not isinstance(value, dict):
         raise GwsError("invalid manifest format")
-    return value["format"]
+    record = typing.cast("dict[str, typing.Any]", value)
+    if not isinstance(record.get("format"), str):
+        raise GwsError("invalid manifest format")
+    return typing.cast("str", record["format"])
 
 
 def retention(generations: Path) -> dict[str, list[str]]:
