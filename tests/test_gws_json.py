@@ -316,3 +316,20 @@ def test_inline_state_rejects_control_bytes_even_if_digest_matches(
     with pytest.raises(gws.GwsError, match="inline state mismatch"):
         gws.verify(altered, maps)
     assert not (tmp_path / "untrusted-restore").exists()
+
+
+def test_commit_verify_rejects_replaced_head(tmp_path: Path) -> None:
+    """Lightweight post-upload validation must bind to the prepared reference."""
+    ws = _workspace(tmp_path)
+    manifest, receipts_path, receipts, _ = _commit(
+        ws, tmp_path, "20261020T000000Z"
+    )
+    forged = json.loads(manifest.read_text())
+    entry = next(item for item in forged["files"] if "object" in item)
+    original = receipts[entry["sha256"]]["head"]["id"]
+    entry["object"]["head"]["id"] = "attacker-controlled-id"
+    assert original != entry["object"]["head"]["id"]
+    altered = tmp_path / "altered-head-manifest.json"
+    altered.write_text(json.dumps(forged))
+    with pytest.raises(gws.GwsError, match="reference changed"):
+        gws.json_verify_commit(altered, receipts_path)
