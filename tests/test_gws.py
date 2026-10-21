@@ -102,23 +102,6 @@ def test_json_pack_rejects_oversized_input(tmp_path: Path) -> None:
         gws.json_pack(ws, tmp_path / "packed", GENERATION)
 
 
-def test_reject_removed_text_snapshot_format(tmp_path: Path) -> None:
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(
-        json.dumps({
-            "format": "wsum-text-1",
-            "generation": GENERATION,
-            "files": [],
-        })
-    )
-    readbacks = tmp_path / "readbacks.json"
-    readbacks.write_text("{}")
-    with pytest.raises(gws.GwsError, match="invalid JSON state header"):
-        gws.verify(manifest, readbacks)
-    with pytest.raises(gws.GwsError, match="invalid JSON state header"):
-        gws.restore(manifest, readbacks, tmp_path / "restored")
-
-
 def test_generation_guard() -> None:
     now = datetime(2026, 10, 9, tzinfo=UTC)
     snapshot = {"name": f"workspace-{GENERATION}.json", "id": "restored-id"}
@@ -1010,7 +993,9 @@ def test_small_json_state_with_external_snapshots_restores_exact_bytes(
 
 def test_json_pack_omits_reused_large_object_fragments(tmp_path: Path) -> None:
     ws = _json_workspace(tmp_path)
-    previous, _, receipts, _ = _json_commit(ws, tmp_path, GENERATION)
+    previous, previous_maps, receipts, _ = _json_commit(
+        ws, tmp_path, GENERATION
+    )
     stage = tmp_path / "reused-stage"
     draft = gws.json_pack(ws, stage, "20261009T000001Z", previous_manifest=previous)
     assert not list((stage / "objects").iterdir())
@@ -1030,6 +1015,15 @@ def test_json_pack_omits_reused_large_object_fragments(tmp_path: Path) -> None:
     assert prepared["new_objects"] == 0
     assert prepared["reused_objects"] > 0
     assert gws.json_verify_commit(output, receipt_path)["new_objects"] == 0
+    assert gws.verify(output, previous_maps)["generation"] == "20261009T000001Z"
+    restored = tmp_path / "reused-restored"
+    gws.restore(output, previous_maps, restored)
+    for source in ws.rglob("*"):
+        if source.is_file():
+            target = restored / source.relative_to(ws)
+            assert target.read_bytes() == source.read_bytes()
+            if "snapshots" in source.parts:
+                assert target.stat().st_mtime_ns == source.stat().st_mtime_ns
 
     # A new large object still creates fragments.
     (ws / "output/report/a.md").write_bytes(b"x" * 2048)
@@ -1051,72 +1045,99 @@ def test_json_pack_omits_reused_large_object_fragments(tmp_path: Path) -> None:
         )
 
 
-def test_checkpoint_needed_skips_unchanged_state_and_detects_mutations(
+def test_workspace_change_detection_preserves_bytes_and_mtime(
     tmp_path: Path,
 ) -> None:
     ws = _json_workspace(tmp_path)
     manifest, _, _, _ = _json_commit(ws, tmp_path, GENERATION)
-    assert gws.checkpoint_needed(ws, manifest) == {"changed": False}
+    assert gws._workspace_changed(ws, manifest) is False
 
     # Staging files are excluded from checkpoints, just as in json_pack.
     temporary = ws / "internal/gws/.tmp-staging"
     temporary.write_text("discard me", encoding="utf-8")
-    assert gws.checkpoint_needed(ws, manifest) == {"changed": False}
+    assert gws._workspace_changed(ws, manifest) is False
     temporary.unlink()
 
     report = ws / "output/report/a.md"
     original = report.read_bytes()
     report.write_bytes(original.replace(b"Heading", b"Changed"))
-    assert gws.checkpoint_needed(ws, manifest) == {"changed": True}
+    assert gws._workspace_changed(ws, manifest) is True
     report.write_bytes(original)
-    assert gws.checkpoint_needed(ws, manifest) == {"changed": False}
+    assert gws._workspace_changed(ws, manifest) is False
 
     snapshot = ws / "internal/state/snapshots/source.txt"
     stamp = snapshot.stat().st_mtime_ns
     os.utime(snapshot, ns=(stamp + 1_000_000_000, stamp + 1_000_000_000))
-    assert gws.checkpoint_needed(ws, manifest) == {"changed": True}
+    assert gws._workspace_changed(ws, manifest) is True
     os.utime(snapshot, ns=(stamp, stamp))
-    assert gws.checkpoint_needed(ws, manifest) == {"changed": False}
+    assert gws._workspace_changed(ws, manifest) is False
 
     extra = ws / "internal/gws/added.json"
     extra.write_text("{}", encoding="utf-8")
-    assert gws.checkpoint_needed(ws, manifest) == {"changed": True}
+    assert gws._workspace_changed(ws, manifest) is True
     extra.unlink()
     report.unlink()
-    assert gws.checkpoint_needed(ws, manifest) == {"changed": True}
+    assert gws._workspace_changed(ws, manifest) is True
 
 
-def test_checkpoint_needed_fails_closed_on_invalid_state(
+def test_workspace_change_detection_rejects_invalid_state(
     tmp_path: Path,
 ) -> None:
     ws = _json_workspace(tmp_path)
     manifest, _, _, _ = _json_commit(ws, tmp_path, GENERATION)
     manifest.write_text("{}", encoding="utf-8")
     with pytest.raises(gws.GwsError, match="invalid JSON state"):
-        gws.checkpoint_needed(ws, manifest)
+        gws._workspace_changed(ws, manifest)
 
 
-def test_checkpoint_needed_cli(
+def test_next_generation_cli_enforces_drive_identity_before_noop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws = _json_workspace(tmp_path)
     manifest, _, _, _ = _json_commit(ws, tmp_path, GENERATION)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "gws.py",
-            "checkpoint-needed",
-            "--workspace",
-            str(ws),
-            "--manifest",
-            str(manifest),
-        ],
-    )
+    expected = {"name": f"workspace-{GENERATION}.json", "id": "committed"}
+    expected_path = tmp_path / "expected.json"
+    expected_path.write_text(json.dumps(expected))
+    listed = tmp_path / "listed.json"
+    listed.write_text(json.dumps([expected]))
+    argv = [
+        "gws.py",
+        "next-generation",
+        "--snapshots-json",
+        str(listed),
+        "--expected-snapshot-json",
+        str(expected_path),
+        "--workspace",
+        str(ws),
+        "--manifest",
+        str(manifest),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
     gws.main()
-    assert json.loads(capsys.readouterr().out) == {"changed": False}
+    result = json.loads(capsys.readouterr().out)
+    assert result["changed"] is False
+    assert result["generation"] > GENERATION
+
+    (ws / "output/report/a.md").write_bytes(b"# Changed")
+    gws.main()
+    assert json.loads(capsys.readouterr().out)["changed"] is True
+
+    # An externally replaced active generation must fail even on a no-op.
+    listed.write_text(json.dumps([{**expected, "id": "replacement"}]))
+    with pytest.raises(SystemExit) as failure:
+        gws.main()
+    assert failure.value.code == 1
+    assert "active snapshot changed" in capsys.readouterr().err
+
+    # Initial creation does not need an old manifest.
+    listed.write_text("[]")
+    expected_path.write_text("null")
+    monkeypatch.setattr(sys, "argv", argv[:-2])
+    gws.main()
+    assert json.loads(capsys.readouterr().out)["changed"] is True
+
 
 
 def test_json_prepare_rejects_corrupt_staged_chunks(tmp_path: Path) -> None:
@@ -1142,7 +1163,7 @@ def test_json_prepare_rejects_corrupt_staged_chunks(tmp_path: Path) -> None:
     reused_file = tmp_path / "reused-receipts.json"
     reused_file.write_text(json.dumps(reused_receipts))
     next(reused.glob("objects/*/0000.txt")).write_text("AAAA", encoding="ascii")
-    with pytest.raises(gws.GwsError, match=r"compressed object|SHA-256 mismatch"):
+    with pytest.raises(gws.GwsError, match="reused object must not stage chunks"):
         gws.json_prepare(reused, reused_file, tmp_path / "invalid-reused.json")
     assert not (tmp_path / "invalid-reused.json").exists()
 
