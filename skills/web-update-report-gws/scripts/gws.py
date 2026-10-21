@@ -621,18 +621,18 @@ def _json_state(path: Path, *, draft: bool = False) -> dict[str, typing.Any]:
     return state
 
 
-def checkpoint_needed(workspace: Path, manifest: Path) -> dict[str, bool]:
-    """Compare current workspace bytes and snapshot mtimes with committed state."""
+def _workspace_changed(workspace: Path, manifest: Path) -> bool:
+    """Detect durable changes against the verified committed state."""
     committed = _json_state(manifest)
     saved = {item["path"]: item for item in committed["files"]}
     current = _workspace_files(workspace)
     if len(current) != len(saved):
-        return {"changed": True}
+        return True
     total = 0
     for name, path in current:
         item = saved.get(name)
         if item is None:
-            return {"changed": True}
+            return True
         content = _text_bytes(path)
         total += len(content)
         if total > MAX_TOTAL:
@@ -645,8 +645,8 @@ def checkpoint_needed(workspace: Path, manifest: Path) -> dict[str, bool]:
                 and path.stat().st_mtime_ns != item.get("mtime_ns")
             )
         ):
-            return {"changed": True}
-    return {"changed": False}
+            return True
+    return False
 
 
 def _stage_object_chunks(path: Path, content: bytes) -> int:
@@ -1031,9 +1031,8 @@ def _parser() -> argparse.ArgumentParser:
     p = commands.add_parser("next-generation")
     p.add_argument("--snapshots-json", type=Path, required=True)
     p.add_argument("--expected-snapshot-json", type=Path, required=True)
-    p = commands.add_parser("checkpoint-needed")
-    p.add_argument("--workspace", type=Path, required=True)
-    p.add_argument("--manifest", type=Path, required=True)
+    p.add_argument("--workspace", type=Path)
+    p.add_argument("--manifest", type=Path)
     p = commands.add_parser("json-pack")
     p.add_argument("--workspace", type=Path, required=True)
     p.add_argument("--snapshot", type=Path, required=True)
@@ -1116,8 +1115,14 @@ def main() -> None:
                 "generation": generation,
                 "filename": f"workspace-{generation}.json",
             }
-        elif args.command == "checkpoint-needed":
-            result = checkpoint_needed(args.workspace, args.manifest)
+            if args.workspace is None:
+                if args.manifest is not None:
+                    raise GwsError("--manifest requires --workspace")
+            else:
+                result["changed"] = (
+                    args.manifest is None
+                    or _workspace_changed(args.workspace, args.manifest)
+                )
         elif args.command == "json-pack":
             result = json_pack(
                 args.workspace,
