@@ -1056,6 +1056,29 @@ def test_json_pack_omits_reused_large_object_fragments(tmp_path: Path) -> None:
     assert sum("object" in item for item in changed["files"]) > len(receipt_map)
     assert len(list((next_stage / "objects").iterdir())) == 1
 
+    # Two different files with the same new digest stage one chunk chain.
+    (ws / "output/report/duplicate1.md").write_bytes(b"z" * 2048)
+    (ws / "output/report/duplicate2.md").write_bytes(b"z" * 2048)
+    deduplicated = tmp_path / "deduplicated-stage"
+    gws.json_pack(
+        ws, deduplicated, "20261009T000003Z", previous_manifest=previous
+    )
+    assert len(list((deduplicated / "objects").iterdir())) == 2
+
+    # An ambiguous previous digest/chunk-count mapping is rejected.
+    conflicting = tmp_path / "conflicting-previous.json"
+    prior = json.loads(previous.read_text())
+    original = next(item for item in prior["files"] if "object" in item)
+    duplicate = {**original, "path": "internal/state/snapshots/other.txt"}
+    duplicate["object"] = {**original["object"], "chunks": original["object"]["chunks"] + 1}
+    prior["files"].append(duplicate)
+    conflicting.write_text(json.dumps(prior))
+    with pytest.raises(gws.GwsError, match="conflicting prior object"):
+        gws.json_pack(
+            ws, tmp_path / "conflict-stage", "20261009T000004Z",
+            previous_manifest=conflicting,
+        )
+
     invalid = tmp_path / "invalid-previous.json"
     invalid.write_text("{}")
     with pytest.raises(gws.GwsError, match="invalid JSON state"):
