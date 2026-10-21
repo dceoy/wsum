@@ -1105,7 +1105,7 @@ def main() -> None:
                 datetime.now(UTC),
                 json.loads(args.expected_snapshot_json.read_text()),
             )
-            result = {
+            generation_info: dict[str, str | bool] = {
                 "generation": generation,
                 "filename": f"workspace-{generation}.json",
             }
@@ -1113,10 +1113,11 @@ def main() -> None:
                 if args.manifest is not None:
                     raise GwsError("--manifest requires --workspace")
             else:
-                result["changed"] = (
+                generation_info["changed"] = (
                     args.manifest is None
                     or _workspace_changed(args.workspace, args.manifest)
                 )
+            result = generation_info
         elif args.command == "json-pack":
             result = json_pack(
                 args.workspace,
