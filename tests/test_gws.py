@@ -1114,6 +1114,10 @@ def test_workspace_change_detection_preserves_bytes_and_mtime(
     assert gws._workspace_changed(ws, manifest) is True
     report.write_bytes(original)
     assert gws._workspace_changed(ws, manifest) is False
+    renamed = report.with_name("renamed.md")
+    report.rename(renamed)
+    assert gws._workspace_changed(ws, manifest) is True
+    renamed.rename(report)
 
     snapshot = ws / "internal/state/snapshots/source.txt"
     stamp = snapshot.stat().st_mtime_ns
