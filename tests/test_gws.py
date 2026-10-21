@@ -1070,12 +1070,17 @@ def test_json_pack_omits_reused_large_object_fragments(tmp_path: Path) -> None:
     prior = json.loads(previous.read_text())
     original = next(item for item in prior["files"] if "object" in item)
     duplicate = {**original, "path": "internal/state/snapshots/other.txt"}
-    duplicate["object"] = {**original["object"], "chunks": original["object"]["chunks"] + 1}
+    duplicate["object"] = {
+        **original["object"],
+        "chunks": original["object"]["chunks"] + 1,
+    }
     prior["files"].append(duplicate)
     conflicting.write_text(json.dumps(prior))
     with pytest.raises(gws.GwsError, match="conflicting prior object"):
         gws.json_pack(
-            ws, tmp_path / "conflict-stage", "20261009T000004Z",
+            ws,
+            tmp_path / "conflict-stage",
+            "20261009T000004Z",
             previous_manifest=conflicting,
         )
 
