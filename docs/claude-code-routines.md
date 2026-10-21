@@ -109,7 +109,7 @@ context, credentials and tokens out of persisted state.
 
 ## Redundant checkpoint elimination
 
-On every core persistence handoff, use the GWS helper `checkpoint-needed` with the current workspace and the most recent verified committed manifest. Only skip creation of a new generation when it returns `{"changed": false}` **and** a fresh Drive folder listing passes the existing `next-generation` active-identity check against the expected committed manifest (discard the proposed generation). This also covers read-only calls that did not produce recovery writes. Always checkpoint a fresh workspace with no committed manifest, and stop on comparison errors. This optimization does not remove pending reviews, reports, evidence, or any persisted input/output files.
+For each persistence handoff, re-list the Drive workspace and call `next-generation` with `--workspace` and the most recent verified `--manifest` (omit the manifest on first creation). This single preflight checks the Drive active identity and returns `changed`. A false result skips staging and upload; stale identity and invalid state always fail closed. Core pending reviews, reports, evidence, and durable file paths remain unchanged.
 
 ## Reusing verified content objects during staging
 
