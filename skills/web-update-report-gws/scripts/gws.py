@@ -628,15 +628,11 @@ def _workspace_changed(workspace: Path, manifest: Path) -> bool:
     current = _workspace_files(workspace)
     if len(current) != len(saved):
         return True
-    total = 0
     for name, path in current:
         item = saved.get(name)
         if item is None:
             return True
         content = _text_bytes(path)
-        total += len(content)
-        if total > MAX_TOTAL:
-            raise GwsError("workspace exceeds size limit")
         if (
             len(content) != item["size"]
             or _digest(content) != item["sha256"]
