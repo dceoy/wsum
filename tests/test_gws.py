@@ -579,6 +579,28 @@ def test_json_commands_cli(
     assert json.loads(capsys.readouterr().out)["format"] == gws.JSON_FORMAT
 
     manifest, maps, _, _ = _json_commit(ws, tmp_path, "20261009T000001Z")
+    # The CLI accepts verified prior state without recreating large object chunks.
+    reused_stage = tmp_path / "cli-reused-stage"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gws.py",
+            "json-pack",
+            "--workspace",
+            str(ws),
+            "--snapshot",
+            str(reused_stage),
+            "--generation",
+            "20261009T000002Z",
+            "--previous-manifest",
+            str(manifest),
+        ],
+    )
+    gws.main()
+    assert json.loads(capsys.readouterr().out)["generation"] == "20261009T000002Z"
+    assert not list((reused_stage / "objects").iterdir())
+
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1125,6 +1147,7 @@ def test_next_generation_cli_enforces_drive_identity_before_noop(
     assert json.loads(capsys.readouterr().out)["changed"] is True
 
     # An externally replaced active generation must fail even on a no-op.
+    (ws / "output/report/a.md").write_bytes(b"# Heading\r\n")
     listed.write_text(json.dumps([{**expected, "id": "replacement"}]))
     with pytest.raises(SystemExit) as failure:
         gws.main()
@@ -1138,6 +1161,17 @@ def test_next_generation_cli_enforces_drive_identity_before_noop(
     gws.main()
     assert json.loads(capsys.readouterr().out)["changed"] is True
 
+    # The conflict guard also works without the workspace optimization.
+    monkeypatch.setattr(sys, "argv", argv[:-4])
+    gws.main()
+    assert "changed" not in json.loads(capsys.readouterr().out)
+
+    # A manifest without its required workspace argument is rejected.
+    monkeypatch.setattr(sys, "argv", [*argv[:-4], "--manifest", str(manifest)])
+    with pytest.raises(SystemExit) as invalid:
+        gws.main()
+    assert invalid.value.code == 1
+    assert "--manifest requires --workspace" in capsys.readouterr().err
 
 
 def test_json_prepare_rejects_corrupt_staged_chunks(tmp_path: Path) -> None:
