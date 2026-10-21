@@ -1295,7 +1295,9 @@ def test_reuse_checkpoint_skips_unchanged_chunk_downloads(
         '{"reports":{"20261020T000000Z-abcdef01":"' + "0" * 64 + '"},"version":1}'
     )
     staged = tmp_path / "stage-reused"
-    draft = gws.json_pack(ws, staged, "20261020T000001Z")
+    draft = gws.json_pack(
+        ws, staged, "20261020T000001Z", previous_manifest=first
+    )
     receipts = {
         item["sha256"]: {
             "head": previous[item["sha256"]]["head"],
@@ -1332,7 +1334,9 @@ def test_reuse_rejects_unproven_reference(tmp_path: Path) -> None:
     ws = _json_workspace(tmp_path)
     first, _, previous, _ = _json_commit(ws, tmp_path, "20261020T000000Z")
     stage = tmp_path / "stage-untrusted"
-    draft = gws.json_pack(ws, stage, "20261020T000001Z")
+    draft = gws.json_pack(
+        ws, stage, "20261020T000001Z", previous_manifest=first
+    )
     receipts = {
         item["sha256"]: {
             "head": {
