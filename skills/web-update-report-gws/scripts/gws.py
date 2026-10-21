@@ -887,10 +887,8 @@ def _json_check_commit_receipts(
                 raise GwsError("reused object is not in prior verified manifest")
             if snapshot is not None:
                 staged = snapshot / "objects" / item["sha256"]
-                if staged.is_symlink() or (staged.exists() and not staged.is_dir()):
-                    raise GwsError("unsafe staged object")
-                if staged.exists():
-                    _staged_object_bytes(snapshot, item)
+                if staged.exists() or staged.is_symlink():
+                    raise GwsError("reused object must not stage chunks")
             reused_count += 1
         else:
             raise GwsError("invalid object receipt mode")
