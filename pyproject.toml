@@ -14,8 +14,7 @@ dependencies = ["pypdf >= 6.21.1, < 7"]
 Repository = "https://github.com/dceoy/wsum.git"
 
 [tool.uv]
-exclude-newer = "7 days"
-exclude-newer-package = { pypdf = "1 day" }
+exclude-newer = "1 day"
 
 [dependency-groups]
 dev = [
