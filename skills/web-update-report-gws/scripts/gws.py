@@ -621,11 +621,66 @@ def _json_state(path: Path, *, draft: bool = False) -> dict[str, typing.Any]:
     return state
 
 
+def _workspace_changed(workspace: Path, manifest: Path) -> bool:
+    """Detect durable changes against the verified committed state."""
+    committed = _json_state(manifest)
+    saved = {item["path"]: item for item in committed["files"]}
+    current = _workspace_files(workspace)
+    if len(current) != len(saved):
+        return True
+    for name, path in current:
+        item = saved.get(name)
+        if item is None:
+            return True
+        content = _text_bytes(path)
+        if (
+            len(content) != item["size"]
+            or _digest(content) != item["sha256"]
+            or (
+                name.startswith("internal/state/snapshots/")
+                and path.stat().st_mtime_ns != item.get("mtime_ns")
+            )
+        ):
+            return True
+    return False
+
+
+def _stage_object_chunks(path: Path, content: bytes) -> int:
+    """Stage compressed immutable chunks once per distinct content digest."""
+    if path.exists():
+        return len(list(path.glob("[0-9][0-9][0-9][0-9].txt")))
+    path.mkdir()
+    encoded = base64.b64encode(gzip.compress(content, mtime=0)).decode("ascii")
+    fragments = [
+        encoded[index : index + JSON_CHUNK_CHARS]
+        for index in range(0, len(encoded), JSON_CHUNK_CHARS)
+    ]
+    if not 1 <= len(fragments) <= JSON_MAX_CHUNKS:
+        raise GwsError("object exceeds chunk limit")
+    for index, part in enumerate(fragments):
+        (path / f"{index:04d}.txt").write_text(part, encoding="ascii")
+    return len(fragments)
+
+
 def json_pack(
-    workspace: Path, snapshot: Path, generation: str
+    workspace: Path,
+    snapshot: Path,
+    generation: str,
+    *,
+    previous_manifest: Path | None = None,
 ) -> dict[str, typing.Any]:
-    """Stage small state JSON and unique immutable compressed text objects."""
+    """Stage objects not already referenced by the verified previous state."""
     _timestamp(generation)
+    reusable: dict[tuple[str, int], int] = {}
+    if previous_manifest is not None:
+        previous = _json_state(previous_manifest)
+        for old in previous["files"]:
+            if "object" in old:
+                key = (old["sha256"], old["size"])
+                count = old["object"]["chunks"]
+                if key in reusable and reusable[key] != count:
+                    raise GwsError("conflicting prior object chunk count")
+                reusable[key] = count
     if snapshot.exists() or snapshot.is_symlink():
         raise GwsError("refusing to overwrite staged state")
     snapshot.parent.mkdir(parents=True, exist_ok=True)
@@ -655,22 +710,9 @@ def json_pack(
                 item["text"] = content.decode("utf-8")
             else:
                 object_dir = stage / "objects" / digest
-                if not object_dir.exists():
-                    object_dir.mkdir()
-                    encoded = base64.b64encode(gzip.compress(content, mtime=0)).decode(
-                        "ascii"
-                    )
-                    fragments = [
-                        encoded[i : i + JSON_CHUNK_CHARS]
-                        for i in range(0, len(encoded), JSON_CHUNK_CHARS)
-                    ]
-                    if not 1 <= len(fragments) <= JSON_MAX_CHUNKS:
-                        raise GwsError("object exceeds chunk limit")
-                    for index, part in enumerate(fragments):
-                        (object_dir / f"{index:04d}.txt").write_text(
-                            part, encoding="ascii"
-                        )
-                count = len(list(object_dir.glob("[0-9][0-9][0-9][0-9].txt")))
+                count = reusable.get((digest, len(content)))
+                if count is None:
+                    count = _stage_object_chunks(object_dir, content)
                 item["object"] = {"chunks": count}
             files.append(item)
         state = {"format": JSON_FORMAT, "generation": generation, "files": files}
@@ -840,7 +882,9 @@ def _json_check_commit_receipts(
             if not match:
                 raise GwsError("reused object is not in prior verified manifest")
             if snapshot is not None:
-                _staged_object_bytes(snapshot, item)
+                staged = snapshot / "objects" / item["sha256"]
+                if staged.exists() or staged.is_symlink():
+                    raise GwsError("reused object must not stage chunks")
             reused_count += 1
         else:
             raise GwsError("invalid object receipt mode")
@@ -981,10 +1025,13 @@ def _parser() -> argparse.ArgumentParser:
     p = commands.add_parser("next-generation")
     p.add_argument("--snapshots-json", type=Path, required=True)
     p.add_argument("--expected-snapshot-json", type=Path, required=True)
+    p.add_argument("--workspace", type=Path)
+    p.add_argument("--manifest", type=Path)
     p = commands.add_parser("json-pack")
     p.add_argument("--workspace", type=Path, required=True)
     p.add_argument("--snapshot", type=Path, required=True)
     p.add_argument("--generation", required=True)
+    p.add_argument("--previous-manifest", type=Path)
     p = commands.add_parser("json-link")
     p.add_argument("--fragment", type=Path, required=True)
     p.add_argument("--next-json", type=Path, required=True)
@@ -1058,12 +1105,26 @@ def main() -> None:
                 datetime.now(UTC),
                 json.loads(args.expected_snapshot_json.read_text()),
             )
-            result = {
+            generation_info: dict[str, str | bool] = {
                 "generation": generation,
                 "filename": f"workspace-{generation}.json",
             }
+            if args.workspace is None:
+                if args.manifest is not None:
+                    raise GwsError("--manifest requires --workspace")
+            else:
+                generation_info["changed"] = (
+                    args.manifest is None
+                    or _workspace_changed(args.workspace, args.manifest)
+                )
+            result = generation_info
         elif args.command == "json-pack":
-            result = json_pack(args.workspace, args.snapshot, args.generation)
+            result = json_pack(
+                args.workspace,
+                args.snapshot,
+                args.generation,
+                previous_manifest=args.previous_manifest,
+            )
         elif args.command == "json-link":
             result = json_link(args.fragment, args.next_json, args.index, args.output)
         elif args.command == "json-prepare":

@@ -107,6 +107,14 @@ leave extra files without invalidating an already verified commit.
 Do not bypass environment-denied HTTP 403 with main-agent fetch. Keep resolved
 context, credentials and tokens out of persisted state.
 
+## Redundant checkpoint elimination
+
+For each persistence handoff, re-list the Drive workspace and call `next-generation` with `--workspace` and the most recent verified `--manifest` (omit the manifest on first creation). This single preflight checks the Drive active identity and returns `changed`. A false result skips staging and upload; stale identity and invalid state always fail closed. Core pending reviews, reports, evidence, and durable file paths remain unchanged.
+
+## Reusing verified content objects during staging
+
+On a changed workspace, pass the last exact-ID-verified committed manifest to `json-pack --previous-manifest`; omit it for a fresh workspace. Previously committed large objects are content-hashed but are not recompressed into redundant local fragments. New objects still follow the original chunk upload and verification flow; the committed JSON checkpoint schema is unchanged.
+
 ## Offline verification and live follow-up
 
 `tests/test_gws.py` covers current JSON checkpoints,

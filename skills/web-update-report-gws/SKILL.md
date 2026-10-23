@@ -116,7 +116,7 @@ Call `web-update-report-gws` once per run. Resolve the installed `web-update-rep
 
 1. Resolve and validate optional common context before any workspace mutation. Restore and validate the immutable Drive folder binding, newest verified text snapshot, and delivery ledger; initialize only for a genuinely fresh output folder. Acquire and validate the current selected CSV/Spreadsheet, projecting it to `internal/gws/targets.csv`. Persist initialization/projection before invoking local monitoring; never use an old projection when current input fails.
 2. **Invoke `web-update-report`**, supplying the restored `WORKSPACE`, validated `TARGETS_CSV`, complete internally resolved context if present, output language/instructions, and the **required synchronous persistence handoff** below. It reconciles/resumes pending reviews, checks targets, recovers website HTTP 403 through monitor ingest, judges materiality, researches material updates, and finalizes once per URL. Follow that skill rather than running a parallel monitoring loop here.
-3. **Persist during the invocation.** After every core `pending` (list/detail), `check`, `ingest`, `discard`, and `finalize`, receive control and run **Persist JSON state and immutable content-addressed objects** below. Acknowledge success and return control only after the new snapshot verifies and the expected active identity is updated. Even pending inspection can recover writes; checkpoint error returns too. If persistence fails, stop local orchestration and delivery. Do not wait until the local skill returns to snapshot its changes.
+3. **Persist during the invocation.** After every core `pending` (list/detail), `check`, `ingest`, `discard`, and `finalize`, receive control and run **Persist JSON state and immutable content-addressed objects** below. The `next-generation` preflight verifies the current Drive identity and compares the workspace with its committed manifest; skip only an unchanged generation. Acknowledge changes only after the new snapshot verifies. Even pending inspection can recover writes; check error returns too. Stop orchestration and delivery on any persistence error.
 4. **Verify completion independently.** After the local workflow returns, refresh public pending state with the current targets projection and persist this command's possible recovery writes through the same handoff. Defer any report whose run ID remains pending; any `blocked` recovery entry with unknown run ID defers all delivery. Local completion does not establish Drive durability.
 5. **Publish completed runs only.** Enumerate canonical `output/report/<run-id>.md` files, including undelivered historical runs, and follow the exact-name lookup, read-back verification, and delivery ledger procedure below. Persist after recording delivery. Do not enrich, edit, or overwrite a previously delivered canonical report because later research becomes available.
 
@@ -378,24 +378,36 @@ truncate or convert state into a monolithic archive.
 ### Persist after every state mutation
 
 1. Freeze workspace writes and re-list the bound workspace folder.
-   Save the complete exact-ID listing as `LISTING`, and keep the previously
-   restored/committed identity in `EXPECTED` (JSON `{"name":"...","id":"..."}`
-   or `null` for genuine first-run initialization). Generate a unique,
-   monotonic timestamp before invoking the packer:
+   Save the complete exact-ID listing as `LISTING` and the previously
+   restored/committed identity as `EXPECTED` (JSON `{"name":"...","id":"..."}`,
+   or `null` for first initialization). Validate both the Drive identity
+   and workspace content with one command:
 
    ```bash
    python "$GWS_SKILL_DIR/scripts/gws.py" next-generation \
-     --snapshots-json "$LISTING" --expected-snapshot-json "$EXPECTED"
+     --snapshots-json "$LISTING" --expected-snapshot-json "$EXPECTED" \
+     --workspace "$WORKSPACE" --manifest "$COMMITTED_MANIFEST"
    ```
 
-   Capture the command's returned JSON `generation` field into
-   `GENERATION` (not the whole stdout JSON). Then stage:
+   Omit `--manifest` for the first checkpoint. The command rejects a stale
+   Drive identity **before** deciding whether the workspace changed. If
+   `changed` is `false`, acknowledge without staging/uploading and keep
+   `EXPECTED` unchanged. If `changed` is `true`, capture the returned
+   `generation` in `GENERATION` and stage below. Invalid manifests or
+   Drive conflicts are fatal; never skip on errors.
 
    ```bash
    python "$GWS_SKILL_DIR/scripts/gws.py" json-pack \
      --workspace "$WORKSPACE" --snapshot "$STAGED" \
-     --generation "$GENERATION"
+     --generation "$GENERATION" \
+     --previous-manifest "$COMMITTED_MANIFEST"
    ```
+
+   Pass `--previous-manifest` only with the verified prior commit; omit it
+   on first creation. An object with no staged chunks **must** use a reused
+   receipt (`previous_manifest`), never a new-object receipt (`readbacks`).
+   To intentionally re-upload all objects, omit `--previous-manifest` from
+   `json-pack`. This changes only staging, not committed state format.
 
 2. From `draft.json`, identify each unique external-object SHA-256.
    For an unchanged object already recorded in the **locally retained,
