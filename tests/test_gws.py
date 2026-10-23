@@ -1,5 +1,8 @@
 """Workspace-GWS deterministic boundary regression tests."""
 
+# These tests intentionally exercise a private helper's observable behavior.
+# pyright: reportPrivateUsage=false
+
 import base64
 import hashlib
 import json
@@ -1013,11 +1016,9 @@ def test_small_json_state_with_external_snapshots_restores_exact_bytes(
                 assert copied.stat().st_mtime_ns == path.stat().st_mtime_ns
 
 
-def test_json_pack_omits_reused_large_object_fragments(tmp_path: Path) -> None:
+def test_json_pack_reuses_large_object_fragments_and_restores(tmp_path: Path) -> None:
     ws = _json_workspace(tmp_path)
-    previous, previous_maps, receipts, _ = _json_commit(
-        ws, tmp_path, GENERATION
-    )
+    previous, previous_maps, receipts, _ = _json_commit(ws, tmp_path, GENERATION)
     stage = tmp_path / "reused-stage"
     draft = gws.json_pack(ws, stage, "20261009T000001Z", previous_manifest=previous)
     assert not list((stage / "objects").iterdir())
@@ -1047,23 +1048,36 @@ def test_json_pack_omits_reused_large_object_fragments(tmp_path: Path) -> None:
             if "snapshots" in source.parts:
                 assert target.stat().st_mtime_ns == source.stat().st_mtime_ns
 
+
+def test_json_pack_stages_new_large_objects_once(tmp_path: Path) -> None:
+    ws = _json_workspace(tmp_path)
+    previous, _, _, _ = _json_commit(ws, tmp_path, GENERATION)
+    previous_object_count = sum(
+        "object" in item for item in json.loads(previous.read_text())["files"]
+    )
+
     # A new large object still creates fragments.
     (ws / "output/report/a.md").write_bytes(b"x" * 2048)
     next_stage = tmp_path / "next-stage"
     changed = gws.json_pack(
         ws, next_stage, "20261009T000002Z", previous_manifest=previous
     )
-    assert sum("object" in item for item in changed["files"]) > len(receipt_map)
+    assert sum("object" in item for item in changed["files"]) > previous_object_count
     assert len(list((next_stage / "objects").iterdir())) == 1
 
     # Two different files with the same new digest stage one chunk chain.
     (ws / "output/report/duplicate1.md").write_bytes(b"z" * 2048)
     (ws / "output/report/duplicate2.md").write_bytes(b"z" * 2048)
     deduplicated = tmp_path / "deduplicated-stage"
-    gws.json_pack(
-        ws, deduplicated, "20261009T000003Z", previous_manifest=previous
-    )
+    gws.json_pack(ws, deduplicated, "20261009T000003Z", previous_manifest=previous)
     assert len(list((deduplicated / "objects").iterdir())) == 2
+
+
+def test_json_pack_rejects_ambiguous_or_invalid_previous_object_map(
+    tmp_path: Path,
+) -> None:
+    ws = _json_workspace(tmp_path)
+    previous, _, _, _ = _json_commit(ws, tmp_path, GENERATION)
 
     # An ambiguous previous digest/chunk-count mapping is rejected.
     conflicting = tmp_path / "conflicting-previous.json"
@@ -1327,9 +1341,7 @@ def test_reuse_checkpoint_skips_unchanged_chunk_downloads(
         '{"reports":{"20261020T000000Z-abcdef01":"' + "0" * 64 + '"},"version":1}'
     )
     staged = tmp_path / "stage-reused"
-    draft = gws.json_pack(
-        ws, staged, "20261020T000001Z", previous_manifest=first
-    )
+    draft = gws.json_pack(ws, staged, "20261020T000001Z", previous_manifest=first)
     receipts = {
         item["sha256"]: {
             "head": previous[item["sha256"]]["head"],
@@ -1366,9 +1378,7 @@ def test_reuse_rejects_unproven_reference(tmp_path: Path) -> None:
     ws = _json_workspace(tmp_path)
     first, _, previous, _ = _json_commit(ws, tmp_path, "20261020T000000Z")
     stage = tmp_path / "stage-untrusted"
-    draft = gws.json_pack(
-        ws, stage, "20261020T000001Z", previous_manifest=first
-    )
+    draft = gws.json_pack(ws, stage, "20261020T000001Z", previous_manifest=first)
     receipts = {
         item["sha256"]: {
             "head": {
