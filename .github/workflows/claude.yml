@@ -51,7 +51,7 @@ jobs:
       issues: write
       id-token: write
       actions: read
-    uses: dceoy/gha-for-devops/.github/workflows/claude-code-bot.yml@de52f22a29c662bffd2dc4d227c846784d86b38a
+    uses: dceoy/gha-for-devops/.github/workflows/claude-code-bot.yml@5ddf8e955c0595f63f82603d47478299044b8af3
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}  # zizmor: ignore[secrets-outside-env]
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
