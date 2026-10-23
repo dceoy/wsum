@@ -18,10 +18,10 @@ exclude-newer = "7 days"
 
 [dependency-groups]
 dev = [
-  "ruff >= 0.15.18",
-  "pyright >= 1.1.410",
-  "pytest >= 9.1.1",
-  "pytest-cov >= 7.1.0",
+  "ruff",
+  "pyright",
+  "pytest",
+  "pytest-cov",
 ]
 
 [tool.ruff]
