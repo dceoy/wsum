@@ -8,7 +8,7 @@ on:
       - opened
       - ready_for_review
     paths-ignore:
-      - '.github/workflows/claude.yml'
+      - .github/workflows/claude.yml
   # The pinned callee checks commenter write access before its privileged job.
   issue_comment:  # zizmor: ignore[dangerous-triggers]
     types:
