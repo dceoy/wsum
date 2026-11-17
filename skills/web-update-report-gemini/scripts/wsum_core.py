@@ -65,7 +65,7 @@ from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-VERSION = "0.3.0-hybrid.2"
+VERSION = "0.3.1-hybrid.2"
 
 # Hybrid transport guard for CLI payloads (not a core algorithm limit):
 # one normalize/compare input may carry at most this many characters.
@@ -1706,14 +1706,21 @@ def _group_target_interests(
 
 
 def validate_payload(payload: dict[str, object]) -> dict[str, object]:
-    rows = payload.get("rows")
-    if rows is None and isinstance(payload.get("csv"), str):
-        csv_text = payload["csv"]
-        if len(csv_text.encode("utf-8")) > MAX_CSV_BYTES:
+    rows_value = payload.get("rows")
+    csv_value = payload.get("csv")
+    if rows_value is None and isinstance(csv_value, str):
+        if len(csv_value.encode("utf-8")) > MAX_CSV_BYTES:
             raise WsumError("targets CSV exceeds the 1 MiB limit")
-        rows = list(csv.reader(io.StringIO(csv_text), strict=True))
-    if not isinstance(rows, list) or any(not isinstance(r, list) for r in rows):
+        rows_value = list(csv.reader(io.StringIO(csv_value), strict=True))
+    if not isinstance(rows_value, list):
         raise WsumError("input must provide rows (array of arrays) or csv (text)")
+    rows: list[list[object]] = []
+    for r in cast("list[object]", rows_value):
+        if not isinstance(r, list):
+            raise WsumError(
+                "input must provide rows (array of arrays) or csv (text)"
+            )
+        rows.append(cast("list[object]", r))
     if not rows:
         raise WsumError("targets CSV contains no header row")
     header = [_cell_text(v).strip() for v in rows[0]]
@@ -1746,9 +1753,11 @@ def normalize_payload(payload: dict[str, object]) -> dict[str, object]:
     content_type = str(payload.get("content_type", ""))
     charset = payload.get("charset")
     links = LinkCollection()
-    if isinstance(payload.get("body_base64"), str):
+    body_b64 = payload.get("body_base64")
+    text_value = payload.get("text")
+    if isinstance(body_b64, str):
         try:
-            body = base64.b64decode(payload["body_base64"], validate=True)
+            body = base64.b64decode(body_b64, validate=True)
         except (ValueError, binascii.Error) as exc:
             raise WsumError("body_base64 is not valid Base64") from exc
         if len(body) > _DEFAULT_MAX_BYTES:
@@ -1760,10 +1769,10 @@ def normalize_payload(payload: dict[str, object]) -> dict[str, object]:
             charset=charset if isinstance(charset, str) else None,
         )
         normalized = normalize_document(document, links=links)
-    elif isinstance(payload.get("text"), str):
+    elif isinstance(text_value, str):
         # Prompt-based fetch supplied already-decoded text: run the same
         # post-decode stages of normalize_document on it.
-        text = payload["text"]
+        text = text_value
         if len(text) > MAX_PAYLOAD_CHARS:
             raise WsumError(f"text exceeds the {MAX_PAYLOAD_CHARS} character limit")
         parsed_type, _ = _parse_content_type(content_type or "text/plain")
@@ -1802,6 +1811,13 @@ def normalize_payload(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _payload_int(payload: dict[str, object], key: str, default: int) -> int:
+    value = payload.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise WsumError(f"{key} must be an integer")
+    return value
+
+
 def compare_payload(payload: dict[str, object]) -> dict[str, object]:
     current = payload.get("current")
     if not isinstance(current, str):
@@ -1813,8 +1829,12 @@ def compare_payload(payload: dict[str, object]) -> dict[str, object]:
         raise WsumError("previous must be normalized text or null")
     if isinstance(previous, str) and len(previous) > MAX_PAYLOAD_CHARS:
         raise WsumError(f"previous exceeds the {MAX_PAYLOAD_CHARS} character limit")
-    max_diff_lines = int(payload.get("max_diff_lines", _DEFAULT_MAX_DIFF_LINES))
-    max_diff_bytes = int(payload.get("max_diff_bytes", _DEFAULT_MAX_DIFF_BYTES))
+    max_diff_lines = _payload_int(
+        payload, "max_diff_lines", _DEFAULT_MAX_DIFF_LINES
+    )
+    max_diff_bytes = _payload_int(
+        payload, "max_diff_bytes", _DEFAULT_MAX_DIFF_BYTES
+    )
     return compare_text(
         current,
         previous,
@@ -1847,6 +1867,13 @@ def extract_pdf_payload(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _read_payload() -> dict[str, object]:
+    raw: object = json.load(sys.stdin)
+    if not isinstance(raw, dict):
+        raise WsumError("stdin must be a JSON object")
+    return cast("dict[str, object]", raw)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="wsum_core", description=__doc__)
     parser.add_argument(
@@ -1855,17 +1882,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--version", action="version", version=VERSION)
     args = parser.parse_args(argv)
-    handlers = {
+    handlers: dict[
+        str, Callable[[dict[str, object]], dict[str, object]]
+    ] = {
         "validate": validate_payload,
         "normalize": normalize_payload,
         "compare": compare_payload,
         "extract-pdf-text": extract_pdf_payload,
     }
     try:
-        payload = json.load(sys.stdin)
-        if not isinstance(payload, dict):
-            raise WsumError("stdin must be a JSON object")
-        result = handlers[args.command](payload)
+        result = handlers[args.command](_read_payload())
     except (MonitorError, WsumError, json.JSONDecodeError, csv.Error) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 2
