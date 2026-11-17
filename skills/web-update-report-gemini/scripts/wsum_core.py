@@ -1717,9 +1717,7 @@ def validate_payload(payload: dict[str, object]) -> dict[str, object]:
     rows: list[list[object]] = []
     for r in cast("list[object]", rows_value):
         if not isinstance(r, list):
-            raise WsumError(
-                "input must provide rows (array of arrays) or csv (text)"
-            )
+            raise WsumError("input must provide rows (array of arrays) or csv (text)")
         rows.append(cast("list[object]", r))
     if not rows:
         raise WsumError("targets CSV contains no header row")
@@ -1829,20 +1827,14 @@ def compare_payload(payload: dict[str, object]) -> dict[str, object]:
         raise WsumError("previous must be normalized text or null")
     if isinstance(previous, str) and len(previous) > MAX_PAYLOAD_CHARS:
         raise WsumError(f"previous exceeds the {MAX_PAYLOAD_CHARS} character limit")
-    max_diff_lines = _payload_int(
-        payload, "max_diff_lines", _DEFAULT_MAX_DIFF_LINES
-    )
-    max_diff_bytes = _payload_int(
-        payload, "max_diff_bytes", _DEFAULT_MAX_DIFF_BYTES
-    )
+    max_diff_lines = _payload_int(payload, "max_diff_lines", _DEFAULT_MAX_DIFF_LINES)
+    max_diff_bytes = _payload_int(payload, "max_diff_bytes", _DEFAULT_MAX_DIFF_BYTES)
     return compare_text(
         current,
         previous,
         max_diff_lines=max_diff_lines,
         max_diff_bytes=max_diff_bytes,
-        compare_navigation_markers=bool(
-            payload.get("compare_navigation_markers")
-        ),
+        compare_navigation_markers=bool(payload.get("compare_navigation_markers")),
     )
 
 
@@ -1882,9 +1874,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--version", action="version", version=VERSION)
     args = parser.parse_args(argv)
-    handlers: dict[
-        str, Callable[[dict[str, object]], dict[str, object]]
-    ] = {
+    handlers: dict[str, Callable[[dict[str, object]], dict[str, object]]] = {
         "validate": validate_payload,
         "normalize": normalize_payload,
         "compare": compare_payload,
