@@ -79,7 +79,7 @@ ignore = [
   "magic-value-comparison", # protocol constants such as HTTP ports are self-explanatory
   "print",    # CLI writes its JSON result to stdout/stderr
 ]
-"skills/web-update-report-gemini/scripts/wsum_core.py" = [
+"skills/web-update-report-gemini/scripts/core.py" = [
   "any-type",  # Any is required at pypdf callback boundaries
   "complex-structure",  # explicit validation and normalization branches stay visible
   "docstring-missing-exception",  # error details are represented by MonitorError messages

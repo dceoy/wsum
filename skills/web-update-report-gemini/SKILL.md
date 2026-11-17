@@ -18,7 +18,7 @@ it, and replaces only what the sandbox makes impossible:
 | Layer                                | Responsibility                                                                                                 |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
 | Gemini browsing (prompt-based fetch) | Retrieve each monitored page; scripts have no network                                                          |
-| `scripts/wsum_core.py`               | The core algorithm: validation/grouping, sniffing/decoding, HTML/feed/PDF normalization, SHA-256, bounded diff |
+| `scripts/core.py`                    | The core algorithm: validation/grouping, sniffing/decoding, HTML/feed/PDF normalization, SHA-256, bounded diff |
 | Gemini                               | Materiality judgment and research (never hash/diff arithmetic)                                                 |
 | Google Sheet                         | Targets plus per-target state pointers                                                                         |
 | Google Drive                         | Snapshot text files and report Docs                                                                            |
@@ -48,7 +48,7 @@ which path each target used.
 
 ## The bundled script
 
-`scripts/wsum_core.py`: one subcommand per invocation, JSON in on
+`scripts/core.py`: one subcommand per invocation, JSON in on
 stdin, JSON out on stdout.
 
 | Subcommand         | Input                                                                                                                                          | Output                                                                                            |

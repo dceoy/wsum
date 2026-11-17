@@ -1867,7 +1867,7 @@ def _read_payload() -> dict[str, object]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="wsum_core", description=__doc__)
+    parser = argparse.ArgumentParser(prog="core", description=__doc__)
     parser.add_argument(
         "command",
         choices=("validate", "normalize", "compare", "extract-pdf-text"),
