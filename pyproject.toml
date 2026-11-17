@@ -79,6 +79,19 @@ ignore = [
   "magic-value-comparison", # protocol constants such as HTTP ports are self-explanatory
   "print",    # CLI writes its JSON result to stdout/stderr
 ]
+"skills/web-update-report-gemini/scripts/core.py" = [
+  "any-type",  # Any is required at pypdf callback boundaries
+  "complex-structure",  # explicit validation and normalization branches stay visible
+  "docstring-missing-exception",  # error details are represented by MonitorError messages
+  "docstring-missing-returns",  # concise helper docstrings are sufficient here
+  "f-string-in-exception",  # CLI validation errors are intentionally contextual
+  "implicit-namespace-package",  # skill scripts are executable helpers, not a Python package
+  "magic-value-comparison",  # protocol constants are self-explanatory
+  "print",  # CLI writes its JSON result to stdout/stderr
+  "raise-vanilla-args",  # error messages are defined at the decision site
+  "raw-string-in-exception",  # CLI errors are intentionally direct literal messages
+  "undocumented-public-function",  # CLI helpers have descriptive names
+]
 "tests/**/*.py" = [
   "undocumented-public-function",    # test names describe their behavior
   "implicit-namespace-package",  # tests do not need to be a Python package
