@@ -18,6 +18,7 @@ exclude-newer = "1 day"
 
 [dependency-groups]
 dev = [
+  "semgrep",
   "ruff",
   "pyright",
   "pytest",
