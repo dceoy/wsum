@@ -1977,20 +1977,20 @@ def test_compare_text_navigation_flag_without_comparable_views_keeps_plain_diff(
 
 
 def test_feed_entry_keeps_first_identity_for_repeated_link() -> None:
-    feed = (
-        "<feed><entry><id>urn:1</id>"
-        '<link href="https://example.com/first"/>'
-        '<link href="https://example.com/second"/>'
-        "<title>T</title></entry></feed>"
+    target = core._FeedTextTarget(
+        10_000, preserve_structure=True, base_url="https://example.com/"
     )
-    text = core._normalize_feed(
-        feed,
-        max_chars=10_000,
-        preserve_structure=True,
-        base_url="https://example.com/",
+    target.start("entry", {})
+    target.start("link", {"href": "https://example.com/first"})
+    target.end("link")
+    target.start("link", {"href": "https://example.com/second"})
+    target.end("link")
+    target.end("entry")
+    assert len(target._entries) == 1
+    assert (
+        target._entries[0][0]
+        == hashlib.sha256(b"https://example.com/first").hexdigest()
     )
-    assert "[id:sha256:" in text
-    assert "[link:href:sha256:" in text
 
 
 def test_feed_blank_text_link_is_ignored() -> None:
