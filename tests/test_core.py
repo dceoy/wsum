@@ -1384,3 +1384,530 @@ def test_navigation_comparison_view_marker_only_text_is_manifest_suffix() -> Non
     a = _marker("https://example.com/a")
     *_, is_suffix = core._navigation_comparison_view(f"\n{a}\n\n")
     assert is_suffix is True
+
+
+# --- target validation and grouping ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("http://[::1", "url is invalid"),
+        ("ftp://example.com/", "absolute HTTP"),
+        ("/relative/path", "absolute HTTP"),
+        ("https:///no-host", "absolute HTTP"),
+        ("https://example.com/#frag", "must not contain a fragment"),
+        ("https://user:pw@example.com/", "must not contain credentials"),
+    ],
+)
+def test_validate_url_rejects(url: str, message: str) -> None:
+    with pytest.raises(WsumError, match=message):
+        core._validate_url(url)
+
+
+@pytest.mark.parametrize("url", ["http://example.com", "HTTPS://Example.com/a?b=1"])
+def test_validate_url_accepts_unchanged(url: str) -> None:
+    assert core._validate_url(url) == url
+
+
+@pytest.mark.parametrize(
+    ("url", "prefix"),
+    [
+        ("https://Example.COM/page", "example-com"),
+        ("https://a_b.example.org/", "a-b-example-org"),
+        ("/no/host", "target"),
+        ("http://[::1", "target"),
+        ("https://" + "a" * 60 + ".com/", "a" * 48),
+    ],
+)
+def test_target_id(url: str, prefix: str) -> None:
+    digest = hashlib.sha256(url.encode()).hexdigest()[:12]
+    assert core._target_id(url) == f"{prefix}-{digest}"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("", True), ("  TRUE ", True), ("false", False), (" False", False)],
+)
+def test_parse_enabled(value: str, expected: bool) -> None:
+    assert core._parse_enabled(value, 2) is expected
+
+
+def test_parse_enabled_rejects() -> None:
+    with pytest.raises(WsumError, match="row 7: enabled must be true or false"):
+        core._parse_enabled("yes", 7)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (True, "true"),
+        (False, "false"),
+        (3.0, "3"),
+        (2.5, "2.5"),
+        (7, "7"),
+        ("text", "text"),
+    ],
+)
+def test_cell_text(value: object, expected: str) -> None:
+    assert core._cell_text(value) == expected
+
+
+@pytest.mark.parametrize("value", [None, ["x"], {"a": 1}])
+def test_cell_text_rejects_non_scalars(value: object) -> None:
+    with pytest.raises(WsumError, match="cells must be scalar values"):
+        core._cell_text(value)
+
+
+_HEADER = ["name", "url", "publisher", "category", "keywords", "priority", "enabled"]
+
+
+def test_normalize_target_row_success() -> None:
+    result = core._normalize_target_row(
+        _HEADER,
+        [" Site ", "https://example.com/", "Pub", "News", "ai", 3.0, "false"],
+        4,
+    )
+    assert result == (
+        "https://example.com/",
+        {
+            "name": "Site",
+            "publisher": "Pub",
+            "category": "News",
+            "keywords": "ai",
+            "priority": 3,
+            "enabled": False,
+            "row": 4,
+        },
+    )
+
+
+def test_normalize_target_row_short_row_defaults() -> None:
+    result = core._normalize_target_row(_HEADER, ["Site", "https://example.com/"], 2)
+    assert result is not None
+    _, interest = result
+    assert interest["priority"] is None
+    assert interest["enabled"] is True
+    assert interest["publisher"] == ""
+
+
+def test_normalize_target_row_blank_row_is_skipped() -> None:
+    assert core._normalize_target_row(_HEADER, ["", "  ", ""], 5) is None
+    assert core._normalize_target_row(_HEADER, [], 6) is None
+
+
+@pytest.mark.parametrize(
+    ("row", "message"),
+    [
+        (["n", "https://e.com/", "", "", "", "", "", "extra"], "row 3: too many"),
+        (["", "https://e.com/"], "row 3: name must be non-empty"),
+        (["〃", "https://e.com/"], "row 3: name: replace ditto"),
+        (["n", "同上"], "row 3: url: replace ditto"),
+        (["n", "ftp://e.com/"], "row 3: url must be an absolute HTTP"),
+        (["n", "https://e.com/", "", "", "", "abc"], "row 3: priority must be"),
+        (["n", "https://e.com/", "", "", "", "-1"], "row 3: priority must be"),
+        (["n", "https://e.com/", "", "", "", "0"], "row 3: priority must be"),
+        (["n", "https://e.com/", "", "", "", "", "maybe"], "row 3: enabled must be"),
+    ],
+)
+def test_normalize_target_row_rejects(row: list[object], message: str) -> None:
+    with pytest.raises(WsumError, match=message):
+        core._normalize_target_row(_HEADER, row, 3)
+
+
+def _interest(*, enabled: bool, name: str = "n", row: int = 2) -> dict[str, object]:
+    return {"name": name, "enabled": enabled, "row": row}
+
+
+def test_group_target_interests_merges_by_url() -> None:
+    url = "https://example.com/"
+    other = "https://other.example/"
+    first = _interest(enabled=False, name="off", row=2)
+    second = _interest(enabled=True, name="on", row=3)
+    third = _interest(enabled=False, name="solo", row=4)
+    targets = core._group_target_interests([
+        (url, first),
+        (other, third),
+        (url, second),
+    ])
+    assert targets == [
+        {
+            "target_id": core._target_id(url),
+            "name": "on",
+            "url": url,
+            "enabled": True,
+            "action": "monitor",
+            "interests": [first, second],
+        },
+        {
+            "target_id": core._target_id(other),
+            "name": "solo",
+            "url": other,
+            "enabled": False,
+            "action": "skip_disabled",
+            "interests": [third],
+        },
+    ]
+
+
+def test_group_target_interests_duplicate_target_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core, "_target_id", lambda _url: "same")
+    with pytest.raises(WsumError, match="duplicate_target_id"):
+        core._group_target_interests([
+            ("https://a.example/", _interest(enabled=True)),
+            ("https://b.example/", _interest(enabled=True)),
+        ])
+
+
+# --- validate payload ------------------------------------------------------
+
+_CSV = "name,url,enabled\nOne,https://one.example/,true\n,,\nTwo,https://two.example/,false\n"
+
+
+def test_validate_payload_from_csv_text() -> None:
+    result = core.validate_payload({"csv": _CSV})
+    assert result["ok"] is True
+    assert result["errors"] == []
+    targets: Any = result["targets"]
+    assert [(t["url"], t["action"], t["name"]) for t in targets] == [
+        ("https://one.example/", "monitor", "One"),
+        ("https://two.example/", "skip_disabled", "Two"),
+    ]
+    assert targets[1]["interests"][0]["row"] == 4
+
+
+def test_validate_payload_from_rows_prefers_rows_over_csv() -> None:
+    rows = [["name", "url"], ["Row", "https://row.example/"]]
+    result = core.validate_payload({"rows": rows, "csv": _CSV})
+    targets: Any = result["targets"]
+    assert [t["name"] for t in targets] == ["Row"]
+
+
+def test_validate_payload_csv_too_large() -> None:
+    big = "name,url\n" + "x" * core.MAX_CSV_BYTES
+    with pytest.raises(WsumError, match="exceeds the 1 MiB limit"):
+        core.validate_payload({"csv": big})
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({}, "must provide rows"),
+        ({"csv": 5}, "must provide rows"),
+        ({"rows": "nope"}, "must provide rows"),
+        ({"rows": [["name", "url"], "bad"]}, "must provide rows"),
+        ({"rows": []}, "no header row"),
+        ({"rows": [["name", "name", "url"]]}, "unique header"),
+        ({"rows": [["name"]]}, "requires name and url"),
+        ({"rows": [["name", "url", "bogus"]]}, "unsupported columns"),
+        ({"rows": [["name", "url"], ["", ""]]}, "contains no targets"),
+        ({"rows": [["name", "url"]]}, "contains no targets"),
+        ({"rows": [["name", "url"], ["n", "ftp://x/"]]}, "row 2: url must"),
+    ],
+)
+def test_validate_payload_rejects(payload: dict[str, object], message: str) -> None:
+    with pytest.raises(WsumError, match=message):
+        core.validate_payload(payload)
+
+
+# --- payload handlers ------------------------------------------------------
+
+
+def _b64(value: bytes | str) -> str:
+    raw = value.encode() if isinstance(value, str) else value
+    return base64.b64encode(raw).decode()
+
+
+def test_links_output_counts_overflow_and_omitted() -> None:
+    links = LinkCollection()
+    links["b"] = "https://example.com/b"
+    links["a"] = "https://example.com/a"
+    links.overflow_count = 2
+    links.omitted_hashes.add("deadbeef")
+    assert core._links_output(links) == {
+        "links": ["https://example.com/a", "https://example.com/b"],
+        "links_omitted": 3,
+    }
+
+
+def test_normalize_payload_base64_html_collects_links() -> None:
+    html = '<html><body><p>Hello   world</p><a href="/next">Next</a></body></html>'
+    result = core.normalize_payload({
+        "body_base64": _b64(html),
+        "content_type": "text/html; charset=utf-8",
+        "source_url": "https://example.com/base/",
+    })
+    normalized = str(result["normalized"])
+    assert "Hello world" in normalized
+    assert result["sha256"] == hashlib.sha256(normalized.encode()).hexdigest()
+    assert result["chars"] == len(normalized)
+    assert result["links"] == ["https://example.com/next"]
+    assert result["links_omitted"] == 0
+
+
+def test_normalize_payload_explicit_charset_overrides_header() -> None:
+    body = "café".encode("latin-1")
+    result = core.normalize_payload({
+        "body_base64": _b64(body),
+        "content_type": "text/plain; charset=utf-8",
+        "charset": "latin-1",
+    })
+    assert result["normalized"] == "café\n"
+
+
+def test_normalize_payload_rejects_bad_base64() -> None:
+    with pytest.raises(WsumError, match="body_base64 is not valid Base64"):
+        core.normalize_payload({"body_base64": _B64_BAD})
+
+
+def test_normalize_payload_rejects_oversized_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core, "_DEFAULT_MAX_BYTES", 4)
+    with pytest.raises(MonitorError, match="document exceeds the size limit"):
+        core.normalize_payload({"body_base64": _b64(b"12345")})
+
+
+def test_normalize_payload_text_html_and_links() -> None:
+    result = core.normalize_payload({
+        "text": '<p>Hi  there</p><a href="page">x</a>',
+        "content_type": "text/html",
+        "source_url": "https://example.com/dir/",
+    })
+    assert "Hi there" in str(result["normalized"])
+    assert result["links"] == ["https://example.com/dir/page"]
+
+
+def test_normalize_payload_text_defaults_to_plain_whitespace_normalization() -> None:
+    result = core.normalize_payload({"text": "a   b\n\n\n c  "})
+    assert result["normalized"] == core._normalize_whitespace("a   b\n\n\n c  ")
+    assert result["links"] == []
+
+
+def test_normalize_payload_text_feed_preserves_structure() -> None:
+    feed = (
+        '<rss version="2.0"><channel><item><title>T</title>'
+        "<link>https://example.com/post</link><guid>g1</guid></item></channel></rss>"
+    )
+    result = core.normalize_payload({
+        "text": feed,
+        "content_type": "application/rss+xml",
+        "source_url": "https://example.com/feed",
+    })
+    assert "T" in str(result["normalized"])
+    assert "https://example.com/post" in result["links"]  # type: ignore[operator]
+
+
+def test_normalize_payload_text_pdf_requires_body_base64() -> None:
+    with pytest.raises(MonitorError, match="PDF input requires body_base64"):
+        core.normalize_payload({"text": "x", "content_type": "application/pdf"})
+
+
+def test_normalize_payload_text_too_long() -> None:
+    with pytest.raises(WsumError, match="text exceeds the 2000000 character limit"):
+        core.normalize_payload({"text": "x" * (core.MAX_PAYLOAD_CHARS + 1)})
+
+
+def test_normalize_payload_requires_a_body() -> None:
+    with pytest.raises(WsumError, match="requires body_base64 or text"):
+        core.normalize_payload({"text": 5})
+
+
+def test_normalize_payload_navigation_links_append_markers() -> None:
+    url = "https://example.com/nav"
+    result = core.normalize_payload({"text": "Body", "navigation_links": [url]})
+    digest = hashlib.sha256(url.encode()).hexdigest()
+    assert str(result["normalized"]).endswith(f"[a:href:sha256:{digest}]\n")
+    assert result["links"] == [url]
+
+
+def test_normalize_payload_navigation_links_validated() -> None:
+    with pytest.raises(MonitorError, match="navigation_links must be a JSON array"):
+        core.normalize_payload({"text": "Body", "navigation_links": "x"})
+
+
+def test_payload_int() -> None:
+    assert core._payload_int({"n": 5}, "n", 1) == 5
+    assert core._payload_int({}, "n", 9) == 9
+
+
+@pytest.mark.parametrize("value", [True, "5", 1.5, None])
+def test_payload_int_rejects(value: object) -> None:
+    with pytest.raises(WsumError, match="n must be an integer"):
+        core._payload_int({"n": value}, "n", 1)
+
+
+def test_compare_payload_baseline_and_changed() -> None:
+    baseline = core.compare_payload({"current": "x"})
+    assert baseline["status"] == "baseline"
+    changed = core.compare_payload({
+        "current": "a\nB",
+        "previous": "a\nb",
+        "max_diff_lines": 3,
+        "max_diff_bytes": 10_000,
+    })
+    assert changed["status"] == "changed"
+    assert changed["diff_truncated"] is True
+    assert str(changed["diff"]).splitlines() == [
+        "--- previous",
+        "+++ current",
+        "@@ -1,2 +1,2 @@",
+    ]
+
+
+def test_compare_payload_navigation_flag() -> None:
+    a, b = _marker("https://example.com/a"), _marker("https://example.com/b")
+    payload: dict[str, object] = {
+        "current": f"Body\n{b}\n{a}",
+        "previous": f"Body\n{a}\n{b}",
+    }
+    assert core.compare_payload(payload)["status"] == "changed"
+    payload["compare_navigation_markers"] = True
+    assert core.compare_payload(payload)["status"] == "unchanged"
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({}, "compare requires current"),
+        ({"current": 1}, "compare requires current"),
+        ({"current": "x" * (core.MAX_PAYLOAD_CHARS + 1)}, "current exceeds"),
+        ({"current": "x", "previous": 1}, "previous must be normalized text or null"),
+        (
+            {"current": "x", "previous": "x" * (core.MAX_PAYLOAD_CHARS + 1)},
+            "previous exceeds",
+        ),
+        ({"current": "x", "max_diff_lines": "5"}, "max_diff_lines must be an integer"),
+        ({"current": "x", "max_diff_bytes": True}, "max_diff_bytes must be an integer"),
+    ],
+)
+def test_compare_payload_rejects(payload: dict[str, object], message: str) -> None:
+    with pytest.raises(WsumError, match=message):
+        core.compare_payload(payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({}, "requires pdf_base64"),
+        ({"pdf_base64": 5}, "requires pdf_base64"),
+        ({"pdf_base64": _B64_BAD}, "pdf_base64 is not valid Base64"),
+    ],
+)
+def test_extract_pdf_payload_rejects(payload: dict[str, object], message: str) -> None:
+    with pytest.raises(WsumError, match=message):
+        core.extract_pdf_payload(payload)
+
+
+# --- CLI -------------------------------------------------------------------
+
+
+def _run_main(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    stdin: str,
+) -> tuple[int, dict[str, Any]]:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(stdin))
+    code = core.main([command])
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_main_validate_success(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out = _run_main(monkeypatch, capsys, "validate", json.dumps({"csv": _CSV}))
+    assert code == 0
+    assert out["ok"] is True
+    assert len(out["targets"]) == 2
+
+
+def test_main_normalize_and_compare_roundtrip(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, normalized = _run_main(
+        monkeypatch, capsys, "normalize", json.dumps({"text": "Hello\nworld"})
+    )
+    assert code == 0
+    assert normalized["normalized"] == "Hello\nworld\n"
+    code, compared = _run_main(
+        monkeypatch,
+        capsys,
+        "compare",
+        json.dumps({"current": normalized["normalized"], "previous": "Hello\n"}),
+    )
+    assert code == 0
+    assert compared["status"] == "changed"
+    assert "+world" in compared["diff"]
+
+
+def test_main_extract_pdf_text(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out = _run_main(
+        monkeypatch,
+        capsys,
+        "extract-pdf-text",
+        json.dumps({"pdf_base64": _b64(_text_pdf("CLI text"))}),
+    )
+    assert code == 0
+    assert out["normalized"] == "CLI text\n"
+
+
+@pytest.mark.parametrize(
+    ("command", "stdin", "message"),
+    [
+        ("validate", json.dumps({}), "must provide rows"),
+        (
+            "normalize",
+            json.dumps({"text": "x", "content_type": "application/pdf"}),
+            "PDF input requires",
+        ),
+        ("compare", json.dumps({"current": 1}), "compare requires current"),
+        ("validate", "not json", "Expecting value"),
+        ("validate", json.dumps([1, 2]), "stdin must be a JSON object"),
+        (
+            "validate",
+            json.dumps({"csv": 'name,url\n"unterminated'}),
+            "unexpected end of data",
+        ),
+    ],
+)
+def test_main_reports_expected_errors_with_exit_2(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    stdin: str,
+    message: str,
+) -> None:
+    code, out = _run_main(monkeypatch, capsys, command, stdin)
+    assert code == 2
+    assert list(out) == ["error"]
+    assert message in out["error"]
+
+
+def test_main_rejects_unknown_command(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        core.main(["bogus"])
+    assert excinfo.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_main_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        core.main(["validate", "--version"])
+    assert excinfo.value.code == 0
+    assert core.VERSION in capsys.readouterr().out
+
+
+def test_module_entrypoint_runs_main(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["core.py", "compare"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"current": "x"})))
+    with pytest.raises(SystemExit) as excinfo:
+        runpy.run_path(core.__file__, run_name="__main__")
+    assert excinfo.value.code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "baseline"
