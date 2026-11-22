@@ -15,13 +15,21 @@ Repository = "https://github.com/dceoy/wsum.git"
 
 [tool.uv]
 exclude-newer = "1 day"
+override-dependencies = [
+  "mcp==1.30.0",
+  "opentelemetry-api==1.45.2",
+  "opentelemetry-sdk==1.45.2",
+  "opentelemetry-exporter-otlp-proto-http==1.45.2",
+  "wcmatch==11.2",
+]
 
 [dependency-groups]
 dev = [
-  "ruff",
-  "pyright",
-  "pytest",
-  "pytest-cov",
+  "semgrep >= 1.186.0",
+  "ruff >= 0.17.5",
+  "pyright >= 1.1.414",
+  "pytest >= 9.2.0",
+  "pytest-cov >= 7.1.0",
 ]
 
 [tool.ruff]
