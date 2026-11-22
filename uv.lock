@@ -1625,9 +1625,9 @@ requires-dist = [{ name = "pypdf", specifier = ">=6.21.1,<8" }]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
+    { name = "pyright", specifier = ">=1.1.414" },
+    { name = "pytest", specifier = ">=9.2.0" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "ruff", specifier = ">=0.17.5" },
     { name = "semgrep", specifier = ">=1.186.0" },
 ]
