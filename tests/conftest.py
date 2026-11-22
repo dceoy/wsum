@@ -9,3 +9,5 @@ SCRIPTS = Path(__file__).parents[1] / "skills" / "web-update-monitor" / "scripts
 sys.path.insert(0, str(SCRIPTS))
 GWS_SCRIPTS = Path(__file__).parents[1] / "skills/web-update-report-gws/scripts"
 sys.path.insert(0, str(GWS_SCRIPTS))
+GEMINI_SCRIPTS = Path(__file__).parents[1] / "skills/web-update-report-gemini/scripts"
+sys.path.insert(0, str(GEMINI_SCRIPTS))
