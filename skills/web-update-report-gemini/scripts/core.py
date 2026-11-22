@@ -1760,11 +1760,12 @@ def normalize_payload(payload: dict[str, object]) -> dict[str, object]:
             raise WsumError("body_base64 is not valid Base64") from exc
         if len(body) > _DEFAULT_MAX_BYTES:
             raise MonitorError("document exceeds the size limit")
+        parsed_type, header_charset = _parse_content_type(content_type)
         document = Document(
             body=body,
             source_url=source_url,
-            content_type=content_type,
-            charset=charset if isinstance(charset, str) else None,
+            content_type=parsed_type,
+            charset=charset if isinstance(charset, str) else header_charset,
         )
         normalized = normalize_document(document, links=links)
     elif isinstance(text_value, str):
