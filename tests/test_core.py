@@ -1,5 +1,9 @@
 """Tests for the Gemini hybrid deterministic core."""
 
+# ruff: file-ignore[any-type, compare-to-empty-string]
+# Any: pypdf objects and callbacks are dynamically typed, so test doubles are too.
+# compare-to-empty-string: assertions pin the exact "" result (distinct from None).
+
 # pyright: reportPrivateUsage=false
 
 from __future__ import annotations
@@ -10,12 +14,13 @@ import io
 import json
 import runpy
 import sys
-from pathlib import Path
+import zlib
 from typing import Any
 
 import core
 import pytest
 from core import Document, LinkCollection, MonitorError, WsumError
+from pypdf import PdfReader, PdfWriter, filters
 
 _B64_BAD = "!!!not-base64"
 
@@ -533,7 +538,7 @@ _ATOM = """<?xml version="1.0" encoding="utf-8"?>
     <link href="one"/>
     <content>plain &lt; text</content>
   </entry>
-</feed>"""
+</feed>"""  # ruff: ignore[line-too-long]
 
 _RSS = """<rss version="2.0"><channel><title>C</title>
 <item><guid>g2</guid><link>https://feed.example/b</link><description>b</description></item>
@@ -657,10 +662,12 @@ def test_feed_invalid_parser_result(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self, *, target: object) -> None:
             del target
 
-        def feed(self, text: str) -> None:
+        @staticmethod
+        def feed(text: str) -> None:
             del text
 
-        def close(self) -> object:
+        @staticmethod
+        def close() -> object:
             return None
 
     monkeypatch.setattr(core.ET, "XMLParser", FakeParser)
@@ -749,7 +756,11 @@ def _build_pdf(
     pages: list[dict[str, str]] | None = None,
     extra: dict[int, str] | None = None,
 ) -> bytes:
-    """Build a small valid PDF; page dicts hold raw dictionary entries."""
+    """Build a small valid PDF; page dicts hold raw dictionary entries.
+
+    Returns:
+        The PDF file bytes.
+    """
     pages = pages if pages is not None else [{}]
     objects: dict[int, str] = {}
     page_ids = [10 + i for i in range(len(pages))]
@@ -867,8 +878,6 @@ def test_pdf_invalid_body(body: bytes, message: str) -> None:
 
 
 def test_pdf_encrypted_is_rejected() -> None:
-    from pypdf import PdfReader, PdfWriter
-
     writer = PdfWriter(clone_from=PdfReader(io.BytesIO(_text_pdf())))
     writer.encrypt("secret")
     buffer = io.BytesIO()
@@ -905,14 +914,14 @@ def test_pdf_missing_pypdf(monkeypatch: pytest.MonkeyPatch) -> None:
         core._normalize_pdf_content(
             b"x", max_decompressed_bytes=1, max_extracted_chars=1
         )
-    with pytest.raises(MonitorError, match="requires pypdf"):
-        with core._pypdf_output_limits(1):
-            pytest.fail("unreachable")
+    with (
+        pytest.raises(MonitorError, match="requires pypdf"),
+        core._pypdf_output_limits(1),
+    ):
+        pytest.fail("unreachable")
 
 
 def test_pypdf_output_limits_guard_flate_recovery() -> None:
-    from pypdf import filters
-
     original = filters.decompress
     with core._pypdf_output_limits(4) as set_limit:
         set_limit(2)
@@ -922,7 +931,7 @@ def test_pypdf_output_limits_guard_flate_recovery() -> None:
     assert filters.decompress is original
 
 
-class _Node(dict[str, Any]):
+class _Node(dict[str, Any]):  # ruff: ignore[subclass-builtin]
     """Faithful stand-in for a pypdf dictionary object (optionally a stream)."""
 
     def __init__(self, data: dict[str, Any] | None = None, stream: Any = None) -> None:
@@ -949,10 +958,6 @@ class _Reader:
 
 
 def test_pypdf_flate_recovery_passthrough() -> None:
-    import zlib
-
-    from pypdf import filters
-
     with core._pypdf_output_limits(100):
         assert filters.decompress(zlib.compress(b"abc")) == b"abc"
 
@@ -1001,7 +1006,10 @@ def test_preflight_pdf_pages_scalar_kid() -> None:
 
 
 def test_pdf_page_loop_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(core, "_preflight_pdf_pages", lambda _reader: [0])
+    def one_page(_reader: object) -> list[int]:
+        return [0]
+
+    monkeypatch.setattr(core, "_preflight_pdf_pages", one_page)
     monkeypatch.setattr(core, "_DEFAULT_MAX_PDF_PAGES", 1)
     with pytest.raises(MonitorError, match="page count exceeds"):
         _normalize(_build_pdf([{}, {}]), "application/pdf")
@@ -1203,7 +1211,7 @@ def test_extract_page_text_limits() -> None:
 
 def test_normalize_pdf_wraps_unexpected_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*_args: Any, **_kwargs: Any) -> str:
-        raise RuntimeError("boom")  # ruff: ignore[raw-string-in-exception, raise-vanilla-args]
+        raise RuntimeError("boom")  # ruff: ignore[raw-string-in-exception]
 
     monkeypatch.setattr(core, "_normalize_pdf_content", boom)
     with pytest.raises(MonitorError, match="could not be normalized safely"):
@@ -1240,7 +1248,7 @@ def test_utf8_prefix(value: str, limit: int, expected: str) -> None:
         ("a\nb", 2),
         ("a\r\nb\r\n", 2),
         ("a\n\nb", 3),
-        ("a\x0bb\x0cc d", 4),
+        ("a\x0bb\x0cc" + chr(0x2028) + "d", 4),
         ("\n", 1),
     ],
 )
@@ -1291,7 +1299,12 @@ def test_compare_text_rejects_nonpositive_limits(
     kwargs: dict[str, int], message: str
 ) -> None:
     with pytest.raises(MonitorError, match=message):
-        core.compare_text("a", "b", **kwargs)
+        core.compare_text(
+            "a",
+            "b",
+            max_diff_lines=kwargs["max_diff_lines"],
+            max_diff_bytes=kwargs.get("max_diff_bytes", 1),
+        )
 
 
 def test_compare_text_truncates_by_lines() -> None:
@@ -1348,10 +1361,6 @@ def test_bounded_diff_complexity_marker_respects_limits(
     assert (by_lines, flag) == ("--- previous\n+++ current", True)
     by_bytes, flag = core._bounded_diff("a", "b", max_diff_lines=9, max_diff_bytes=8)
     assert (by_bytes, flag) == ("--- prev", True)
-
-
-def _marker(url: str) -> str:
-    return f"[a:href:sha256:{hashlib.sha256(url.encode()).hexdigest()}]"
 
 
 def test_compare_text_navigation_marker_order_is_incidental_when_enabled() -> None:
@@ -1553,7 +1562,10 @@ def test_group_target_interests_merges_by_url() -> None:
 def test_group_target_interests_duplicate_target_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(core, "_target_id", lambda _url: "same")
+    def same_id(_url: str) -> str:
+        return "same"
+
+    monkeypatch.setattr(core, "_target_id", same_id)
     with pytest.raises(WsumError, match="duplicate_target_id"):
         core._group_target_interests([
             ("https://a.example/", _interest(enabled=True)),
@@ -1911,3 +1923,111 @@ def test_module_entrypoint_runs_main(
         runpy.run_path(core.__file__, run_name="__main__")
     assert excinfo.value.code == 0
     assert json.loads(capsys.readouterr().out)["status"] == "baseline"
+
+
+# --- remaining branches ----------------------------------------------------
+
+
+def test_http_status_error_carries_status_and_source() -> None:
+    error = core.HTTPStatusError(503, source_url="https://example.com/x")
+    assert isinstance(error, MonitorError)
+    assert error.status == 503
+    assert error.source_url == "https://example.com/x"
+    assert str(error) == "fetch failed: HTTP 503"
+    assert core.HTTPStatusError(404).source_url == ""
+
+
+def _nest_percent(value: str, levels: int) -> str:
+    for _ in range(levels):
+        value = value.replace("%", "%25")
+    return value
+
+
+def test_query_credential_check_fails_closed_on_deep_percent_nesting() -> None:
+    harmless = "q=%41"
+    assert core._query_has_credentials(_nest_percent(harmless, 4), depth=0) is False
+    assert core._query_has_credentials(_nest_percent(harmless, 5), depth=0) is True
+    assert core.url_has_credentials(
+        "https://example.com/?" + _nest_percent(harmless, 5)
+    )
+
+
+def test_sniff_content_type_undecodable_prefix_is_plain_text() -> None:
+    body = b"<html><body>\xff\xfe</body></html>"
+    assert core._sniff_content_type(body, charset="utf-8") == "text/plain"
+    assert core._sniff_content_type(body, charset="latin-1") == "text/html"
+
+
+def test_normalize_document_html_without_link_collection() -> None:
+    text = core.normalize_document(_doc("<p>Hi <a href='/x'>link</a></p>"))
+    assert text.startswith("Hi\n[a:href:sha256:")
+    assert text.endswith("]\nlink\n")
+
+
+def test_compare_text_navigation_flag_without_comparable_views_keeps_plain_diff() -> (
+    None
+):
+    # No markers in either text: the navigation pair is not comparable.
+    result = core.compare_text(
+        "one\ntwo", "one\nthree", max_diff_lines=20, compare_navigation_markers=True
+    )
+    assert result["status"] == "changed"
+    assert "-three" in str(result["diff"])
+    assert "+two" in str(result["diff"])
+
+
+def test_feed_entry_keeps_first_identity_for_repeated_link() -> None:
+    feed = (
+        "<feed><entry><id>urn:1</id>"
+        '<link href="https://example.com/first"/>'
+        '<link href="https://example.com/second"/>'
+        "<title>T</title></entry></feed>"
+    )
+    text = core._normalize_feed(
+        feed,
+        max_chars=10_000,
+        preserve_structure=True,
+        base_url="https://example.com/",
+    )
+    assert "[id:sha256:" in text
+    assert "[link:href:sha256:" in text
+
+
+def test_feed_blank_text_link_is_ignored() -> None:
+    links = LinkCollection()
+    feed = "<rss><channel><item><title>T</title><link>   </link></item></channel></rss>"
+    text = core._normalize_feed(
+        feed,
+        max_chars=10_000,
+        preserve_structure=True,
+        base_url="https://example.com/",
+        links=links,
+    )
+    assert "[link:href:sha256:" not in text
+    assert not links
+
+
+def test_feed_embedded_text_over_limit_is_rejected() -> None:
+    feed = (
+        "<rss><channel><item><description>"
+        + "x" * 200
+        + "</description></item></channel></rss>"
+    )
+    with pytest.raises(MonitorError, match="XML extracted text exceeds the size limit"):
+        core._normalize_feed(
+            feed,
+            max_chars=80,
+            preserve_structure=True,
+            base_url="https://example.com/",
+        )
+
+
+def test_feed_target_end_without_start_leaves_empty_state_untouched() -> None:
+    target = core._FeedTextTarget(
+        100, preserve_structure=False, base_url="https://example.com/"
+    )
+    target.end("stray")
+    assert target.close() == ""
+    assert target._tag_stack == []
+    assert target._base_stack == []
+    assert target._base_stack_bytes == 0
