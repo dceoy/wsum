@@ -541,10 +541,10 @@ def _nested_url_has_credentials(value: str, *, depth: int) -> bool:
             parsed = urlsplit(candidate)
         except ValueError:
             return True
-        try:
-            host = parsed.hostname or ""
-        except ValueError:
-            return True
+        # NOTE: SplitResult.hostname cannot raise ValueError on CPython (it
+        # only splits/lowercases the netloc); bracket validation already
+        # happens in urlsplit() above, so no try/except is needed here.
+        host = parsed.hostname or ""
         has_credentials = (
             parsed.username is not None
             or parsed.password is not None
