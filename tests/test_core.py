@@ -1208,3 +1208,179 @@ def test_normalize_pdf_wraps_unexpected_errors(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(core, "_normalize_pdf_content", boom)
     with pytest.raises(MonitorError, match="could not be normalized safely"):
         core._normalize_pdf(b"", max_decompressed_bytes=1, max_extracted_chars=1)
+
+
+# --- diff and comparison ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "limit", "expected"),
+    [
+        ("abc", 0, ""),
+        ("abc", -1, ""),
+        ("abc", 3, "abc"),
+        ("abc", 10, "abc"),
+        ("abcdef", 4, "abcd"),
+        ("aé", 2, "a"),  # 'é' needs two bytes; cut mid-character
+        ("aé", 3, "aé"),
+        ("日本語", 7, "日本"),
+        ("😀", 3, ""),  # nothing decodable fits
+    ],
+)
+def test_utf8_prefix(value: str, limit: int, expected: str) -> None:
+    assert core._utf8_prefix(value, limit) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("", 0),
+        ("a", 1),
+        ("a\n", 1),
+        ("a\nb", 2),
+        ("a\r\nb\r\n", 2),
+        ("a\n\nb", 3),
+        ("a\x0bb\x0cc d", 4),
+        ("\n", 1),
+    ],
+)
+def test_line_count_matches_splitlines(value: str, expected: int) -> None:
+    assert core._line_count(value) == expected
+    assert core._line_count(value) == len(value.splitlines())
+
+
+def test_compare_text_baseline() -> None:
+    result = core.compare_text("hello", None, max_diff_lines=10)
+    assert result == {
+        "status": "baseline",
+        "sha256": hashlib.sha256(b"hello").hexdigest(),
+        "previous_sha256": "",
+        "diff": "",
+        "diff_truncated": False,
+    }
+
+
+def test_compare_text_unchanged() -> None:
+    result = core.compare_text("same\ntext", "same\ntext", max_diff_lines=10)
+    digest = hashlib.sha256(b"same\ntext").hexdigest()
+    assert result["status"] == "unchanged"
+    assert result["sha256"] == result["previous_sha256"] == digest
+    assert result["diff"] == ""
+    assert result["diff_truncated"] is False
+
+
+def test_compare_text_changed_renders_unified_diff() -> None:
+    result = core.compare_text("a\nB\nc", "a\nb\nc", max_diff_lines=50)
+    assert result["status"] == "changed"
+    assert result["sha256"] == hashlib.sha256(b"a\nB\nc").hexdigest()
+    assert result["previous_sha256"] == hashlib.sha256(b"a\nb\nc").hexdigest()
+    assert result["diff_truncated"] is False
+    assert (
+        result["diff"] == "--- previous\n+++ current\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_diff_lines": 0}, "numeric limits must be positive"),
+        ({"max_diff_lines": 1, "max_diff_bytes": 0}, "numeric limits must be positive"),
+    ],
+)
+def test_compare_text_rejects_nonpositive_limits(
+    kwargs: dict[str, int], message: str
+) -> None:
+    with pytest.raises(MonitorError, match=message):
+        core.compare_text("a", "b", **kwargs)
+
+
+def test_compare_text_truncates_by_lines() -> None:
+    current = "\n".join(f"new{i}" for i in range(20))
+    previous = "\n".join(f"old{i}" for i in range(20))
+    result = core.compare_text(current, previous, max_diff_lines=5)
+    assert result["diff_truncated"] is True
+    assert str(result["diff"]).splitlines() == [
+        "--- previous",
+        "+++ current",
+        "@@ -1,20 +1,20 @@",
+        "-old0",
+        "-old1",
+    ]
+
+
+def test_compare_text_truncates_by_bytes_on_character_boundary() -> None:
+    # Header + hunk + "-x" occupy 39 bytes; "\n+日本語" then straddles the limit.
+    cut = core.compare_text("日本語", "x", max_diff_lines=50, max_diff_bytes=42)
+    assert cut["diff_truncated"] is True
+    assert cut["diff"] == "--- previous\n+++ current\n@@ -1 +1 @@\n-x\n+"
+    one = core.compare_text("日本語", "x", max_diff_lines=50, max_diff_bytes=44)
+    assert str(one["diff"]).endswith("\n+日")
+    assert one["diff_truncated"] is True
+
+
+def test_compare_text_untruncated_when_diff_fits_exactly() -> None:
+    full = core.compare_text("b", "a", max_diff_lines=50)
+    size = len(str(full["diff"]).encode("utf-8"))
+    exact = core.compare_text("b", "a", max_diff_lines=50, max_diff_bytes=size)
+    assert exact["diff"] == full["diff"]
+    assert exact["diff_truncated"] is False
+    short = core.compare_text("b", "a", max_diff_lines=50, max_diff_bytes=size - 1)
+    assert short["diff_truncated"] is True
+
+
+def test_compare_text_complexity_limit_omits_diff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core, "_DEFAULT_MAX_DIFF_COMPLEXITY", 5)
+    result = core.compare_text("a\nb\nc", "d\ne\nf", max_diff_lines=50)
+    assert result["status"] == "changed"
+    assert result["diff_truncated"] is True
+    assert result["diff"] == (
+        "--- previous\n+++ current\n@@ diff omitted: complexity limit exceeded @@"
+    )
+
+
+def test_bounded_diff_complexity_marker_respects_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core, "_DEFAULT_MAX_DIFF_COMPLEXITY", 0)
+    by_lines, flag = core._bounded_diff("a", "b", max_diff_lines=2, max_diff_bytes=999)
+    assert (by_lines, flag) == ("--- previous\n+++ current", True)
+    by_bytes, flag = core._bounded_diff("a", "b", max_diff_lines=9, max_diff_bytes=8)
+    assert (by_bytes, flag) == ("--- prev", True)
+
+
+def _marker(url: str) -> str:
+    return f"[a:href:sha256:{hashlib.sha256(url.encode()).hexdigest()}]"
+
+
+def test_compare_text_navigation_marker_order_is_incidental_when_enabled() -> None:
+    a, b = _marker("https://example.com/a"), _marker("https://example.com/b")
+    previous = f"Body text\n{a}\n{b}"
+    current = f"Body text\n{b}\n{a}"
+    plain = core.compare_text(current, previous, max_diff_lines=20)
+    assert plain["status"] == "changed"
+    nav = core.compare_text(
+        current, previous, max_diff_lines=20, compare_navigation_markers=True
+    )
+    assert nav["status"] == "unchanged"
+    assert nav["sha256"] == hashlib.sha256(current.encode()).hexdigest()
+    assert nav["previous_sha256"] == hashlib.sha256(previous.encode()).hexdigest()
+
+
+def test_compare_text_navigation_marker_set_change_is_still_changed() -> None:
+    a, b = _marker("https://example.com/a"), _marker("https://example.com/b")
+    nav = core.compare_text(
+        f"Body\n{a}\n{b}",
+        f"Body\n{a}",
+        max_diff_lines=20,
+        compare_navigation_markers=True,
+    )
+    assert nav["status"] == "changed"
+    assert b in str(nav["diff"])
+
+
+def test_navigation_comparison_view_marker_only_text_is_manifest_suffix() -> None:
+    a = _marker("https://example.com/a")
+    *_, is_suffix = core._navigation_comparison_view(f"\n{a}\n\n")
+    assert is_suffix is True
