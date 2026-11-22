@@ -1602,7 +1602,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
-    { name = "semgrep" },
+    { name = "semgrep", specifier = ">=1.186.0" },
 ]
 
 [[package]]
