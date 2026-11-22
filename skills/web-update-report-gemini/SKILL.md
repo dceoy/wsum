@@ -266,8 +266,11 @@ if the user reports another run is active, stop.
    `<target_id>-pending-<hash>.txt` in the `snapshots` subfolder.
    Load it and the baseline snapshot, re-run `compare` to regenerate
    the diff, and finish its materiality judgment (step 6) before
-   fetching anything new. If either file is missing, clear the
-   pending status by re-observing the group in step 4 and note it.
+   fetching anything new. Keep each successfully resumed candidate for
+   steps 7–9 and exclude its group from the fresh observations in step 4;
+   report and advance the saved candidate before a later run fetches
+   that group again. If either file is missing, clear the pending
+   status by re-observing the group in step 4 and note it.
 3. **Read targets.** Groups the script marks `skip_disabled` are set
    to `skipped` only if their `last_status` is not already
    `skipped`; do not fetch them.
@@ -304,7 +307,10 @@ if the user reports another run is active, stop.
      `unchanged`. Keep the stored hash, snapshot, and summary.
    - `changed`: decide materiality once, from the script's bounded
      `diff`, the group's `keywords`, the candidate summary, and the
-     optional context. Navigation, counters, timestamps, and other
+     optional context. If `diff_truncated` leaves the change unclear,
+     inspect the complete baseline and candidate snapshots before
+     deciding. If the full content cannot be reviewed, park the
+     candidate as `pending` and leave the baseline unchanged. Navigation, counters, timestamps, and other
      wording-only diffs are not material. When the diff is dominated
      by newly added link markers, browsing may open at most **5** of
      the newly added links from `normalize`'s `links` as review
